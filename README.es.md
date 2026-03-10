@@ -1,5 +1,7 @@
 # C++ Toy-level Storage Service Design Document
 
+**English** | [简体中文](README.md)
+
 ## 1. Introduction
 
 A Toy-Level File Storage Service Sys(Hereinafter referred to as ”TLFSS“) that comprises four core modules:
