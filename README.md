@@ -270,19 +270,19 @@ private:
 
  1：实现公共基础模块（common）
 
-- 1.1: 实现socket.h/cpp，包含Socket类的bind/listen/accept/connect/read/write/read_line/write_line方法
-- 1.2: 实现thread_pool.h/cpp，包含线程池的submit任务提交和工作线程管理
-- 1.3: 实现io_context.h/cpp，包含事件循环run/stop/post方法
-- 1.4: 实现config.h/cpp，包含FTPServerConfig/GatewayConfig/MonitorConfig结构体及YAML加载/保存
-- 1.5：实现reactor多反应式+线程池模型（在实际环境中使用第三方库更好），在此项目当中为了解掌握该模型选择自我实现
+- 1.1: TODO 实现socket.h/cpp，包含Socket类的bind/listen/accept/connect/read/write/read_line/write_line方法
+- 1.2: TODO 实现thread_pool.h/cpp，包含线程池的submit任务提交和工作线程管理
+- 1.3: TODO 实现io_context.h/cpp，包含事件循环run/stop/post方法
+- 1.4: TODO 实现config.h/cpp，包含FTPServerConfig/GatewayConfig/MonitorConfig结构体及YAML加载/保存
+- 1.5：TODO 实现reactor多反应式+线程池模型（在实际环境中使用第三方库更好），在此项目当中为了解掌握该模型选择自我实现
 
  2：实现文件存储服务（ftp）
 
-- 2.1: 简单实现，服务器端启动，然后启动客户端，通过客户端可以输入cmd命令进行服务器上的文件处理能力
-- 2.2: 实现鉴权功能
+- 2.1: TODO 简单实现，服务器端启动，然后启动客户端，通过客户端可以输入cmd命令进行服务器上的文件处理能力
+- 2.2: TODO 实现鉴权功能
 - 2.3: TODO
 - 2.4: TODO
-- 2.5：TODO
+- 2.5: TODO
   
 ## 11.写在最后
 
