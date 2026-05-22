@@ -40,8 +40,6 @@ public:
     static void flush(const std::string &name = "tldss");
     static void shutdown();
 
-private:
-    static void registerLogger(LoggerPtr logger);
 };
 
 #define LOG_TRACE(...)    SPDLOG_LOGGER_TRACE(Logger::get(), __VA_ARGS__)

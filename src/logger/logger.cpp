@@ -9,7 +9,6 @@ void Logger::initConsole(const std::string &name,
     logger->set_level(level);
     logger->set_pattern(pattern);
     spdlog::set_default_logger(logger);
-    registerLogger(logger);
 }
 
 void Logger::initFile(const std::string &name,
@@ -22,7 +21,6 @@ void Logger::initFile(const std::string &name,
     logger->set_level(level);
     logger->set_pattern(pattern);
     spdlog::set_default_logger(logger);
-    registerLogger(logger);
 }
 
 void Logger::initRotating(const std::string &name,
@@ -37,7 +35,6 @@ void Logger::initRotating(const std::string &name,
     logger->set_level(level);
     logger->set_pattern(pattern);
     spdlog::set_default_logger(logger);
-    registerLogger(logger);
 }
 
 void Logger::initBoth(const std::string &name,
@@ -52,7 +49,6 @@ void Logger::initBoth(const std::string &name,
     logger->set_level(level);
     logger->set_pattern(pattern);
     spdlog::set_default_logger(logger);
-    registerLogger(logger);
 }
 
 Logger::LoggerPtr Logger::get(const std::string &name)
@@ -91,9 +87,4 @@ void Logger::flush(const std::string &name)
 void Logger::shutdown()
 {
     spdlog::shutdown();
-}
-
-void Logger::registerLogger(LoggerPtr logger)
-{
-    spdlog::register_logger(logger);
 }
