@@ -23,7 +23,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # 输出目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
@@ -205,18 +205,6 @@ target_link_libraries(storage-service
 )
 
 # =============================================================================
-# 编译完成后拷贝到项目根目录（方案 2）
-# =============================================================================
-
-add_custom_target(copy_bin_to_root ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}   # bin 目录
-        ${CMAKE_SOURCE_DIR}/bin             # 拷贝到项目根目录下 bin
-    DEPENDS storage-service                # 依赖可执行文件，确保先编译
-    COMMENT "Copy entire bin directory to project root"
-)
-
-# =============================================================================
 # 测试
 # =============================================================================
 
@@ -242,4 +230,3 @@ message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "Build tests: ${BUILD_TESTS}")
 message(STATUS "===========================")
-
