@@ -5,6 +5,8 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+
+#include "common/common.h"
 #include "logger/logger.h"
 #include "spdlog/common.h"
 /*
