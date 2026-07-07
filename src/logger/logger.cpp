@@ -1,4 +1,4 @@
-#include "../../inc/logger/logger.h"
+#include "logger/logger.h"
 
 void Logger::initConsole(const std::string &name,
                          spdlog::level::level_enum level,
@@ -42,9 +42,9 @@ void Logger::initBoth(const std::string &name,
                       spdlog::level::level_enum level,
                       const std::string &pattern)
 {
-    auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(filepath);
-    std::vector<spdlog::sink_ptr> sinks{consoleSink, fileSink};
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(filepath);
+    std::vector<spdlog::sink_ptr> sinks{console_sink, file_sink};
     auto logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
     logger->set_level(level);
     logger->set_pattern(pattern);

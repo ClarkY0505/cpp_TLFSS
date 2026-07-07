@@ -1,9 +1,9 @@
 #pragma once
 
-#include "../../third/spdlog/spdlog.h"
-#include "../../third/spdlog/sinks/stdout_color_sinks.h"
-#include "../../third/spdlog/sinks/basic_file_sink.h"
-#include "../../third/spdlog/sinks/rotating_file_sink.h"
+#include "spdlog/spdlog.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/basic_file_sink.h"
+#include "spdlog/sinks/rotating_file_sink.h"
 #include <memory>
 #include <string>
 #include <vector>

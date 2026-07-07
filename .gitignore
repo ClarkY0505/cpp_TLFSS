@@ -39,3 +39,12 @@
 
 # debug information files
 *.dwo
+
+# Build outputs
+/build/
+/bin/
+
+# CMake and LLVM tooling
+/compile_commands.json
+/.cache/
+.clangd/

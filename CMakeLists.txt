@@ -1,3 +1,10 @@
+#如果只是编辑已有目标已经包含的 .h/.cpp，不需要重新 cmake --preset debug，直接构建即可：
+# cmake --build --preset debug
+# 如果是新增 .cpp 文件，通常需要把它加入对应的 CMakeLists.txt，然后重新配置一次：
+# cmake --preset debug
+# cmake --build --preset debug
+
+
 cmake_minimum_required(VERSION 3.16)
 project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES CXX)
 
@@ -162,6 +169,7 @@ target_link_libraries(proto_lib PUBLIC
 
 include_directories(
     ${CMAKE_SOURCE_DIR}/inc
+    ${CMAKE_SOURCE_DIR}/third
     ${GENERATED_DIR}
     ${OPENSSL_INCLUDE_DIR}
 )

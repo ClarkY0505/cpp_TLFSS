@@ -1,0 +1,19 @@
+BasedOnStyle: Google
+
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+
+ColumnLimit: 100
+
+AccessModifierOffset: -1
+
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+BreakBeforeBraces: Attach
+PointerAlignment: Left
+
+SortIncludes: true
+IncludeBlocks: Preserve

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef __INC_COMMON_COMMON_H__
+#define __INC_COMMON_COMMON_H__
 
 class common
 {
@@ -10,3 +11,4 @@ private:
 
 };
 
+#endif // __INC_COMMON_COMMON_H__
