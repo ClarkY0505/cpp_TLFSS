@@ -14,6 +14,11 @@ AllowShortLoopsOnASingleLine: false
 
 BreakBeforeBraces: Attach
 PointerAlignment: Left
+DerivePointerAlignment: false
 
 SortIncludes: true
 IncludeBlocks: Preserve
+
+LineEnding: LF
+InsertNewlineAtEOF: true
+MaxEmptyLinesToKeep: 1
