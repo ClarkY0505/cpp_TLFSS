@@ -6,7 +6,7 @@
 
 
 cmake_minimum_required(VERSION 3.16)
-project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES CXX)
+project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES C CXX)
 
 # C++17 标准
 set(CMAKE_CXX_STANDARD 17)
