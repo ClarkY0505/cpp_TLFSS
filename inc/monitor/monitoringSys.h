@@ -42,6 +42,13 @@ typedef struct sm_cb_s{
 #define SM_TIMER_RECURE 0x01   // fire every delay ms
 void *sys_mon_timer_set(SysMonCallback_t *sm_cb, uint32_t flags, int32_t ms_delay);
 
+// async I/O contract
+// Register fd with the event loop; cb fires when fd becomes readable.
+// returns an opaque handle (pass to aio_remove), or NULL on failure.
+void *sys_mon_aio_add(SysMonCallback_t *sm_cb,int fd);
+int sys_mon_aio_remove(void *handle);
+
+
 // data model (stable; used once DB/report layer lands)
 #define SM_DESCR_SIZE 64
 typedef struct sm_value_s{
