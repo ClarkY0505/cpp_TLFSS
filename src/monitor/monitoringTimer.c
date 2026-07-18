@@ -4,7 +4,7 @@
 #include <bits/types/struct_timeval.h>
 #include <stddef.h>
 #include <stdlib.h> 
-#include <string.h>
+/* #include <string.h> */
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>

@@ -13,6 +13,7 @@
 #include <ctime>
 #include <utility>
 
+using namespace TLSSLOG;
 /*
  * @brief Create an IPv4 TCP socket and take ownership of its file descriptor.
  * */

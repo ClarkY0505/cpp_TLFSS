@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <time.h>
+/* #include <time.h> */
 
 #ifndef UNUSED
 #define UNUSED(x) (void)(x)

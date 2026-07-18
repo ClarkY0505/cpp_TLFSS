@@ -8,11 +8,11 @@ using namespace std;
 
 int main()
 {
-    Logger::initFile("net", "../logs/net.log", spdlog::level::err);
+    TLSSLOG::Logger::initFile("net", "../logs/net.log", spdlog::level::err);
     int sockfd = -1;
     TLSSNET::tcp_init("127.0.0.1",12345,sockfd);
     cout << "hello world!!!!!" << endl;
-    Logger::shutdown();
+    TLSSLOG:: Logger::shutdown();
     return 0;
 }
 

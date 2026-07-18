@@ -40,7 +40,7 @@ class Socket : public NoCopy {
 
  private:
   int _fd;
-  TLSSNET::STATUS _status; 
+  TLSSNET::STATUS _status;
 };
 
 class InetAddress {
@@ -62,6 +62,19 @@ class InetAddress {
  private:
   struct sockaddr_in _addr;
   TLSSNET::STATUS _status;
+};
+
+class Acceptor {
+ public:
+  Acceptor(const std::string& ip, uint16_t port);
+  Acceptor(const Acceptor&) = default;
+  Acceptor& operator=(const Acceptor&) = default;
+  Acceptor(Acceptor&&) noexcept = default;
+  Acceptor& operator=(Acceptor&&) noexcept = default;
+
+  ~Acceptor();
+
+  void ready();
 };
 
 STATUS tcp_init(const std::string& ip, uint16_t port, int& sockfd);
