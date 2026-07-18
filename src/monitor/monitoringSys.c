@@ -4,6 +4,7 @@
 
 #include <asm-generic/errno-base.h>
 #include <bits/types/struct_timeval.h>
+#include <limits.h>
 #include <linux/stat.h>
 #include <errno.h>
 #include <unistd.h>
@@ -18,14 +19,20 @@ typedef struct SysMonAIO_s{
     int fd;
     int flags;
 #define SMA_DELAY_DEL 0x01
-    SysMonCallback_t cb;
+    /* SysMonCallback_t cb; */
+    /*
+     * SysMonCB_Enh_t was SysMonCallback_t; now the enhanced 
+     * wrapper so aio activations share the same stats/
+     * thread path as timers
+     * */
+    SysMonCB_Enh_t cb;
 } SysMonAIO_t;
 
 typedef struct{
     char name[32];
     bool runninng;
-    SysMonAIO_t *aio;
-    int pipe[2];
+    SysMonAIO_t *aio; // list of registered fds
+    int pipe[2];      // self-pipe [0] read; [1] write
 } SysMonCommon_t;
 
 // global contest (as in the original)
@@ -38,6 +45,7 @@ void sm_wakeup(void){
     }
 }
 
+// the read end's callback: just drain whatever woke us
 static int wakeup_cb(void *arg[]){
     int *fd = (int *)arg[0];
     char buf[16];
@@ -52,8 +60,16 @@ void *sys_mon_aio_add(SysMonCallback_t *sm_cb, int fd){
         return NULL;
     }
     aio->fd = fd;
-    aio->cb = *sm_cb;
+    // embed user callback in the wrapper 
+    aio->cb.sme_cb = *sm_cb;
+    // first ample sets the min  
+    aio->cb.sme_time_min = UINT_MAX;
+    // register for stats reporting
+    sm_link_cb(&aio->cb);
+    // push front
+    aio->next = gsm->aio;
     gsm->aio = aio;
+    // let select() re-evaluate its fd_set
     sm_wakeup();
     return aio;
 }
@@ -77,7 +93,7 @@ int sys_mon_aio_remove(void *handle){
  * */
 static int sys_mon_aio_process(struct timeval *sleep){
     fd_set fds;
-    int nfds;
+    int nfds = -0;
 
     FD_ZERO(&fds);
 
@@ -105,11 +121,19 @@ static int sys_mon_aio_process(struct timeval *sleep){
         return -1;
     }
     // pass 2: fire the readable ones
+
     for(SysMonAIO_t *aio = gsm->aio; aio; aio = aio->next){
         if ((aio->flags & SMA_DELAY_DEL) == 0 && FD_ISSET(aio->fd, &fds)){
-            if(aio->cb.cb_callback){
-                (void)(*aio->cb.cb_callback)(aio->cb.cb_arg);
-            }
+            /* -------------- M2 -------------------------- :
+             * if(aio->cb.cb_callback){
+             * (void)(*aio->cb.cb_callback)(aio->cb.cb_arg);
+             * } */
+
+            /* -------------- M3 --------------------------:
+             * was a direct (*aio->cb.cb_callback)(...) call, now routed
+             * through sm_activate_cb for shared timing stats + thread mode.
+             * */
+            sm_activate_cb(&aio->cb);
         }
     }
     return 0;
@@ -163,12 +187,19 @@ int sys_mon_run(void *arg){
         sys_mon_aio_process(&sleep);
     }
 
+    // M3 : join any worker threads first 
+    sm_stop_threads();
+    // M3 : dump stats BEFORE cleadnup unlinks callbacks from the registry
+    sm_print_stats_all_cb();
+
     sys_mon_timer_cleanup();
     SM_LOG("System Monitor '%s' stopped", g->name);
 
     // free remaining aio nodes + pipe
     for(SysMonAIO_t * aio = g->aio; aio ;){
         SysMonAIO_t *n = aio->next;
+        // M3 : drop from stats registry before free
+        sm_unlink_cb(&aio->cb);
         free(aio);
         aio = n;
     }

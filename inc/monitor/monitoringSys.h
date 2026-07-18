@@ -10,7 +10,6 @@
 #define UNUSED(x) (void)(x)
 #endif
 
-
 #ifdef __cplusplus
 extern "C"{
 #endif
@@ -40,6 +39,7 @@ typedef struct sm_cb_s{
 
 #define SM_TIMER_ONCE 0x00     // fire once after delay
 #define SM_TIMER_RECURE 0x01   // fire every delay ms
+#define SM_TIMER_THREAD 0x02   // run the callback in its own thread
 void *sys_mon_timer_set(SysMonCallback_t *sm_cb, uint32_t flags, int32_t ms_delay);
 
 // async I/O contract
