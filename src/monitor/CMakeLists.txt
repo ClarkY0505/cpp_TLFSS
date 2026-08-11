@@ -18,6 +18,10 @@ if(BUILD_TESTS)
     function(add_monitor_test target source)
         add_executable(${target} ${source})
         target_link_libraries(${target} PRIVATE monitor_lib)
+        target_compile_options(${target} PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+            $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-UNDEBUG>
+        )
         add_test(NAME ${target} COMMAND ${target})
     endfunction()
 
