@@ -13,3 +13,25 @@ target_include_directories(monitor_lib PUBLIC
 target_link_libraries(monitor_lib PUBLIC
     Threads::Threads
 )
+
+if(BUILD_TESTS)
+    function(add_monitor_test target source)
+        add_executable(${target} ${source})
+        target_link_libraries(${target} PRIVATE monitor_lib)
+        add_test(NAME ${target} COMMAND ${target})
+    endfunction()
+
+    add_monitor_test(monitor_aio_manager_test test/aio_manager_test.cpp)
+    add_monitor_test(monitor_callback_registry_test test/callback_registry.cpp)
+    add_monitor_test(monitor_callback_test test/cb_test.cpp)
+    add_monitor_test(monitor_engine_aio_test test/engine_aio_test.cpp)
+    add_monitor_test(monitor_engine_loop_test test/engine_loop_test.cpp)
+    add_monitor_test(monitor_engine_test test/engine_test.cpp)
+    add_monitor_test(monitor_header_split_test test/header_split_test.cpp)
+    add_monitor_test(monitor_timer_manager_add_test test/timer_manager_add_test.cpp)
+    add_monitor_test(monitor_timer_manager_check_test test/timer_manager_check_test.cpp)
+    add_monitor_test(monitor_timer_manager_fixed_cadence_test test/timer_manager_fixed_cadence_test.cpp)
+    add_monitor_test(monitor_timer_manager_lifecycle_test test/timer_manager_lifecycle_test.cpp)
+    add_monitor_test(monitor_timer_types_test test/timer_types_test.cpp)
+    add_monitor_test(monitor_wake_pipe_test test/wake_pipe_test.cpp)
+endif()
