@@ -7,7 +7,7 @@
 `add_subdirectory(src/monitor)` 引入该目录，并要求存在名为
 `monitor_lib` 的链接目标，因此 CMake 在配置阶段失败。
 
-新版 monitor 还包含 14 个各自带有 `main()` 的断言测试。这些测试不依赖
+新版 monitor 还包含 13 个各自带有 `main()` 的断言测试。这些测试不依赖
 GoogleTest，但顶层配置当前会在找不到 GoogleTest 时把 `BUILD_TESTS` 改为
 `OFF`，导致无法独立启用 monitor 测试。部分测试还引用了迁移前的
 `../*.h` 路径，而头文件目前位于 `inc/monitor`。
