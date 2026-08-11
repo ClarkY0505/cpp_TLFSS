@@ -76,13 +76,12 @@ endif()
 # GTest (可选)
 option(BUILD_TESTS "Build unit tests" ON)
 if(BUILD_TESTS)
+    enable_testing()
     find_package(GTest QUIET)
     if(GTest_FOUND)
         message(STATUS "GTest found")
-        enable_testing()
     else()
-        message(STATUS "GTest not found, tests will be skipped")
-        set(BUILD_TESTS OFF)
+        message(STATUS "GTest not found, GTest-based tests will be skipped")
     endif()
 endif()
 
@@ -208,7 +207,7 @@ target_link_libraries(storage-service
 # 测试
 # =============================================================================
 
-if(BUILD_TESTS)
+if(BUILD_TESTS AND GTest_FOUND)
     add_subdirectory(tests)
 endif()
 
