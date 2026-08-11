@@ -17,6 +17,9 @@ target_link_libraries(monitor_lib PUBLIC
 if(BUILD_TESTS)
     function(add_monitor_test target source)
         add_executable(${target} ${source})
+        set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test"
+        )
         target_link_libraries(${target} PRIVATE monitor_lib)
         target_compile_options(${target} PRIVATE
             $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
