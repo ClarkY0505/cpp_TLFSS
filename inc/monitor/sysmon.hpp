@@ -1,5 +1,0 @@
-#ifndef __INC_MONITOR_SYSMON_HPP__
-#define __INC_MONITOR_SYSMON_HPP__
-
-
-#endif // __INC_MONITOR_SYSMON_HPP__
