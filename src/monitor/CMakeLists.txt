@@ -14,7 +14,7 @@ target_link_libraries(monitor_lib PUBLIC
     Threads::Threads
 )
 
-add_executable(m3-demo client.cpp)
+add_executable(m3-demo m3-demo.cpp)
 target_link_libraries(m3-demo PRIVATE monitor_lib)
 
 if(BUILD_TESTS)
