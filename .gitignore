@@ -43,6 +43,7 @@
 # Build outputs
 /build/
 /bin/
+/docs/
 
 # CMake and LLVM tooling
 /compile_commands.json

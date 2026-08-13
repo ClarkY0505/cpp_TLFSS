@@ -1,8 +1,12 @@
 #include "engine.h"
-#include "engine_type.h"
+#include "aio_manager.h"
+#include "callback_registry.h"
+#include "timer_manager.h"
 #include "wake_pipe.h"
-#include <algorithm>
+
+
 #include <atomic>
+#include <bits/types/struct_timeval.h>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -13,6 +17,49 @@
 #include <sys/select.h>
 #include <utility>
 namespace TLSSMON {
+
+namespace EngineUtil{
+constexpr bool accepts_registration(EnginePhase phase) noexcept
+{
+    return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
+}
+
+}
+
+struct MonContext final {
+    /**
+     * @brief 根据监控配置创建运行上下文，并建立 AIO 管理器与回调注册表、
+     *        唤醒管道之间的关联。
+     *        Creates the runtime context from the monitoring configuration and
+     *        connects the AIO manager with the callback registry and wakeup pipe.
+     *
+     * @param config[in] 监控配置。配置内容会被移动到上下文中。
+     *               Monitoring configuration whose contents are moved into the context.
+     */
+    explicit MonContext(MonConfig config)
+        : _name(std::move(config._name)),
+        _cli_port(config._port),
+        _software_id(config._id),
+        _aio(_cbs,_wakeup),
+        _timers(_cbs,_wakeup)
+    {
+    }
+
+    MonContext(const MonContext&) = delete;
+    MonContext& operator=(const MonContext&) = delete;
+
+    const std::string _name;
+    const std::uint16_t _cli_port;
+    const std::uint8_t _software_id;
+
+    CallbackRegistry _cbs;
+    WakeupPipe _wakeup;
+    AioManager _aio;
+    TimerManager _timers;
+
+    std::optional<AioHandle> _wakeup_handle;
+};
+
 Engine::Engine(MonConfig config):_config(std::move(config)){}
 Engine::~Engine() = default;
 
@@ -105,29 +152,9 @@ ENGINESTATE Engine::run(){
     ENGINESTATE result = ENGINESTATE::SUCCESSFUL;
 
     while(_phase.load(std::memory_order_acquire) == EnginePhase::RUNNING){
-        /* fd_set read_fds; */
-        /* FD_ZERO(&read_fds); */
-        /* FD_SET(wakeup_fd, &read_fds); */
-
-        /* const int ready_count = ::select(wakeup_fd + 1, &read_fds, nullptr, nullptr,nullptr); */
-
-        /* if(ready_count < 0){ */
-        /*     if(EINTR == errno){ */
-        /*         continue; */
-        /*     } */
-        /*     result = ENGINESTATE::WAITFAILED; */
-        /*     break; */
-        /* } */
-
-        /* if(ready_count > 0 && FD_ISSET(wakeup_fd, &read_fds)){ */
-        /*     const PIPESTATUS pipe_status = context->_wakeup.drain(); */
-        /*     if( PIPESTATUS::SUCCESSFUL != pipe_status){ */
-        /*         result = ENGINESTATE::PIPEERROR; */
-        /*         break; */
-        /*     } */
-        /* } */
-
-        if(context->_aio.process(nullptr) < 0){
+        timeval timeout{};
+        context->_timers.check(timeout);
+        if(context->_aio.process(&timeout) < 0){
             result = ENGINESTATE::WAITFAILED;
             break;
         }
@@ -140,16 +167,17 @@ ENGINESTATE Engine::run(){
     lock.unlock();
     context->_cbs.stop_workers();
     context->_cbs.print_stats();
+    context->_timers.cleanup();
     context->_aio.cleanup();
 
     lock.lock();
+    _context->_wakeup.pipe_close();
     _phase.store(EnginePhase::STOPPED, std::memory_order_release);
 
     return result;
 }
 
 void Engine::stop(){
-    WakeupPipe* wakeup = nullptr;
     {
         std::lock_guard<std::mutex> lock(_control_mutex);
         EnginePhase expected = EnginePhase::RUNNING;
@@ -160,15 +188,17 @@ void Engine::stop(){
             return;
         }
 
-        if (_context != nullptr) {
-            wakeup = &_context->_wakeup;
+        if (_context == nullptr) {
+            return;
+        }
+        // status is STOPPING , now new add/remove will be rejected
+        const PIPESTATUS wakeup_status = _context->_wakeup.wakeup();
+        if(wakeup_status != PIPESTATUS::SUCCESSFUL){
+            // TODO Log
+            (void)wakeup_status;
         }
     }
 
-    // status is STOPPING , now new add/remove will be rejected
-    if(wakeup != nullptr){
-        (void)wakeup->wakeup();
-    }
 }
 
 EnginePhase Engine::get_phase() const noexcept{
@@ -179,7 +209,7 @@ std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb){
     std::lock_guard<std::mutex> lock(_control_mutex);
     const EnginePhase phase = _phase.load(std::memory_order_acquire);
 
-    if(phase != EnginePhase::READY && phase != EnginePhase::RUNNING){
+    if(!EngineUtil::accepts_registration(phase)){
         return std::nullopt;
     }
 
@@ -203,7 +233,7 @@ bool Engine::remove_aio(AioHandle handle){
     std::lock_guard<std::mutex> lock(_control_mutex);
 
     const EnginePhase phase = _phase.load(std::memory_order_acquire);
-    if(phase != EnginePhase::READY && phase != EnginePhase::RUNNING){
+    if(!EngineUtil::accepts_registration(phase)){
         return false;
     }
 
@@ -216,6 +246,21 @@ bool Engine::remove_aio(AioHandle handle){
     }
 
     return _context->_aio.remove(handle);
+}
+
+std::optional<TimerHandle> Engine::set_timer(MonCallback mcb, TimerFlags flags, std::chrono::milliseconds delay){
+    std::lock_guard<std::mutex> lock(_control_mutex);
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+
+    if(!EngineUtil::accepts_registration(phase)){
+        return std::nullopt;
+    }
+
+    if(_context == nullptr){
+        return std::nullopt;
+    }
+
+    return _context->_timers.add(std::move(mcb), flags, delay);
 }
 
 } // namespace TLSSMON

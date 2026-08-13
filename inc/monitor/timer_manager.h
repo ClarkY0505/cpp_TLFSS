@@ -2,11 +2,13 @@
 #define __TIMER_MANAGER_H__
 
 #include "timer_types.h"
+
 #include <sys/time.h>
 #include <chrono>
 #include <cstdint>
 #include <list>
 #include <mutex>
+#include <memory>
 #include <optional>
 namespace TLSSMON{
 

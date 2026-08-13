@@ -5,6 +5,8 @@
 
 namespace TLSSMON {
 
+class Engine;
+
 enum class PIPESTATUS : int {
     OPENFAILED = -600,
     WAKEUPFAILED = -601,
@@ -39,6 +41,8 @@ public:
     PipeState state() const noexcept;
 
 private:
+    friend class Engine;
+    void pipe_close() noexcept;
     static PIPESTATUS set_non_blocking(int fd) noexcept;
     static PIPESTATUS set_close_on_exec(int fd) noexcept;
 

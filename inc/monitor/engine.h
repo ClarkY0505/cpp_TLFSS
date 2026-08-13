@@ -2,11 +2,10 @@
 #define TLSSMON_ENGINE_H
 
 #include "aio_types.h"
-#include "aio_manager.h"
-#include "callback_registry.h"
 #include "engine_type.h"
-#include "wake_pipe.h"
+#include "timer_types.h"
 
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -30,37 +29,7 @@ enum class ENGINESTATE : int{
     SUCCESSFUL         = 0
 };
 
-struct MonContext final {
-    /**
-     * @brief 根据监控配置创建运行上下文，并建立 AIO 管理器与回调注册表、
-     *        唤醒管道之间的关联。
-     *        Creates the runtime context from the monitoring configuration and
-     *        connects the AIO manager with the callback registry and wakeup pipe.
-     *
-     * @param config[in] 监控配置。配置内容会被移动到上下文中。
-     *               Monitoring configuration whose contents are moved into the context.
-     */
-    explicit MonContext(MonConfig config)
-        : _name(std::move(config._name)),
-        _cli_port(config._port),
-        _software_id(config._id),
-        _aio(_cbs,_wakeup)
-    {
-    }
-
-    MonContext(const MonContext&) = delete;
-    MonContext& operator=(const MonContext&) = delete;
-
-    const std::string _name;
-    const std::uint16_t _cli_port;
-    const std::uint8_t _software_id;
-
-    CallbackRegistry _cbs;
-    WakeupPipe _wakeup;
-    AioManager _aio;
-
-    std::optional<AioHandle> _wakeup_handle;
-};
+struct MonContext;
 
 /**
  * @brief 监控引擎的核心类，负责初始化资源、运行事件循环以及管理 AIO 回调。
@@ -139,6 +108,11 @@ public:
      *       This function should normally be called from a dedicated runner thread.
      */
     ENGINESTATE run();
+    /*
+     * @note stop() 原子地提交不可回滚的停止请求，并尽力通过 WakeupPipe 打断 select()；
+     *       唤醒失败不会报告或恢复 RUNNING
+     *       调用方必须通过 runner.join() 确认停止完成。
+     * */
     void stop();
 
     EnginePhase get_phase() const noexcept;
@@ -183,6 +157,8 @@ public:
      *       mean the callback object has already been destroyed.
      */
     bool remove_aio(AioHandle handle);
+
+    std::optional<TimerHandle> set_timer(MonCallback callback, TimerFlags flags, std::chrono::milliseconds delay);
 private:
     // use to control a,b,c and switch operating status
     std::mutex _control_mutex;

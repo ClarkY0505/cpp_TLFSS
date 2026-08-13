@@ -89,4 +89,3 @@
       test_print_stats_contains_callback_name();
       test_null_operations_are_ignored();
   }
-

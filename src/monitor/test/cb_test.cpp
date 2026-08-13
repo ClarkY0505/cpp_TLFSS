@@ -78,4 +78,3 @@
       test_inline_callback();
       test_async_callback();
   }
-

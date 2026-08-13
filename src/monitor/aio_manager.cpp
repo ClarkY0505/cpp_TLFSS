@@ -185,7 +185,7 @@ int AioManager::process(timeval* timeout){
          * 如果 reserve 抛出 bad_alloc，此时 _entries 尚未变化，
          * 不会出现节点已释放但 Registry 尚未注销的问题。
          */
-        armed_entries.resize(_entries.size());
+        armed_entries.reserve(_entries.size());
         for(auto it = _entries.begin(); it != _entries.end(); ){
             AioEntry* const entry = it->get();
             if(entry == nullptr){

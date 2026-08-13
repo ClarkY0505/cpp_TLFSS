@@ -1,24 +1,17 @@
 #include "wake_pipe.h"
 
+#include <atomic>
 #include <cerrno>
+#include <ctime>
 #include <fcntl.h>
 #include <unistd.h>
+#include <utility>
 
 namespace TLSSMON {
 
 WakeupPipe::~WakeupPipe()
-{
-    if (_read_fd >= 0) {
-        ::close(_read_fd);
-        _read_fd = -1;
-    }
-
-    if (_write_fd >= 0) {
-        ::close(_write_fd);
-        _write_fd = -1;
-    }
-
-    _state.store(PipeState::CLOSED, std::memory_order_release);
+{   
+    pipe_close();
 }
 
 PIPESTATUS WakeupPipe::init() noexcept
@@ -149,5 +142,24 @@ PIPESTATUS WakeupPipe::set_close_on_exec(int fd) noexcept
 
     return PIPESTATUS::SUCCESSFUL;
 }
+
+void WakeupPipe::pipe_close() noexcept{
+    const PipeState previous = _state.exchange(PipeState::CLOSED, std::memory_order_acq_rel);
+    if(previous == PipeState::CLOSED){
+        return;
+    }
+
+    const int read_fd = std::exchange(_read_fd, -1);
+    const int write_fd = std::exchange(_write_fd, -1);
+
+    if(read_fd >= 0){
+        ::close(read_fd);
+    }
+
+    if(write_fd >= 0){
+        ::close(write_fd);
+    }
+}
+
 
 } // namespace TLSSMON
