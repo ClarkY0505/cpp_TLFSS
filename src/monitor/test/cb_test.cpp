@@ -1,4 +1,4 @@
-#include "callback_registry.h"
+#include "../callback_registry.h"
 
   #include <cassert>
   #include <chrono>
@@ -78,3 +78,4 @@
       test_inline_callback();
       test_async_callback();
   }
+

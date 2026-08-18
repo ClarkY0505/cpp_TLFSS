@@ -2,6 +2,7 @@ add_library(monitor_lib STATIC
     aio_manager.cpp
     callback_registry.cpp
     engine.cpp
+    monitor_store.cpp
     timer_manager.cpp
     wake_pipe.cpp
 )
@@ -16,6 +17,9 @@ target_link_libraries(monitor_lib PUBLIC
 
 add_executable(m3-demo m3-demo.cpp)
 target_link_libraries(m3-demo PRIVATE monitor_lib)
+
+add_executable(monitor-client client.cpp)
+target_link_libraries(monitor-client PRIVATE monitor_lib)
 
 if(BUILD_TESTS)
     function(add_monitor_test target source)
@@ -39,6 +43,12 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_engine_test test/engine_test.cpp)
     add_monitor_test(monitor_engine_timer_test test/engine_timer_test.cpp)
     add_monitor_test(monitor_header_split_test test/header_split_test.cpp)
+    add_monitor_test(monitor_engine_store_test test/monitor_engine_store_test.cpp)
+    add_monitor_test(monitor_store_basic_test test/monitor_store_basic_test.cpp)
+    add_monitor_test(monitor_store_concurrency_test test/monitor_store_concurrency_test.cpp)
+    add_monitor_test(monitor_store_numeric_test test/monitor_store_numeric_test.cpp)
+    add_monitor_test(monitor_store_query_test test/monitor_store_query_test.cpp)
+    add_monitor_test(monitor_store_string_test test/monitor_store_string_test.cpp)
     add_monitor_test(monitor_timer_manager_add_test test/timer_manager_add_test.cpp)
     add_monitor_test(monitor_timer_manager_check_test test/timer_manager_check_test.cpp)
     add_monitor_test(monitor_timer_manager_fixed_cadence_test test/timer_manager_fixed_cadence_test.cpp)

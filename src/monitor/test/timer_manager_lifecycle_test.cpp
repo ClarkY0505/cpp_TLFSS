@@ -1,6 +1,6 @@
-#include "callback_registry.h"
-#include "timer_manager.h"
-#include "wake_pipe.h"
+#include "../callback_registry.h"
+#include "../timer_manager.h"
+#include "../wake_pipe.h"
 
 using TLSSMON::CallbackRegistry;
 using TLSSMON::TimerManager;
@@ -22,3 +22,4 @@ int main()
 
     return 0;
 }
+
