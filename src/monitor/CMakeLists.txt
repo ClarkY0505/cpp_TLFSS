@@ -18,9 +18,6 @@ target_link_libraries(monitor_lib PUBLIC
 add_executable(m3-demo m3-demo.cpp)
 target_link_libraries(m3-demo PRIVATE monitor_lib)
 
-add_executable(monitor-client client.cpp)
-target_link_libraries(monitor-client PRIVATE monitor_lib)
-
 if(BUILD_TESTS)
     function(add_monitor_test target source)
         add_executable(${target} ${source})
