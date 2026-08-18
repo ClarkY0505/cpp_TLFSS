@@ -1,13 +1,17 @@
-#include "engine.h"
 #include "aio_manager.h"
 #include "callback_registry.h"
+#include "engine.h"
+#include "engine_type.h"
+#include "monitor_data.h"
+#include "monitor_store.h"
 #include "timer_manager.h"
 #include "wake_pipe.h"
 
-
+#include <algorithm>
 #include <atomic>
 #include <bits/types/struct_timeval.h>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -18,13 +22,56 @@
 #include <utility>
 namespace TLSSMON {
 
-namespace EngineUtil{
-constexpr bool accepts_registration(EnginePhase phase) noexcept
-{
+namespace EngineUtil {
+/**
+ * 判断当前 Engine 状态是否接受监控数据写入。
+ *
+ * 只有 READY 和 RUNNING 接受写入。
+ */
+constexpr bool accepts_data_write(EnginePhase phase) noexcept {
     return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
 }
 
+constexpr bool accepts_registration(EnginePhase phase) noexcept {
+    return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
 }
+
+/**
+ * 判断当前 Engine 状态是否允许读取监控数据。
+ *
+ * STOPPING 和 STOPPED 时 MonContext 仍然存在，
+ * 因此最后保存的监控数据仍然可以读取。
+ */
+constexpr bool accepts_data_read(EnginePhase phase) noexcept {
+    return phase == EnginePhase::READY || phase == EnginePhase::RUNNING ||
+        phase == EnginePhase::STOPPING || phase == EnginePhase::STOPPED;
+}
+
+static_assert(!accepts_data_write(EnginePhase::CREATED));
+
+static_assert(!accepts_data_write(EnginePhase::INITIALIZING));
+
+static_assert(accepts_data_write(EnginePhase::READY));
+
+static_assert(accepts_data_write(EnginePhase::RUNNING));
+
+static_assert(!accepts_data_write(EnginePhase::STOPPING));
+
+static_assert(!accepts_data_write(EnginePhase::STOPPED));
+
+static_assert(!accepts_data_read(EnginePhase::CREATED));
+
+static_assert(!accepts_data_read(EnginePhase::INITIALIZING));
+
+static_assert(accepts_data_read(EnginePhase::READY));
+
+static_assert(accepts_data_read(EnginePhase::RUNNING));
+
+static_assert(accepts_data_read(EnginePhase::STOPPING));
+
+static_assert(accepts_data_read(EnginePhase::STOPPED));
+
+} // namespace EngineUtil
 
 struct MonContext final {
     /**
@@ -34,23 +81,21 @@ struct MonContext final {
      *        connects the AIO manager with the callback registry and wakeup pipe.
      *
      * @param config[in] 监控配置。配置内容会被移动到上下文中。
-     *               Monitoring configuration whose contents are moved into the context.
+     *               Monitoring configuration whose contents are moved into the
+     * context.
      */
     explicit MonContext(MonConfig config)
-        : _name(std::move(config._name)),
-        _cli_port(config._port),
-        _software_id(config._id),
-        _aio(_cbs,_wakeup),
-        _timers(_cbs,_wakeup)
-    {
-    }
+        : _name(std::move(config._name)), _cli_port(config._port),
+        _software_id(config._id), _aio(_cbs, _wakeup), _timers(_cbs, _wakeup) {}
 
-    MonContext(const MonContext&) = delete;
-    MonContext& operator=(const MonContext&) = delete;
+    MonContext(const MonContext &) = delete;
+    MonContext &operator=(const MonContext &) = delete;
 
     const std::string _name;
     const std::uint16_t _cli_port;
     const std::uint8_t _software_id;
+
+    MonitorStore _store;
 
     CallbackRegistry _cbs;
     WakeupPipe _wakeup;
@@ -60,7 +105,7 @@ struct MonContext final {
     std::optional<AioHandle> _wakeup_handle;
 };
 
-Engine::Engine(MonConfig config):_config(std::move(config)){}
+Engine::Engine(MonConfig config) : _config(std::move(config)) {}
 Engine::~Engine() = default;
 
 ENGINESTATE Engine::init() {
@@ -78,7 +123,7 @@ ENGINESTATE Engine::init() {
         return ENGINESTATE::INVALIDCONFIG;
     }
 
-    try{
+    try {
         auto context = std::make_unique<MonContext>(_config);
         const PIPESTATUS pipe_status = context->_wakeup.init();
         if (PIPESTATUS::SUCCESSFUL != pipe_status) {
@@ -86,22 +131,19 @@ ENGINESTATE Engine::init() {
             return ENGINESTATE::PIPEINITERR;
         }
 
-        MonContext* context_ptr = context.get();
-        MonCallback wakeup_cb{
-            "wakeup", 
-                [context_ptr]() noexcept -> int {
-                    const PIPESTATUS status = context_ptr->_wakeup.drain();
-                    return static_cast<int>(status);
-                },
-                false
-        };
+        MonContext *context_ptr = context.get();
+        MonCallback wakeup_cb{"wakeup",
+            [context_ptr]() noexcept -> int {
+                const PIPESTATUS status =
+                    context_ptr->_wakeup.drain();
+                return static_cast<int>(status);
+            },
+            false};
 
-        auto wakeup_handle = context->_aio.add(context->_wakeup.read_fd(),
-                                               std::move(wakeup_cb));
-        if(!wakeup_handle){
-            _phase.store(
-                         EnginePhase::CREATED,
-                         std::memory_order_release);
+        auto wakeup_handle =
+            context->_aio.add(context->_wakeup.read_fd(), std::move(wakeup_cb));
+        if (!wakeup_handle) {
+            _phase.store(EnginePhase::CREATED, std::memory_order_release);
 
             return ENGINESTATE::AIOINITERR;
         }
@@ -112,16 +154,14 @@ ENGINESTATE Engine::init() {
 
         return ENGINESTATE::SUCCESSFUL;
 
-    } catch(const std::bad_alloc&){
+    } catch (const std::bad_alloc &) {
         _phase.store(EnginePhase::CREATED, std::memory_order_release);
 
         return ENGINESTATE::INITFAILED;
     }
-
-
 }
 
-ENGINESTATE Engine::run(){
+ENGINESTATE Engine::run() {
     std::unique_lock<std::mutex> lock(_control_mutex);
     EnginePhase expected = EnginePhase::READY;
 
@@ -135,14 +175,14 @@ ENGINESTATE Engine::run(){
         return ENGINESTATE::NOTREADY;
     }
 
-    MonContext* const context = _context.get();
-    if (nullptr == context){
-        _phase.store(EnginePhase::STOPPED,  std::memory_order_release);
+    MonContext *const context = _context.get();
+    if (nullptr == context) {
+        _phase.store(EnginePhase::STOPPED, std::memory_order_release);
         return ENGINESTATE::NOTREADY;
     }
 
     const int wakeup_fd = context->_wakeup.read_fd();
-    if(wakeup_fd < 0 || wakeup_fd >= FD_SETSIZE){
+    if (wakeup_fd < 0 || wakeup_fd >= FD_SETSIZE) {
         _phase.store(EnginePhase::STOPPED, std::memory_order_release);
         return ENGINESTATE::PIPEERROR;
     }
@@ -151,10 +191,10 @@ ENGINESTATE Engine::run(){
 
     ENGINESTATE result = ENGINESTATE::SUCCESSFUL;
 
-    while(_phase.load(std::memory_order_acquire) == EnginePhase::RUNNING){
+    while (_phase.load(std::memory_order_acquire) == EnginePhase::RUNNING) {
         timeval timeout{};
         context->_timers.check(timeout);
-        if(context->_aio.process(&timeout) < 0){
+        if (context->_aio.process(&timeout) < 0) {
             result = ENGINESTATE::WAITFAILED;
             break;
         }
@@ -177,7 +217,7 @@ ENGINESTATE Engine::run(){
     return result;
 }
 
-void Engine::stop(){
+void Engine::stop() {
     {
         std::lock_guard<std::mutex> lock(_control_mutex);
         EnginePhase expected = EnginePhase::RUNNING;
@@ -193,47 +233,46 @@ void Engine::stop(){
         }
         // status is STOPPING , now new add/remove will be rejected
         const PIPESTATUS wakeup_status = _context->_wakeup.wakeup();
-        if(wakeup_status != PIPESTATUS::SUCCESSFUL){
+        if (wakeup_status != PIPESTATUS::SUCCESSFUL) {
             // TODO Log
             (void)wakeup_status;
         }
     }
-
 }
 
-EnginePhase Engine::get_phase() const noexcept{
+EnginePhase Engine::get_phase() const noexcept {
     return _phase.load(std::memory_order_acquire);
 }
 
-std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb){
+std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb) {
     std::lock_guard<std::mutex> lock(_control_mutex);
     const EnginePhase phase = _phase.load(std::memory_order_acquire);
 
-    if(!EngineUtil::accepts_registration(phase)){
+    if (!EngineUtil::accepts_registration(phase)) {
         return std::nullopt;
     }
 
-    if(_context == nullptr){
+    if (_context == nullptr) {
         return std::nullopt;
     }
 
     // WakeupPipe is  internal contorl fd
-    if(fd == _context->_wakeup.read_fd()){
+    if (fd == _context->_wakeup.read_fd()) {
         return std::nullopt;
     }
 
     return _context->_aio.add(fd, std::move(cb));
 }
 
-bool Engine::remove_aio(AioHandle handle){
-    if(!handle){
+bool Engine::remove_aio(AioHandle handle) {
+    if (!handle) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(_control_mutex);
 
     const EnginePhase phase = _phase.load(std::memory_order_acquire);
-    if(!EngineUtil::accepts_registration(phase)){
+    if (!EngineUtil::accepts_registration(phase)) {
         return false;
     }
 
@@ -241,26 +280,113 @@ bool Engine::remove_aio(AioHandle handle){
         return false;
     }
 
-    if(_context->_wakeup_handle && _context->_wakeup_handle->_id == handle._id){
+    if (_context->_wakeup_handle && _context->_wakeup_handle->_id == handle._id) {
         return false;
     }
 
     return _context->_aio.remove(handle);
 }
 
-std::optional<TimerHandle> Engine::set_timer(MonCallback mcb, TimerFlags flags, std::chrono::milliseconds delay){
+std::optional<TimerHandle> Engine::set_timer(MonCallback mcb, TimerFlags flags,
+                                             std::chrono::milliseconds delay) {
     std::lock_guard<std::mutex> lock(_control_mutex);
     const EnginePhase phase = _phase.load(std::memory_order_acquire);
 
-    if(!EngineUtil::accepts_registration(phase)){
+    if (!EngineUtil::accepts_registration(phase)) {
         return std::nullopt;
     }
 
-    if(_context == nullptr){
+    if (_context == nullptr) {
         return std::nullopt;
     }
 
     return _context->_timers.add(std::move(mcb), flags, delay);
 }
+
+
+/*
+ * 下例三函数为什么不使用std::lock_guard<std::mutex> lock(_control_mutex);
+ * - MonitorStore 已通过自己的 _mutex 保证线程安全。
+ * - 多个 Timer/AIO worker 应能并发进入 update_data()。
+ * - 使用 _control_mutex 包围整个 Store 操作，会在 Engine 层把所有写入和查询额外串行化。
+ * - _context 在 init() 成功后发布，停止时不会被清空或替换。
+ * */
+MonData::UpdateResult Engine::update_data(MonData::MonitorData data, bool force){
+    /*
+     * acquire 与 init() 发布 READY 时的 release 配对。
+     *
+     * 如果当前线程读取到 READY 或后续状态，
+     * _context 的初始化结果已经对当前线程可见。
+     */
+    const EnginePhase phase =
+        _phase.load(std::memory_order_acquire);
+
+    if (!EngineUtil::accepts_data_write(phase)) {
+        return MonData::UpdateResult{
+            MonData::UpdateStatus::INVALID,
+                std::nullopt
+        };
+    }
+
+    MonContext* const context = _context.get();
+    if(context == nullptr){
+        return MonData::UpdateResult{MonData::UpdateStatus::INVALID, std::nullopt};
+    }
+
+    /*
+     * Engine 公共接口不要求调用者传时间戳。
+     *
+     * system_clock 表示记录实际发生时间；
+     * Timer deadline 使用的 steady_clock 不能用于这里。
+     */
+    const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
+
+    /*
+     * MonitorData 按值进入接口，因此可以安全移动给 Store。
+     */
+    return context->_store.update(std::move(data), force, timestamp);
+}
+
+std::optional<MonData::StoredRecord> Engine::find_data(const MonData::MonitorKey& key) const{
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    /*
+     * CREATED、INITIALIZING 没有可读取的 Store。
+     *
+     * READY、RUNNING、STOPPING、STOPPED 都允许读取。
+     */
+    if (!EngineUtil::accepts_data_read(phase)) {
+        return std::nullopt;
+    }
+
+    const MonContext* const context = _context.get();
+
+    if (context == nullptr) {
+        return std::nullopt;
+    }
+
+    /*
+     * MonitorStore::find() 返回 StoredRecord 副本，
+     * 不暴露 Store 内部引用。
+     */
+    return context->_store.find(key);
+}
+
+std::vector<MonData::StoredRecord> Engine::query_data(const MonData::MonitorFilter& filter) const{
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    if(!EngineUtil::accepts_data_read(phase)){
+        return {};
+    }
+
+    const MonContext* const context = _context.get();
+    if(context == nullptr){
+        return {};
+    }
+
+    /*
+     * MonitorStore::query() 返回排序后的独立快照。
+     */
+    return context->_store.query(filter);
+}
+
 
 } // namespace TLSSMON

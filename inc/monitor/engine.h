@@ -4,7 +4,9 @@
 #include "aio_types.h"
 #include "engine_type.h"
 #include "timer_types.h"
+#include "monitor_data.h"
 
+#include <vector>
 #include <chrono>
 #include <atomic>
 #include <cstdint>
@@ -116,6 +118,38 @@ public:
     void stop();
 
     EnginePhase get_phase() const noexcept;
+
+    /**
+     * 向 Engine 保存一条监控数据。
+     *
+     * 只有 READY 和 RUNNING 状态接受写入。
+     * CREATED、INITIALIZING、STOPPING 和 STOPPED 状态返回 INVALID。
+     *
+     * changed_at 由 Engine 在接受写入时生成。
+     */
+    MonData::UpdateResult update_data(MonData::MonitorData data, bool force = false);
+
+    /**
+     * 根据完整 Key 查询一条监控记录。
+     *
+     * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
+     * CREATED 和 INITIALIZING 状态返回 std::nullopt。
+     *
+     * 返回结果是 Store 中记录的副本。
+     */
+    std::optional<MonData::StoredRecord> find_data(const MonData::MonitorKey& key) const;
+
+    /**
+     * 根据过滤条件查询监控记录快照。
+     *
+     * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
+     * CREATED 和 INITIALIZING 状态返回空 vector。
+     *
+     * 空过滤器返回全部记录，顺序保持：
+     * mid -> level -> fid -> eid。
+     */
+    std::vector<MonData::StoredRecord> query_data(const MonData::MonitorFilter& filter = {}) const;
+
     /**
      * @brief 向事件循环注册文件描述符及其回调。
      *        Registers a file descriptor and its callback with the event loop.

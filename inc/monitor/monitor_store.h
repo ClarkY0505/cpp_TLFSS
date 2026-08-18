@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <map>
 #include <mutex>
+#include <vector>
 #include <optional>
 
 namespace TLSSMON{
@@ -21,6 +22,7 @@ public:
 
     MonData::UpdateResult update(MonData::MonitorData data, bool force, MonData::MonitorTimestamp timestamp);
     std::optional<MonData::StoredRecord> find(const MonData::MonitorKey& key) const;
+    std::vector<MonData::StoredRecord> query(const MonData::MonitorFilter& filter = {}) const;
     
     std::size_t size() const;
 

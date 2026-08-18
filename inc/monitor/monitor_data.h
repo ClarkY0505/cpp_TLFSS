@@ -22,6 +22,20 @@ struct MonitorKey final{
     std::uint32_t _fid{0};      // function id
     std::uint32_t _eid{0};  // event id
 };
+struct MonitorFilter final {
+      // MonitorKey::_mid。
+      std::optional<std::uint32_t> module_id;
+
+      // MonitorKey::_level。
+      std::optional<std::uint32_t> level;
+
+      // MonitorKey::_fid。
+      std::optional<std::uint32_t> function_id;
+
+      // MonitorKey::_eid。
+      std::optional<std::uint32_t> event_id;
+  };
+
 
 inline bool operator==(const MonitorKey& lhs, const MonitorKey& rhs) noexcept{
     return std::tie(lhs._mid, lhs._level, lhs._fid, lhs._eid) == std::tie(rhs._mid, rhs._level, rhs._fid, rhs._eid);
@@ -32,7 +46,7 @@ inline bool operator!=(const MonitorKey& lhs, const MonitorKey& rhs) noexcept{
 }
 
 inline bool operator<(const MonitorKey& lhs, const MonitorKey& rhs) noexcept{
-    return std::tie(lhs._mid, lhs._level, lhs._fid, lhs._eid) == std::tie(rhs._mid, rhs._level, rhs._fid, rhs._eid);
+    return std::tie(lhs._mid, lhs._level, lhs._fid, lhs._eid) < std::tie(rhs._mid, rhs._level, rhs._fid, rhs._eid);
 }
 
 
