@@ -2,6 +2,7 @@ add_library(monitor_lib STATIC
     aio_manager.cpp
     callback_registry.cpp
     engine.cpp
+    monitor_reporter.cpp
     monitor_store.cpp
     timer_manager.cpp
     wake_pipe.cpp
@@ -40,6 +41,15 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_engine_test test/engine_test.cpp)
     add_monitor_test(monitor_engine_timer_test test/engine_timer_test.cpp)
     add_monitor_test(monitor_header_split_test test/header_split_test.cpp)
+    add_monitor_test(monitor_engine_m5_compat_test test/monitor_engine_m5_compat_test.cpp)
+    add_monitor_test(monitor_engine_reporter_test test/monitor_engine_reporter_test.cpp)
+    add_monitor_test(monitor_engine_reporter_stage8_test test/monitor_engine_reporter_stage8_test.cpp)
+    add_monitor_test(monitor_engine_reporter_stage9_test test/monitor_engine_reporter_stage9_test.cpp)
+    add_monitor_test(monitor_reporter_contract_test test/monitor_reporter_contract_test.cpp)
+    add_monitor_test(monitor_reporter_count_test test/monitor_reporter_count_test.cpp)
+    add_monitor_test(monitor_reporter_error_test test/monitor_reporter_error_test.cpp)
+    add_monitor_test(monitor_reporter_publisher_concurrency_test test/monitor_reporter_publisher_concurrency_test.cpp)
+    add_monitor_test(monitor_reporter_string_test test/monitor_reporter_string_test.cpp)
     add_monitor_test(monitor_engine_store_test test/monitor_engine_store_test.cpp)
     add_monitor_test(monitor_store_basic_test test/monitor_store_basic_test.cpp)
     add_monitor_test(monitor_store_concurrency_test test/monitor_store_concurrency_test.cpp)

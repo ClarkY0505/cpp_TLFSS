@@ -5,6 +5,7 @@
 #include "engine_type.h"
 #include "timer_types.h"
 #include "monitor_data.h"
+#include "monitor_reporter.h"
 
 #include <vector>
 #include <chrono>
@@ -48,6 +49,8 @@ struct MonContext;
  */
 class Engine {
 public:
+
+    using MonitorPublisher = MonitorReporter::Publisher;
     /**
      * @brief 创建处于 CREATED 状态的 Engine。
      *        Constructs an Engine in the CREATED phase.
@@ -118,6 +121,35 @@ public:
     void stop();
 
     EnginePhase get_phase() const noexcept;
+
+    /**
+     * 设置监控数据发布回调。
+     *
+     * 只有 READY 和 RUNNING 状态允许设置 Publisher。
+     * STOPPING 和 STOPPED 状态拒绝修改 Publisher。
+     *
+     * Publisher 在 MonitorStore 解锁后同步执行。Engine 不持有
+     * _control_mutex 调用 Publisher，因此 Publisher 可以重新进入 Engine。
+     */
+    bool set_publisher(MonitorPublisher publisher);
+
+    /**
+     * Reporter 接口的停止并发语义：
+     *
+     * - 在调用入口观察到 READY/RUNNING 的请求已经被接受，即使 Engine 随后
+     *   进入 STOPPING，该请求仍允许执行完成。
+     * - 在调用入口观察到 STOPPING/STOPPED 的新请求立即返回 INVALID。
+     * - stop() 只提交停止请求；调用方应通过 runner.join() 等待 Engine 管理的
+     *   Timer/AIO worker 退出。
+     * - Engine 不等待外部线程直接发起的 report_*() 调用，外部线程仍应由调用方
+     *   自行管理和回收。
+     *
+     * 不能使用 _control_mutex 包围整个 Reporter/Publisher 调用，否则 Publisher
+     * 重新进入 Engine 时可能死锁。
+     */
+    MonData::UpdateResult report_count(MonData::MonitorKey key, std::uint32_t value, std::string description = {});
+    MonData::UpdateResult report_error(MonData::MonitorKey key, std::uint32_t value, std::string description = {});
+    MonData::UpdateResult report_string(MonData::MonitorKey key, std::string value, std::string description = {});
 
     /**
      * 向 Engine 保存一条监控数据。

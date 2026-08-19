@@ -1,5 +1,5 @@
-#include "../engine.h"
-#include "../monitor_data.h"
+#include "engine.h"
+#include "monitor_data.h"
 
 #include <algorithm>
 #include <array>

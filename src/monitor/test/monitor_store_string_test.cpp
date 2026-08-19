@@ -1,4 +1,4 @@
-#include "../monitor_store.h"
+#include "monitor_store.h"
 
 #include <algorithm>
 #include <cassert>

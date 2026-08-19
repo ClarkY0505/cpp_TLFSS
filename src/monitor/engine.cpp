@@ -6,6 +6,7 @@
 #include "monitor_store.h"
 #include "timer_manager.h"
 #include "wake_pipe.h"
+#include "monitor_reporter.h"
 
 #include <algorithm>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -85,8 +87,12 @@ struct MonContext final {
      * context.
      */
     explicit MonContext(MonConfig config)
-        : _name(std::move(config._name)), _cli_port(config._port),
-        _software_id(config._id), _aio(_cbs, _wakeup), _timers(_cbs, _wakeup) {}
+        : _name(std::move(config._name)), 
+        _cli_port(config._port),
+        _software_id(config._id),
+        _reporter(_store),
+        _aio(_cbs, _wakeup), 
+        _timers(_cbs, _wakeup) {}
 
     MonContext(const MonContext &) = delete;
     MonContext &operator=(const MonContext &) = delete;
@@ -96,6 +102,7 @@ struct MonContext final {
     const std::uint8_t _software_id;
 
     MonitorStore _store;
+    MonitorReporter _reporter;
 
     CallbackRegistry _cbs;
     WakeupPipe _wakeup;
@@ -344,7 +351,7 @@ MonData::UpdateResult Engine::update_data(MonData::MonitorData data, bool force)
     /*
      * MonitorData 按值进入接口，因此可以安全移动给 Store。
      */
-    return context->_store.update(std::move(data), force, timestamp);
+    return context->_reporter.update(std::move(data), force, timestamp);
 }
 
 std::optional<MonData::StoredRecord> Engine::find_data(const MonData::MonitorKey& key) const{
@@ -388,5 +395,72 @@ std::vector<MonData::StoredRecord> Engine::query_data(const MonData::MonitorFilt
     return context->_store.query(filter);
 }
 
+bool Engine::set_publisher(MonitorPublisher publisher) {
+    std::lock_guard<std::mutex> lock(_control_mutex);
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    if (!EngineUtil::accepts_data_write(phase)) {
+          return false;
+      }
 
+    if (_context == nullptr) {
+          return false;
+      }
+
+    _context->_reporter.set_publisher(std::move(publisher));
+    return true;
+}
+
+MonData::UpdateResult Engine::report_count(MonData::MonitorKey key, std::uint32_t value, std::string description){
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    if (!EngineUtil::accepts_data_write(phase)) {
+          return {
+              MonData::UpdateStatus::INVALID,
+              std::nullopt
+          };
+      }
+
+    MonContext* const context = _context.get();
+    if(context == nullptr){
+        return {MonData::UpdateStatus::INVALID, std::nullopt};
+    }
+
+    const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
+    return context->_reporter.report_count(std::move(key), value, std::move(description), timestamp);
+}
+
+MonData::UpdateResult Engine::report_error(MonData::MonitorKey key, std::uint32_t value, std::string description){
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    if (!EngineUtil::accepts_data_write(phase)) {
+          return {
+              MonData::UpdateStatus::INVALID,
+              std::nullopt
+          };
+      }
+
+    MonContext* const context = _context.get();
+    if(context == nullptr){
+        return {MonData::UpdateStatus::INVALID, std::nullopt};
+    }
+
+    const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
+    return context->_reporter.report_error(std::move(key), value, std::move(description), timestamp);
+}
+
+MonData::UpdateResult Engine::report_string(MonData::MonitorKey key, std::string value, std::string description){
+    const EnginePhase phase = _phase.load(std::memory_order_acquire);
+    if (!EngineUtil::accepts_data_write(phase)) {
+          return {
+              MonData::UpdateStatus::INVALID,
+              std::nullopt
+          };
+      }
+
+    MonContext* const context = _context.get();
+    if(context == nullptr){
+        return {MonData::UpdateStatus::INVALID, std::nullopt};
+    }
+
+    const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
+    return context->_reporter.report_string(std::move(key), std::move(value), std::move(description), timestamp);
+}
 } // namespace TLSSMON

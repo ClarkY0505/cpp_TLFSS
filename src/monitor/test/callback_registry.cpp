@@ -1,4 +1,4 @@
-#include "../callback_registry.h"
+#include "callback_registry.h"
 
   #include <cassert>
   #include <iostream>
