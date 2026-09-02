@@ -400,4 +400,3 @@ int main()
     test_query_returns_independent_snapshot();
     return 0;
 }
-

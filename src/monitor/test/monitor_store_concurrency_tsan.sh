@@ -4,12 +4,13 @@ set -u
 set -o pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-project_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
-tsan_runs=${TSAN_RUNS:-10}
+tsan_binary=/tmp/monitor_store_concurrency_tsan
+tsan_runs=10
 tsan_run=1
-tsan_timeout_seconds=${TSAN_TIMEOUT_SECONDS:-120}
-tsan_kill_after_seconds=${TSAN_KILL_AFTER_SECONDS:-10}
+tsan_timeout_seconds=120
+tsan_kill_after_seconds=10
 tsan_options=halt_on_error=1:exitcode=66
 cxx=${CXX:-g++}
 
@@ -24,7 +25,6 @@ compiler_flags=(
     -fsanitize=thread
     -fno-omit-frame-pointer
     -pthread
-    -I"$project_root/inc/monitor"
 )
 
 if ! command -v "$cxx" >/dev/null 2>&1; then
@@ -45,8 +45,7 @@ fi
 # 这种错误发生在项目代码执行之前。若逐进程关闭 ASLR 可以解决，
 # 后续测试仅通过 setarch -R 启动；不会修改系统全局 ASLR 配置。
 tsan_probe_binary=$(mktemp /tmp/monitor_store_tsan_probe.XXXXXX)
-tsan_binary=$(mktemp /tmp/monitor_store_concurrency_tsan.XXXXXX)
-trap 'rm -f -- "$tsan_probe_binary" "$tsan_binary"' EXIT
+trap 'rm -f -- "$tsan_probe_binary"' EXIT
 
 if ! printf '%s\n' 'int main() { return 0; }' \
     | "$cxx" "${compiler_flags[@]}" \
@@ -96,8 +95,8 @@ if [ "$probe_status" -ne 0 ]; then
 fi
 
 if ! "$cxx" "${compiler_flags[@]}" \
-    "$project_root/src/monitor/monitor_store.cpp" \
-    "$script_dir/monitor_store_concurrency_test.cpp" \
+    "$project_root/monitor_store.cpp" \
+    "$project_root/test/monitor_store_concurrency_test.cpp" \
     -o "$tsan_binary"; then
 
     printf '%s\n' 'monitor_store_concurrency_tsan=COMPILE_FAIL' >&2

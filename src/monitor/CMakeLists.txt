@@ -4,7 +4,10 @@ add_library(monitor_lib STATIC
     engine.cpp
     monitor_reporter.cpp
     monitor_store.cpp
+    monitor_wire.cpp
     timer_manager.cpp
+    udp_publisher.cpp
+    udp_receiver.cpp
     wake_pipe.cpp
 )
 
@@ -18,6 +21,9 @@ target_link_libraries(monitor_lib PUBLIC
 
 add_executable(m3-demo m3-demo.cpp)
 target_link_libraries(m3-demo PRIVATE monitor_lib)
+
+add_executable(demo_pub demo_pub.cpp)
+target_link_libraries(demo_pub PRIVATE monitor_lib)
 
 if(BUILD_TESTS)
     function(add_monitor_test target source)
@@ -45,6 +51,8 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_engine_reporter_test test/monitor_engine_reporter_test.cpp)
     add_monitor_test(monitor_engine_reporter_stage8_test test/monitor_engine_reporter_stage8_test.cpp)
     add_monitor_test(monitor_engine_reporter_stage9_test test/monitor_engine_reporter_stage9_test.cpp)
+    add_monitor_test(monitor_engine_udp_publisher_test test/monitor_engine_udp_publisher_test.cpp)
+    add_monitor_test(monitor_engine_udp_receiver_aio_test test/monitor_engine_udp_receiver_aio_test.cpp)
     add_monitor_test(monitor_reporter_contract_test test/monitor_reporter_contract_test.cpp)
     add_monitor_test(monitor_reporter_count_test test/monitor_reporter_count_test.cpp)
     add_monitor_test(monitor_reporter_error_test test/monitor_reporter_error_test.cpp)
@@ -56,6 +64,14 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_store_numeric_test test/monitor_store_numeric_test.cpp)
     add_monitor_test(monitor_store_query_test test/monitor_store_query_test.cpp)
     add_monitor_test(monitor_store_string_test test/monitor_store_string_test.cpp)
+    add_monitor_test(monitor_udp_publisher_test test/udp_publisher_test.cpp)
+    add_monitor_test(monitor_udp_publisher_concurrency_test test/udp_publisher_concurrency_test.cpp)
+    add_monitor_test(monitor_wire_contract_test test/monitor_wire_contract_test.cpp)
+    add_monitor_test(monitor_wire_endian_test test/monitor_wire_endian_test.cpp)
+    add_monitor_test(monitor_wire_v1_test test/monitor_wire_v1_test.cpp)
+    add_monitor_test(monitor_wire_v2_header_test test/monitor_wire_v2_header_test.cpp)
+    add_monitor_test(monitor_wire_v2_numeric_test test/monitor_wire_v2_numeric_test.cpp)
+    add_monitor_test(monitor_wire_v2_string_test test/monitor_wire_v2_string_test.cpp)
     add_monitor_test(monitor_timer_manager_add_test test/timer_manager_add_test.cpp)
     add_monitor_test(monitor_timer_manager_check_test test/timer_manager_check_test.cpp)
     add_monitor_test(monitor_timer_manager_fixed_cadence_test test/timer_manager_fixed_cadence_test.cpp)
