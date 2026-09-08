@@ -121,6 +121,7 @@ public:
     void stop();
 
     EnginePhase get_phase() const noexcept;
+    std::uint16_t cli_port() const noexcept;
 
     /**
      * 设置监控数据发布回调。

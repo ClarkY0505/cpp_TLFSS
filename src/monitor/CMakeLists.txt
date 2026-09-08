@@ -1,7 +1,12 @@
 add_library(monitor_lib STATIC
     aio_manager.cpp
     callback_registry.cpp
+    cli_commands.cpp
+    cli_prompt.cpp
+    cli_registry.cpp
+    cli_server.cpp
     engine.cpp
+    monitor_module_registry.cpp
     monitor_reporter.cpp
     monitor_store.cpp
     monitor_wire.cpp
@@ -19,11 +24,14 @@ target_link_libraries(monitor_lib PUBLIC
     Threads::Threads
 )
 
-add_executable(m3-demo m3-demo.cpp)
+add_executable(m3-demo demo/m3-demo.cpp)
 target_link_libraries(m3-demo PRIVATE monitor_lib)
 
-add_executable(demo_pub demo_pub.cpp)
+add_executable(demo_pub demo/demo_pub.cpp)
 target_link_libraries(demo_pub PRIVATE monitor_lib)
+
+add_executable(demo-m7 demo/demo-m7.cpp)
+target_link_libraries(demo-m7 PRIVATE monitor_lib)
 
 if(BUILD_TESTS)
     function(add_monitor_test target source)
@@ -42,7 +50,18 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_aio_manager_test test/aio_manager_test.cpp)
     add_monitor_test(monitor_callback_registry_test test/callback_registry.cpp)
     add_monitor_test(monitor_callback_test test/cb_test.cpp)
+    add_monitor_test(monitor_cli_commands_test test/cli_commands_test.cpp)
+    add_monitor_test(monitor_cli_db_dump_test test/cli_db_dump_test.cpp)
+    add_monitor_test(monitor_cli_module_server_test test/cli_module_server_test.cpp)
+    add_monitor_test(monitor_cli_prompt_test test/cli_prompt_test.cpp)
+    add_monitor_test(monitor_cli_registry_session_test test/cli_registry_session_test.cpp)
+    add_monitor_test(monitor_cli_registry_test test/cli_registry_test.cpp)
+    add_monitor_test(monitor_cli_server_session_test test/cli_server_session_test.cpp)
+    add_monitor_test(monitor_cli_server_test test/cli_server_test.cpp)
+    add_monitor_test(monitor_cli_session_context_test test/cli_session_context_test.cpp)
+    add_monitor_test(monitor_cli_types_test test/cli_types_test.cpp)
     add_monitor_test(monitor_engine_aio_test test/engine_aio_test.cpp)
+    add_monitor_test(monitor_engine_cli_test test/monitor_engine_cli_test.cpp)
     add_monitor_test(monitor_engine_loop_test test/engine_loop_test.cpp)
     add_monitor_test(monitor_engine_test test/engine_test.cpp)
     add_monitor_test(monitor_engine_timer_test test/engine_timer_test.cpp)
@@ -53,6 +72,8 @@ if(BUILD_TESTS)
     add_monitor_test(monitor_engine_reporter_stage9_test test/monitor_engine_reporter_stage9_test.cpp)
     add_monitor_test(monitor_engine_udp_publisher_test test/monitor_engine_udp_publisher_test.cpp)
     add_monitor_test(monitor_engine_udp_receiver_aio_test test/monitor_engine_udp_receiver_aio_test.cpp)
+    add_monitor_test(monitor_module_registry_test test/monitor_module_registry_test.cpp)
+    add_monitor_test(monitor_module_types_test test/monitor_module_types_test.cpp)
     add_monitor_test(monitor_reporter_contract_test test/monitor_reporter_contract_test.cpp)
     add_monitor_test(monitor_reporter_count_test test/monitor_reporter_count_test.cpp)
     add_monitor_test(monitor_reporter_error_test test/monitor_reporter_error_test.cpp)
@@ -83,4 +104,14 @@ if(BUILD_TESTS)
         $<TARGET_FILE:m3-demo>
     )
     add_dependencies(monitor_m3_smoke_test m3-demo)
+    add_monitor_test(monitor_m7_demo_smoke_test
+        test/m7_demo_smoke_test.cpp
+        $<TARGET_FILE:demo-m7>
+    )
+    add_dependencies(monitor_m7_demo_smoke_test demo-m7)
+    set_tests_properties(
+        monitor_m3_smoke_test
+        monitor_m7_demo_smoke_test
+        PROPERTIES RESOURCE_LOCK monitor_demo_port_9000
+    )
 endif()
