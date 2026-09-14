@@ -106,6 +106,9 @@ const char *update_status_name(MonData::UpdateStatus status) noexcept {
 
   case MonData::UpdateStatus::INVALID:
     return "INVALID";
+
+  case MonData::UpdateStatus::DURABILITY_FAILED:
+    return "DURABILITY_FAILED";
   }
 
   return "UNKNOWN";

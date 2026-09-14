@@ -3,16 +3,17 @@
 #include "engine.h"
 #include "engine_type.h"
 #include "monitor_data.h"
+#include "monitor_module.h"
 #include "monitor_reporter.h"
 #include "monitor_store.h"
 #include "timer_manager.h"
 #include "wake_pipe.h"
 
-#include <algorithm>
 #include <atomic>
 #include <bits/types/struct_timeval.h>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -25,6 +26,21 @@
 namespace TLSSMON {
 
 namespace EngineUtil {
+/*
+ * 模块元数据必须在 Engine 开始运行前固定。
+ *
+ * 只允许 READY 阶段注册模块。
+ */
+constexpr bool accepts_module_registration(EnginePhase phase) noexcept {
+  return phase == EnginePhase::READY;
+}
+static_assert(!accepts_module_registration(EnginePhase::CREATED));
+static_assert(!accepts_module_registration(EnginePhase::INITIALIZING));
+static_assert(accepts_module_registration(EnginePhase::READY));
+static_assert(!accepts_module_registration(EnginePhase::RUNNING));
+static_assert(!accepts_module_registration(EnginePhase::STOPPING));
+static_assert(!accepts_module_registration(EnginePhase::STOPPED));
+
 /**
  * 判断当前 Engine 状态是否接受监控数据写入。
  *
@@ -33,11 +49,9 @@ namespace EngineUtil {
 constexpr bool accepts_data_write(EnginePhase phase) noexcept {
   return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
 }
-
 constexpr bool accepts_registration(EnginePhase phase) noexcept {
   return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
 }
-
 /**
  * 判断当前 Engine 状态是否允许读取监控数据。
  *
@@ -48,29 +62,17 @@ constexpr bool accepts_data_read(EnginePhase phase) noexcept {
   return phase == EnginePhase::READY || phase == EnginePhase::RUNNING ||
          phase == EnginePhase::STOPPING || phase == EnginePhase::STOPPED;
 }
-
 static_assert(!accepts_data_write(EnginePhase::CREATED));
-
 static_assert(!accepts_data_write(EnginePhase::INITIALIZING));
-
 static_assert(accepts_data_write(EnginePhase::READY));
-
 static_assert(accepts_data_write(EnginePhase::RUNNING));
-
 static_assert(!accepts_data_write(EnginePhase::STOPPING));
-
 static_assert(!accepts_data_write(EnginePhase::STOPPED));
-
 static_assert(!accepts_data_read(EnginePhase::CREATED));
-
 static_assert(!accepts_data_read(EnginePhase::INITIALIZING));
-
 static_assert(accepts_data_read(EnginePhase::READY));
-
 static_assert(accepts_data_read(EnginePhase::RUNNING));
-
 static_assert(accepts_data_read(EnginePhase::STOPPING));
-
 static_assert(accepts_data_read(EnginePhase::STOPPED));
 
 } // namespace EngineUtil
@@ -86,10 +88,10 @@ struct MonContext final {
    *               Monitoring configuration whose contents are moved into the
    * context.
    */
-  explicit MonContext(MonConfig config)
+  explicit MonContext(MonConfig config, const MonitorModuleRegistry &modules)
       : _name(std::move(config._name)), _cli_port(config._port),
-        _software_id(config._id), _reporter(_store), _aio(_cbs, _wakeup),
-        _timers(_cbs, _wakeup) {}
+        _software_id(config._id), _reporter(_store, modules),
+        _aio(_cbs, _wakeup), _timers(_cbs, _wakeup) {}
 
   MonContext(const MonContext &) = delete;
   MonContext &operator=(const MonContext &) = delete;
@@ -128,7 +130,7 @@ ENGINESTATE Engine::init() {
   }
 
   try {
-    auto context = std::make_unique<MonContext>(_config);
+    auto context = std::make_unique<MonContext>(_config, _modules);
     const PIPESTATUS pipe_status = context->_wakeup.init();
     if (PIPESTATUS::SUCCESSFUL != pipe_status) {
       _phase.store(EnginePhase::CREATED, std::memory_order_release);
@@ -270,6 +272,21 @@ std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb) {
   return _context->_aio.add(fd, std::move(cb));
 }
 
+ModuleRegisterStatus Engine::register_module(MonitorModuleInfo module) {
+  std::lock_guard<std::mutex> lock{_control_mutex};
+  const EnginePhase phase = _phase.load(std::memory_order_acquire);
+  if (!EngineUtil::accepts_module_registration(phase)) {
+    return ModuleRegisterStatus::INVALID_PHASE;
+  }
+  /*
+   * MonitorModuleRegistry 内部使用自己的互斥锁。
+   *
+   * Engine 锁保证生命周期原子性；
+   * Registry 锁保证模块表和名称索引的一致性。
+   */
+  return _modules.register_module(std::move(module));
+}
+
 bool Engine::remove_aio(AioHandle handle) {
   if (!handle) {
     return false;
@@ -319,35 +336,32 @@ std::optional<TimerHandle> Engine::set_timer(MonCallback mcb, TimerFlags flags,
  * */
 MonData::UpdateResult Engine::update_data(MonData::MonitorData data,
                                           bool force) {
-  /*
-   * acquire 与 init() 发布 READY 时的 release 配对。
-   *
-   * 如果当前线程读取到 READY 或后续状态，
-   * _context 的初始化结果已经对当前线程可见。
-   */
-  const EnginePhase phase = _phase.load(std::memory_order_acquire);
+  const MonData::MonitorTimestamp changed_at = std::chrono::system_clock::now();
 
+  return update_data_at(std::move(data), changed_at, force);
+}
+
+MonData::UpdateResult
+Engine::update_data_at(MonData::MonitorData data,
+                       MonData::MonitorTimestamp changed_at, bool force) {
+  const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_write(phase)) {
-    return MonData::UpdateResult{MonData::UpdateStatus::INVALID, std::nullopt};
+    return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   MonContext *const context = _context.get();
+
   if (context == nullptr) {
-    return MonData::UpdateResult{MonData::UpdateStatus::INVALID, std::nullopt};
+    return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   /*
-   * Engine 公共接口不要求调用者传时间戳。
+   * 直接进入 Reporter::update()，不执行 enrich()。
    *
-   * system_clock 表示记录实际发生时间；
-   * Timer deadline 使用的 steady_clock 不能用于这里。
+   * Collector 必须保留线协议携带的 level 和 description，
+   * 不能被 Collector 本地 Registry 改写。
    */
-  const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
-
-  /*
-   * MonitorData 按值进入接口，因此可以安全移动给 Store。
-   */
-  return context->_reporter.update(std::move(data), force, timestamp);
+  return context->_reporter.update(std::move(data), force, changed_at);
 }
 
 std::optional<MonData::StoredRecord>
@@ -461,4 +475,42 @@ MonData::UpdateResult Engine::report_string(MonData::MonitorKey key,
   return context->_reporter.report_string(std::move(key), std::move(value),
                                           std::move(description), timestamp);
 }
+
+std::optional<MonitorModuleInfo>
+Engine::find_module_by_id(std::uint32_t mid) const {
+  return _modules.find_by_id(mid);
+}
+std::optional<MonitorModuleInfo>
+Engine::find_module_by_name(std::string_view name) const {
+  return _modules.find_by_name(name);
+}
+
+std::optional<MonitorErrorInfo> Engine::find_error(std::uint32_t mid,
+                                                   std::uint32_t eid) const {
+  return _modules.find_error(mid, eid);
+}
+
+std::vector<MonitorModuleInfo> Engine::modules() const {
+  return _modules.modules();
+}
+
+bool Engine::set_alarm_publisher(AlarmPublisher publisher) {
+
+  std::lock_guard<std::mutex> lock(_control_mutex);
+
+  const EnginePhase phase = _phase.load(std::memory_order_acquire);
+
+  if (!EngineUtil::accepts_data_write(phase)) {
+    return false;
+  }
+
+  if (_context == nullptr) {
+    return false;
+  }
+
+  _context->_reporter.set_alarm_publisher(std::move(publisher));
+
+  return true;
+}
+
 } // namespace TLSSMON

@@ -1,10 +1,14 @@
 #ifndef __MONITOR_MODULE_H__
 #define __MONITOR_MODULE_H__
 
+#include "monitor_error.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace TLSSMON {
 
@@ -24,22 +28,28 @@ enum class ModuleRegisterStatus : std::uint8_t {
    * 注册成功。
    */
   SUCCESS,
-
   /*
    * 模块名称为空、过长、包含非法字符，
    * 或者使用了保留名称 "all"。
    */
   INVALID_NAME,
-
   /*
    * 已经存在相同 mid 的模块。
    */
   DUPLICATE_ID,
-
   /*
    * 已经存在相同名称的模块。
    */
-  DUPLICATE_NAME
+  DUPLICATE_NAME,
+  /*
+   * 模块错误表中至少存在一个非法 MonitorLevel。
+   */
+  INVALID_ERROR_LEVEL,
+  /*
+   * 当前 Engine 生命周期阶段不允许注册模块。
+   */
+  INVALID_PHASE
+
 };
 
 /*
@@ -53,11 +63,34 @@ enum class ModuleRegisterStatus : std::uint8_t {
  *
  * _description：
  *   面向用户的说明文本，不参与唯一性判断。
+ * _errors：
+ *   当前模块的错误/事件元数据表。
+ *
+ *   vector 下标就是 eid：
+ *
+ *   _errors[0] 对应 eid=0
+ *   _errors[1] 对应 eid=1
+ *   _errors[2] 对应 eid=2
+ *
+ *   因此 EID 必须从 0 开始连续排列。
  */
 struct MonitorModuleInfo final {
   std::uint32_t _mid{0U};
   std::string _name;
   std::string _description;
+  std::vector<MonitorErrorInfo> _errors;
+
+  MonitorModuleInfo() = default;
+
+  /*
+   * 第四个参数默认为空错误表，使旧 M7 的三字段初始化在启用
+   * -Wmissing-field-initializers 和 -Werror 时仍能无警告编译。
+   */
+  MonitorModuleInfo(std::uint32_t mid, std::string name,
+                    std::string description,
+                    std::vector<MonitorErrorInfo> errors = {})
+      : _mid(mid), _name(std::move(name)), _description(std::move(description)),
+        _errors(std::move(errors)) {}
 };
 
 /*
@@ -130,13 +163,13 @@ inline bool is_valid_module_name(std::string_view name) noexcept {
  * 必须比较它。
  */
 inline bool operator==(const MonitorModuleInfo &lhs,
-                       const MonitorModuleInfo &rhs) noexcept {
+                       const MonitorModuleInfo &rhs) {
   return lhs._mid == rhs._mid && lhs._name == rhs._name &&
-         lhs._description == rhs._description;
+         lhs._description == rhs._description && lhs._errors == rhs._errors;
 }
 
 inline bool operator!=(const MonitorModuleInfo &lhs,
-                       const MonitorModuleInfo &rhs) noexcept {
+                       const MonitorModuleInfo &rhs) {
   return !(lhs == rhs);
 }
 

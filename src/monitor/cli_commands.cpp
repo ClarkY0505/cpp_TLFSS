@@ -3,12 +3,16 @@
 #include "cli_types.h"
 #include "engine.h"
 #include "monitor_data.h"
+#include "monitor_error.h"
 #include "monitor_module_registry.h"
+#include "reliable_alarm_collector.h"
+#include "reliable_alarm_publisher.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -28,6 +32,14 @@ constexpr const char *USE_COMMAND_NAME = "use";
 constexpr const char *USE_COMMAND_DESCRIPTION = "select active module";
 constexpr const char *USE_COMMAND_USAGE = "usage: use <module|all>\n";
 constexpr std::int64_t NANOSECONDS_PER_SECOND = INT64_C(1'000'000'000);
+constexpr const char *ALARM_STATUS_COMMAND_NAME = "alarm_status";
+constexpr const char *ALARM_STATUS_COMMAND_DESCRIPTION =
+    "show reliable alarm channel state";
+constexpr const char *ALARM_STATUS_COMMAND_USAGE = "usage: alarm_status\n";
+
+const char *cli_boolean(bool value) noexcept {
+  return value ? "true" : "false";
+}
 
 static_assert(std::is_same_v<MonData::MonitorTimestamp::duration,
                              std::chrono::nanoseconds>,
@@ -139,7 +151,84 @@ std::string format_timestamp(MonData::MonitorTimestamp timestamp) {
   return std::to_string(seconds) + '.' + fraction;
 }
 
-void append_record(std::string &output, const MonData::StoredRecord &record) {
+std::string
+format_publisher_status(const ReliableAlarmPublisherStatus &status) {
+  std::string output{"alarm publisher: active="};
+
+  output += cli_boolean(status._active);
+  output += " connected=";
+  output += cli_boolean(status._connected);
+
+  output += " collector_host=";
+  output += status._collector_host;
+  output += " collector_port=";
+  output += std::to_string(status._collector_port);
+
+  if (status._spool_stats_available) {
+    output += " pending_files=";
+    output += std::to_string(status._pending_files);
+    output += " pending_bytes=";
+    output += std::to_string(status._pending_bytes);
+    output += " corrupt_files=";
+    output += std::to_string(status._corrupt_files);
+  } else {
+    output += " pending_files=unavailable";
+    output += " pending_bytes=unavailable";
+    output += " corrupt_files=unavailable";
+    output += " spool_error=";
+    output += std::to_string(status._spool_error);
+  }
+
+  output += " connect_failures=";
+  output += std::to_string(status._connect_failures);
+  output += " send_failures=";
+  output += std::to_string(status._send_failures);
+  output += " ack_timeouts=";
+  output += std::to_string(status._ack_timeouts);
+  output += " acks=";
+  output += std::to_string(status._acks);
+  output += " backoff_ms=";
+  output += std::to_string(status._current_backoff.count());
+  output.push_back('\n');
+
+  return output;
+}
+
+std::string
+format_collector_status(const ReliableAlarmCollectorStatus &status) {
+  std::string output{"alarm collector: active="};
+
+  output += cli_boolean(status._active);
+  output += " clients=";
+  output += std::to_string(status._clients);
+  output += " rejected_clients=";
+  output += std::to_string(status._rejected_clients);
+  output += " accepted=";
+  output += std::to_string(status._accepted);
+  output += " duplicates=";
+  output += std::to_string(status._duplicates);
+  output += " protocol_errors=";
+  output += std::to_string(status._protocol_errors);
+  output += " crc_errors=";
+  output += std::to_string(status._crc_errors);
+  output += " persist_failures=";
+  output += std::to_string(status._persist_failures);
+
+  if (status._spool_stats_available) {
+    output += " corrupt_files=";
+    output += std::to_string(status._corrupt_files);
+  } else {
+    output += " corrupt_files=unavailable";
+    output += " spool_error=";
+    output += std::to_string(status._spool_error);
+  }
+
+  output.push_back('\n');
+  return output;
+}
+
+void append_record(std::string &output, const MonData::StoredRecord &record,
+                   const Engine &engine) {
   const MonData::MonitorData &data = record._data;
   const MonData::MonitorKey &key = data._key;
 
@@ -147,7 +236,7 @@ void append_record(std::string &output, const MonData::StoredRecord &record) {
   output += std::to_string(key._mid);
 
   output += " lvl=";
-  output += std::to_string(key._level);
+  output += monitor_level_name(key._level);
 
   output += " fid=";
   output += std::to_string(key._fid);
@@ -169,8 +258,17 @@ void append_record(std::string &output, const MonData::StoredRecord &record) {
     output += '"';
   }
 
+  std::string display_description = data._description;
+  if (display_description.empty()) {
+    const std::optional<MonitorErrorInfo> error =
+        engine.find_error(key._mid, key._eid);
+    if (error.has_value()) {
+      display_description = error->_description;
+    }
+  }
+
   output += " desc=\"";
-  output += escape_cli_text(data._description);
+  output += escape_cli_text(display_description);
   output += '"';
 
   output += " changed_at=";
@@ -178,14 +276,20 @@ void append_record(std::string &output, const MonData::StoredRecord &record) {
   output.push_back('\n');
 }
 
-std::string format_db_dump(const std::vector<MonData::StoredRecord> &records) {
+std::string format_db_dump(const std::vector<MonData::StoredRecord> &records,
+                           const Engine &engine) {
   std::string output;
   for (const MonData::StoredRecord &record : records) {
-    append_record(output, record);
+    append_record(output, record, engine);
   }
 
-  output += std::to_string(records.size());
-  output += " entries\n";
+  if (records.size() < 2U) {
+    output += std::to_string(records.size());
+    output += " entry\n";
+  } else {
+    output += std::to_string(records.size());
+    output += " entries\n";
+  }
 
   return output;
 }
@@ -220,7 +324,7 @@ CliRegisterStatus register_db_dump_command(CliRegistry &registry,
 
         const std::vector<MonData::StoredRecord> snapshot =
             engine.query_data(filter);
-        return format_db_dump(snapshot);
+        return format_db_dump(snapshot, engine);
       });
 }
 
@@ -233,6 +337,29 @@ CliRegisterStatus register_modules_command(CliRegistry &registry,
           return MODULES_COMMAND_USAGE;
         }
         const std::vector<MonitorModuleInfo> snapshot = modules.modules();
+
+        return format_modules(snapshot);
+      });
+}
+
+CliRegisterStatus register_modules_command(CliRegistry &registry,
+                                           Engine &engine) {
+  return registry.register_command(
+      MODULES_COMMAND_NAME, MODULES_COMMAND_DESCRIPTION,
+      [&engine](const CliArguments &arguments) -> std::string {
+        /*
+         * modules 不接受参数。
+         */
+        if (!arguments.empty()) {
+          return MODULES_COMMAND_USAGE;
+        }
+
+        /*
+         * Engine::modules() 返回独立快照。
+         *
+         * Handler 不会持有 Engine Registry 内部节点的引用。
+         */
+        const std::vector<MonitorModuleInfo> snapshot = engine.modules();
 
         return format_modules(snapshot);
       });
@@ -303,6 +430,74 @@ CliRegisterStatus register_use_command(CliRegistry &registry,
         context._selected_mid = module->_mid;
 
         return "using module: " + module->_name + '\n';
+      });
+}
+
+CliRegisterStatus register_use_command(CliRegistry &registry, Engine &engine) {
+  return registry.register_command(
+      USE_COMMAND_NAME, USE_COMMAND_DESCRIPTION,
+      [&engine](CliSessionContext &context,
+                const CliArguments &arguments) -> std::string {
+        if (arguments.empty()) {
+          if (!context.has_selected_module()) {
+            return "current module: all\n";
+          }
+
+          return "current module: " + context._selected_module_name + '\n';
+        }
+
+        if (arguments.size() != 1U) {
+          return USE_COMMAND_USAGE;
+        }
+
+        const std::string &requested_name = arguments[0];
+        if (requested_name == "all") {
+          context.clear_module();
+          return "using module: all\n";
+        }
+
+        const std::optional<MonitorModuleInfo> module =
+            engine.find_module_by_name(requested_name);
+        if (!module.has_value()) {
+          return "unknown module: " + requested_name + '\n';
+        }
+
+        context._selected_module_name = module->_name;
+        context._selected_mid = module->_mid;
+
+        return "using module: " + module->_name + '\n';
+      });
+}
+
+CliRegisterStatus
+register_alarm_status_command(CliRegistry &registry,
+                              const ReliableAlarmPublisher *publisher,
+                              const ReliableAlarmCollector *collector) {
+
+  return registry.register_command(
+      ALARM_STATUS_COMMAND_NAME, ALARM_STATUS_COMMAND_DESCRIPTION,
+      [publisher, collector](const CliArguments &arguments) -> std::string {
+        if (!arguments.empty()) {
+          return ALARM_STATUS_COMMAND_USAGE;
+        }
+
+        if (publisher == nullptr && collector == nullptr) {
+          return "alarm channel inactive\n";
+        }
+
+        std::string output;
+
+        if (publisher != nullptr) {
+          const ReliableAlarmPublisherStatus snapshot = publisher->status();
+          output += format_publisher_status(snapshot);
+        }
+
+        if (collector != nullptr) {
+          const ReliableAlarmCollectorStatus snapshot = collector->status();
+          output += format_collector_status(snapshot);
+        }
+
+        return output;
       });
 }
 

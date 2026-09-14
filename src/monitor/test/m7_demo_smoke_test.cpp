@@ -270,12 +270,12 @@ int main(int argc, char *argv[]) {
                "* using module: module-a\n[module-a]> ") &&
       dump_a_sent && contains(module_a_dump, "* mid=256 ") &&
       !contains(module_a_dump, "mid=512 ") &&
-      contains(module_a_dump, "* 1 entries\n") && use_b_sent &&
+      contains(module_a_dump, "* 1 entry\n") && use_b_sent &&
       contains(use_b_response,
                "* using module: module-b\n[module-b]> ") &&
       dump_b_sent && contains(module_b_dump, "* mid=512 ") &&
       !contains(module_b_dump, "mid=256 ") &&
-      contains(module_b_dump, "* 1 entries\n") && use_all_sent &&
+      contains(module_b_dump, "* 1 entry\n") && use_all_sent &&
       contains(use_all_response, "* using module: all\n[storage]> ") &&
       stop_sent && contains(stop_response, "* stopping\n");
 

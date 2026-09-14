@@ -3,33 +3,36 @@
 
 #include "aio_types.h"
 #include "engine_type.h"
-#include "timer_types.h"
 #include "monitor_data.h"
+#include "monitor_module_registry.h"
 #include "monitor_reporter.h"
+#include "timer_types.h"
 
-#include <vector>
-#include <chrono>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace TLSSMON {
 
-enum class ENGINESTATE : int{
-    INITFAILED         = -500,
-    PIPEINITERR        = -501,
-    ALREADYINITIALIZED = -502,
-    INVALIDCONFIG      = -503,
-    NOTREADY           = -504,
-    ALREADYRUNNING     = -505,
-    WAITFAILED         = -506,
-    PIPEERROR          = -507,
-    AIOINITERR         = -508, /* AIOINITERR 表示 WakeupPipe 已创建，但将其读端注册进 AIO 失败*/
-    SUCCESSFUL         = 0
+enum class ENGINESTATE : int {
+  INITFAILED = -500,
+  PIPEINITERR = -501,
+  ALREADYINITIALIZED = -502,
+  INVALIDCONFIG = -503,
+  NOTREADY = -504,
+  ALREADYRUNNING = -505,
+  WAITFAILED = -506,
+  PIPEERROR = -507,
+  AIOINITERR =
+      -508, /* AIOINITERR 表示 WakeupPipe 已创建，但将其读端注册进 AIO 失败*/
+  SUCCESSFUL = 0
 };
 
 struct MonContext;
@@ -49,190 +52,286 @@ struct MonContext;
  */
 class Engine {
 public:
+  using MonitorPublisher = MonitorReporter::Publisher;
+  using AlarmPublisher = TLSSMON::AlarmPublisher;
+  /**
+   * @brief 创建处于 CREATED 状态的 Engine。
+   *        Constructs an Engine in the CREATED phase.
+   *
+   * @param config Engine 初始化时使用的监控配置。
+   *               Monitoring configuration used during initialization.
+   *
+   * @note 构造函数不会立即创建唤醒管道或 AIO 资源；这些资源由 init() 创建。
+   *       The constructor does not create the wakeup pipe or AIO resources;
+   *       those resources are created by init().
+   */
+  explicit Engine(MonConfig config);
+  ~Engine();
 
-    using MonitorPublisher = MonitorReporter::Publisher;
-    /**
-     * @brief 创建处于 CREATED 状态的 Engine。
-     *        Constructs an Engine in the CREATED phase.
-     *
-     * @param config Engine 初始化时使用的监控配置。
-     *               Monitoring configuration used during initialization.
-     *
-     * @note 构造函数不会立即创建唤醒管道或 AIO 资源；这些资源由 init() 创建。
-     *       The constructor does not create the wakeup pipe or AIO resources;
-     *       those resources are created by init().
-     */
-    explicit Engine(MonConfig config);
-    ~Engine();
+  /**
+   * @brief 初始化 Engine 的运行上下文、唤醒管道和 AIO 管理器。
+   *        Initializes the Engine runtime context, wakeup pipe, and AIO
+   * manager.
+   *
+   * @return 初始化结果。成功后 Engine 进入 READY 状态；可恢复的初始化失败会使
+   *         Engine 回到 CREATED 状态。
+   *         Initialization result. On success, the Engine enters READY;
+   *         recoverable initialization failures restore CREATED.
+   *
+   * @retval ENGINESTATE::SUCCESSFUL 初始化成功。
+   *         Initialization succeeded.
+   * @retval ENGINESTATE::ALREADYINITIALIZED Engine 不处于 CREATED 状态。
+   *         The Engine is not in CREATED.
+   * @retval ENGINESTATE::INVALIDCONFIG 配置无效；当前实现仅检查名称是否为空。
+   *         The configuration is invalid; currently only an empty name is
+   * checked.
+   * @retval ENGINESTATE::PIPEINITERR 唤醒管道初始化失败。
+   *         Wakeup-pipe initialization failed.
+   * @retval ENGINESTATE::AIOINITERR 无法将唤醒管道读端注册到 AIO 管理器。
+   *         The wakeup pipe's read end could not be registered with the AIO
+   * manager.
+   * @retval ENGINESTATE::INITFAILED 初始化期间发生内存分配失败。
+   *         Memory allocation failed during initialization.
+   */
+  ENGINESTATE init();
+  /**
+   * @brief 启动并阻塞执行 Engine 事件循环，直到 stop() 请求停止或等待失败。
+   *        Starts and blocks in the Engine event loop until stop() requests
+   *        termination or an event-wait operation fails.
+   *
+   * @return 事件循环的结束状态。函数返回后，已成功启动的 Engine 将进入
+   *         STOPPED 状态。
+   *         Final event-loop status. After a successfully started loop returns,
+   *         the Engine is in STOPPED.
+   *
+   * @retval ENGINESTATE::SUCCESSFUL 收到停止请求并正常退出。
+   *         A stop request was received and the loop exited normally.
+   * @retval ENGINESTATE::ALREADYRUNNING Engine 已经处于 RUNNING 状态。
+   *         The Engine is already RUNNING.
+   * @retval ENGINESTATE::NOTREADY Engine
+   * 未完成初始化、已经停止，或运行上下文不存在。 The Engine is not initialized,
+   * has already stopped, or has no runtime context.
+   * @retval ENGINESTATE::PIPEERROR 内部唤醒管道的文件描述符无效。
+   *         The internal wakeup-pipe descriptor is invalid.
+   * @retval ENGINESTATE::WAITFAILED AIO 等待或处理过程失败。
+   *         The AIO wait or processing operation failed.
+   *
+   * @note 该函数通常应在专用运行线程中调用。
+   *       This function should normally be called from a dedicated runner
+   * thread.
+   */
+  ENGINESTATE run();
+  /*
+   * @note stop() 原子地提交不可回滚的停止请求，并尽力通过 WakeupPipe 打断
+   * select()； 唤醒失败不会报告或恢复 RUNNING 调用方必须通过 runner.join()
+   * 确认停止完成。
+   * */
+  void stop();
 
-    /**
-     * @brief 初始化 Engine 的运行上下文、唤醒管道和 AIO 管理器。
-     *        Initializes the Engine runtime context, wakeup pipe, and AIO manager.
-     *
-     * @return 初始化结果。成功后 Engine 进入 READY 状态；可恢复的初始化失败会使
-     *         Engine 回到 CREATED 状态。
-     *         Initialization result. On success, the Engine enters READY;
-     *         recoverable initialization failures restore CREATED.
-     *
-     * @retval ENGINESTATE::SUCCESSFUL 初始化成功。
-     *         Initialization succeeded.
-     * @retval ENGINESTATE::ALREADYINITIALIZED Engine 不处于 CREATED 状态。
-     *         The Engine is not in CREATED.
-     * @retval ENGINESTATE::INVALIDCONFIG 配置无效；当前实现仅检查名称是否为空。
-     *         The configuration is invalid; currently only an empty name is checked.
-     * @retval ENGINESTATE::PIPEINITERR 唤醒管道初始化失败。
-     *         Wakeup-pipe initialization failed.
-     * @retval ENGINESTATE::AIOINITERR 无法将唤醒管道读端注册到 AIO 管理器。
-     *         The wakeup pipe's read end could not be registered with the AIO manager.
-     * @retval ENGINESTATE::INITFAILED 初始化期间发生内存分配失败。
-     *         Memory allocation failed during initialization.
-     */
-    ENGINESTATE init();
-    /**
-     * @brief 启动并阻塞执行 Engine 事件循环，直到 stop() 请求停止或等待失败。
-     *        Starts and blocks in the Engine event loop until stop() requests
-     *        termination or an event-wait operation fails.
-     *
-     * @return 事件循环的结束状态。函数返回后，已成功启动的 Engine 将进入
-     *         STOPPED 状态。
-     *         Final event-loop status. After a successfully started loop returns,
-     *         the Engine is in STOPPED.
-     *
-     * @retval ENGINESTATE::SUCCESSFUL 收到停止请求并正常退出。
-     *         A stop request was received and the loop exited normally.
-     * @retval ENGINESTATE::ALREADYRUNNING Engine 已经处于 RUNNING 状态。
-     *         The Engine is already RUNNING.
-     * @retval ENGINESTATE::NOTREADY Engine 未完成初始化、已经停止，或运行上下文不存在。
-     *         The Engine is not initialized, has already stopped, or has no runtime context.
-     * @retval ENGINESTATE::PIPEERROR 内部唤醒管道的文件描述符无效。
-     *         The internal wakeup-pipe descriptor is invalid.
-     * @retval ENGINESTATE::WAITFAILED AIO 等待或处理过程失败。
-     *         The AIO wait or processing operation failed.
-     *
-     * @note 该函数通常应在专用运行线程中调用。
-     *       This function should normally be called from a dedicated runner thread.
-     */
-    ENGINESTATE run();
-    /*
-     * @note stop() 原子地提交不可回滚的停止请求，并尽力通过 WakeupPipe 打断 select()；
-     *       唤醒失败不会报告或恢复 RUNNING
-     *       调用方必须通过 runner.join() 确认停止完成。
-     * */
-    void stop();
+  EnginePhase get_phase() const noexcept;
+  std::uint16_t cli_port() const noexcept;
 
-    EnginePhase get_phase() const noexcept;
-    std::uint16_t cli_port() const noexcept;
+  /*
+   * 注册模块及其错误元数据。
+   *
+   * 只允许在 READY 阶段调用。
+   *
+   * CREATED：
+   *   Engine 尚未初始化，拒绝。
+   *
+   * INITIALIZING：
+   *   Engine 正在初始化，拒绝。
+   *
+   * READY：
+   *   接受注册。
+   *
+   * RUNNING：
+   *   模块表已经冻结，拒绝。
+   *
+   * STOPPING/STOPPED：
+   *   Engine 不再接受新模块，拒绝。
+   */
+  ModuleRegisterStatus register_module(MonitorModuleInfo module);
 
-    /**
-     * 设置监控数据发布回调。
-     *
-     * 只有 READY 和 RUNNING 状态允许设置 Publisher。
-     * STOPPING 和 STOPPED 状态拒绝修改 Publisher。
-     *
-     * Publisher 在 MonitorStore 解锁后同步执行。Engine 不持有
-     * _control_mutex 调用 Publisher，因此 Publisher 可以重新进入 Engine。
-     */
-    bool set_publisher(MonitorPublisher publisher);
+  /**
+   * 设置监控数据发布回调。
+   *
+   * 只有 READY 和 RUNNING 状态允许设置 Publisher。
+   * STOPPING 和 STOPPED 状态拒绝修改 Publisher。
+   *
+   * Publisher 在 MonitorStore 解锁后同步执行。Engine 不持有
+   * _control_mutex 调用 Publisher，因此 Publisher 可以重新进入 Engine。
+   */
+  bool set_publisher(MonitorPublisher publisher);
 
-    /**
-     * Reporter 接口的停止并发语义：
-     *
-     * - 在调用入口观察到 READY/RUNNING 的请求已经被接受，即使 Engine 随后
-     *   进入 STOPPING，该请求仍允许执行完成。
-     * - 在调用入口观察到 STOPPING/STOPPED 的新请求立即返回 INVALID。
-     * - stop() 只提交停止请求；调用方应通过 runner.join() 等待 Engine 管理的
-     *   Timer/AIO worker 退出。
-     * - Engine 不等待外部线程直接发起的 report_*() 调用，外部线程仍应由调用方
-     *   自行管理和回收。
-     *
-     * 不能使用 _control_mutex 包围整个 Reporter/Publisher 调用，否则 Publisher
-     * 重新进入 Engine 时可能死锁。
-     */
-    MonData::UpdateResult report_count(MonData::MonitorKey key, std::uint32_t value, std::string description = {});
-    MonData::UpdateResult report_error(MonData::MonitorKey key, std::uint32_t value, std::string description = {});
-    MonData::UpdateResult report_string(MonData::MonitorKey key, std::string value, std::string description = {});
+  /**
+   * Reporter 接口的停止并发语义：
+   *
+   * - 在调用入口观察到 READY/RUNNING 的请求已经被接受，即使 Engine 随后
+   *   进入 STOPPING，该请求仍允许执行完成。
+   * - 在调用入口观察到 STOPPING/STOPPED 的新请求立即返回 INVALID。
+   * - stop() 只提交停止请求；调用方应通过 runner.join() 等待 Engine 管理的
+   *   Timer/AIO worker 退出。
+   * - Engine 不等待外部线程直接发起的 report_*() 调用，外部线程仍应由调用方
+   *   自行管理和回收。
+   *
+   * 不能使用 _control_mutex 包围整个 Reporter/Publisher 调用，否则 Publisher
+   * 重新进入 Engine 时可能死锁。
+   */
+  MonData::UpdateResult report_count(MonData::MonitorKey key,
+                                     std::uint32_t value,
+                                     std::string description = {});
+  MonData::UpdateResult report_error(MonData::MonitorKey key,
+                                     std::uint32_t value,
+                                     std::string description = {});
+  MonData::UpdateResult report_string(MonData::MonitorKey key,
+                                      std::string value,
+                                      std::string description = {});
 
-    /**
-     * 向 Engine 保存一条监控数据。
-     *
-     * 只有 READY 和 RUNNING 状态接受写入。
-     * CREATED、INITIALIZING、STOPPING 和 STOPPED 状态返回 INVALID。
-     *
-     * changed_at 由 Engine 在接受写入时生成。
-     */
-    MonData::UpdateResult update_data(MonData::MonitorData data, bool force = false);
+  /**
+   * 向 Engine 保存一条监控数据。
+   *
+   * 只有 READY 和 RUNNING 状态接受写入。
+   * CREATED、INITIALIZING、STOPPING 和 STOPPED 状态返回 INVALID。
+   *
+   * changed_at 由 Engine 在接受写入时生成。
+   */
+  MonData::UpdateResult update_data(MonData::MonitorData data,
+                                    bool force = false);
+  /**
+   * 使用调用方提供的变化时间保存监控数据。
+   *
+   * 主要供 V2 Collector 使用。V2 数据报包含生产端 changed_at，
+   * Collector 应通过此接口保留该时间。
+   *
+   * 只有 READY 和 RUNNING 状态接受写入。
+   *
+   * force 规则与 update_data() 完全相同。
+   */
+  MonData::UpdateResult update_data_at(MonData::MonitorData data,
+                                       MonData::MonitorTimestamp changed_at,
+                                       bool force = false);
 
-    /**
-     * 根据完整 Key 查询一条监控记录。
-     *
-     * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
-     * CREATED 和 INITIALIZING 状态返回 std::nullopt。
-     *
-     * 返回结果是 Store 中记录的副本。
-     */
-    std::optional<MonData::StoredRecord> find_data(const MonData::MonitorKey& key) const;
+  /**
+   * 根据完整 Key 查询一条监控记录。
+   *
+   * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
+   * CREATED 和 INITIALIZING 状态返回 std::nullopt。
+   *
+   * 返回结果是 Store 中记录的副本。
+   */
+  std::optional<MonData::StoredRecord>
+  find_data(const MonData::MonitorKey &key) const;
 
-    /**
-     * 根据过滤条件查询监控记录快照。
-     *
-     * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
-     * CREATED 和 INITIALIZING 状态返回空 vector。
-     *
-     * 空过滤器返回全部记录，顺序保持：
-     * mid -> level -> fid -> eid。
-     */
-    std::vector<MonData::StoredRecord> query_data(const MonData::MonitorFilter& filter = {}) const;
+  /**
+   * 根据过滤条件查询监控记录快照。
+   *
+   * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
+   * CREATED 和 INITIALIZING 状态返回空 vector。
+   *
+   * 空过滤器返回全部记录，顺序保持：
+   * mid -> level -> fid -> eid。
+   */
+  std::vector<MonData::StoredRecord>
+  query_data(const MonData::MonitorFilter &filter = {}) const;
 
-    /**
-     * @brief 向事件循环注册文件描述符及其回调。
-     *        Registers a file descriptor and its callback with the event loop.
-     *
-     * @param fd 要监听的文件描述符，必须位于 [0, FD_SETSIZE) 范围内，并且不能是
-     *           Engine 内部唤醒管道的读端。
-     *           Descriptor to monitor. It must be in [0, FD_SETSIZE) and must not
-     *           be the read end of the Engine's internal wakeup pipe.
-     * @param cb 文件描述符就绪时执行的回调；回调对象会被移动到 AIO 管理器中。
-     *           Callback executed when the descriptor becomes ready; it is moved
-     *           into the AIO manager.
-     *
-     * @return 注册成功时返回可用于移除注册项的 AioHandle；失败时返回 std::nullopt。
-     *         Returns an AioHandle for removing the registration on success,
-     *         or std::nullopt on failure.
-     *
-     * @note 只有处于 READY 或 RUNNING 状态的 Engine 才接受注册。
-     *       Registrations are accepted only while the Engine is READY or RUNNING.
-     *
-     * @note Engine 不接管 fd 的所有权，调用方必须保证其有效期并负责关闭。
-     *       The Engine does not own fd; the caller must keep it valid and close it.
-     */
-    std::optional<AioHandle> add_aio(int fd, MonCallback cb);
-    /**
-     * @brief 根据句柄请求移除一个 AIO 注册项。
-     *        Requests removal of an AIO registration by handle.
-     *
-     * @param handle add_aio() 返回的注册句柄。
-     *               Registration handle returned by add_aio().
-     *
-     * @return 接受移除请求时返回 true；句柄无效、注册项不存在、已经等待移除或
-     *         无法唤醒事件循环时返回 false。
-     *         Returns true when the removal request is accepted; returns false
-     *         if the handle is invalid, missing, already pending removal, or the
-     *         event loop cannot be awakened.
-     *
-     * @note 底层 AIO 管理器采用延迟移除：请求成功不表示回调对象已经立即销毁。
-     *       The underlying AIO manager removes entries lazily; success does not
-     *       mean the callback object has already been destroyed.
-     */
-    bool remove_aio(AioHandle handle);
+  /**
+   * @brief 向事件循环注册文件描述符及其回调。
+   *        Registers a file descriptor and its callback with the event loop.
+   *
+   * @param fd 要监听的文件描述符，必须位于 [0, FD_SETSIZE) 范围内，并且不能是
+   *           Engine 内部唤醒管道的读端。
+   *           Descriptor to monitor. It must be in [0, FD_SETSIZE) and must not
+   *           be the read end of the Engine's internal wakeup pipe.
+   * @param cb 文件描述符就绪时执行的回调；回调对象会被移动到 AIO 管理器中。
+   *           Callback executed when the descriptor becomes ready; it is moved
+   *           into the AIO manager.
+   *
+   * @return 注册成功时返回可用于移除注册项的 AioHandle；失败时返回
+   * std::nullopt。 Returns an AioHandle for removing the registration on
+   * success, or std::nullopt on failure.
+   *
+   * @note 只有处于 READY 或 RUNNING 状态的 Engine 才接受注册。
+   *       Registrations are accepted only while the Engine is READY or RUNNING.
+   *
+   * @note Engine 不接管 fd 的所有权，调用方必须保证其有效期并负责关闭。
+   *       The Engine does not own fd; the caller must keep it valid and close
+   * it.
+   */
+  std::optional<AioHandle> add_aio(int fd, MonCallback cb);
+  /**
+   * @brief 根据句柄请求移除一个 AIO 注册项。
+   *        Requests removal of an AIO registration by handle.
+   *
+   * @param handle add_aio() 返回的注册句柄。
+   *               Registration handle returned by add_aio().
+   *
+   * @return 接受移除请求时返回 true；句柄无效、注册项不存在、已经等待移除或
+   *         无法唤醒事件循环时返回 false。
+   *         Returns true when the removal request is accepted; returns false
+   *         if the handle is invalid, missing, already pending removal, or the
+   *         event loop cannot be awakened.
+   *
+   * @note 底层 AIO 管理器采用延迟移除：请求成功不表示回调对象已经立即销毁。
+   *       The underlying AIO manager removes entries lazily; success does not
+   *       mean the callback object has already been destroyed.
+   */
+  bool remove_aio(AioHandle handle);
 
-    std::optional<TimerHandle> set_timer(MonCallback callback, TimerFlags flags, std::chrono::milliseconds delay);
+  std::optional<TimerHandle> set_timer(MonCallback callback, TimerFlags flags,
+                                       std::chrono::milliseconds delay);
+  std::optional<MonitorModuleInfo> find_module_by_id(std::uint32_t mid) const;
+  /*
+   * 根据区分大小写的模块名查询模块。
+   *
+   * 所有生命周期阶段都允许读取。
+   * 未找到时返回 std::nullopt。
+   *
+   * 返回的是独立副本。
+   */
+  std::optional<MonitorModuleInfo>
+  find_module_by_name(std::string_view name) const;
+  /*
+   * 根据 mid 和 eid 查询错误元数据。
+   *
+   * 所有生命周期阶段都允许读取。
+   *
+   * 以下情况返回 std::nullopt：
+   *
+   * - mid 未注册。
+   * - 模块错误表为空。
+   * - eid 超出错误表范围。
+   */
+  std::optional<MonitorErrorInfo> find_error(std::uint32_t mid,
+                                             std::uint32_t eid) const;
+  /*
+   * 返回全部模块的独立快照。
+   *
+   * 顺序继承 MonitorModuleRegistry::modules()：
+   * 按模块名字典序排列。
+   */
+  std::vector<MonitorModuleInfo> modules() const;
+
+  /**
+   * 注册或注销可靠告警 Publisher。
+   *
+   * READY、RUNNING：
+   *   允许注册或注销。
+   *
+   * CREATED、INITIALIZING、STOPPING、STOPPED：
+   *   返回 false，不修改当前 Publisher。
+   *
+   * 空 AlarmPublisher 表示注销。
+   */
+  bool set_alarm_publisher(AlarmPublisher publisher);
 private:
-    // use to control a,b,c and switch operating status
-    std::mutex _control_mutex;
+  // use to control a,b,c and switch operating status
+  std::mutex _control_mutex;
 
-    MonConfig _config;
-    std::unique_ptr<MonContext> _context;
-    std::atomic<EnginePhase> _phase{EnginePhase::CREATED};
+  MonConfig _config;
+  MonitorModuleRegistry _modules;
+  std::unique_ptr<MonContext> _context;
+  std::atomic<EnginePhase> _phase{EnginePhase::CREATED};
 };
 
 } // namespace TLSSMON

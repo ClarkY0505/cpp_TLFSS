@@ -115,7 +115,13 @@ enum class UpdateStatus : std::uint8_t {
     UPDATED,
     UNCHANGED,
     IGNORED_INITIAL_ZERO,
-    INVALID
+    INVALID,
+    /*
+     * 数据原本需要插入或更新，但提交前的持久化操作失败。
+     *
+     * Store 中的数据没有发生变化。
+     */
+    DURABILITY_FAILED
 };
 
 /**

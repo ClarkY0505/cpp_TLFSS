@@ -126,7 +126,7 @@ void test_empty_store()
         registry.dispatch("db_dump");
 
     assert(result._status == CliDispatchStatus::SUCCESS);
-    assert(result._output == "0 entries\n");
+    assert(result._output == "0 entry\n");
 }
 
 /*
@@ -158,12 +158,12 @@ void test_numeric_record()
         registry.dispatch("db_dump");
 
     const std::string expected =
-        "mid=7 lvl=2 fid=8 eid=9 "
+        "mid=7 lvl=sstop fid=8 eid=9 "
         "num=123 state=2 "
         "desc=\"temperature\" "
         "changed_at="
         + expected_timestamp(update._record->_changed_at)
-        + "\n1 entries\n";
+        + "\n1 entry\n";
 
     assert(result._status == CliDispatchStatus::SUCCESS);
     assert(result._output == expected);
@@ -198,12 +198,12 @@ void test_string_record()
         registry.dispatch("db_dump");
 
     const std::string expected =
-        "mid=1 lvl=3 fid=4 eid=5 "
+        "mid=1 lvl=estop fid=4 eid=5 "
         "str=\"running\" "
         "desc=\"service status\" "
         "changed_at="
         + expected_timestamp(update._record->_changed_at)
-        + "\n1 entries\n";
+        + "\n1 entry\n";
 
     assert(result._status == CliDispatchStatus::SUCCESS);
     assert(result._output == expected);
@@ -351,11 +351,11 @@ void test_record_order()
         registry.dispatch("db_dump");
 
     const std::size_t first =
-        result._output.find("mid=1 lvl=1 fid=9 eid=9");
+        result._output.find("mid=1 lvl=warn fid=9 eid=9");
     const std::size_t second =
-        result._output.find("mid=1 lvl=2 fid=0 eid=0");
+        result._output.find("mid=1 lvl=sstop fid=0 eid=0");
     const std::size_t third =
-        result._output.find("mid=2 lvl=0 fid=0 eid=0");
+        result._output.find("mid=2 lvl=info fid=0 eid=0");
 
     assert(first != std::string::npos);
     assert(second != std::string::npos);
@@ -367,9 +367,10 @@ void test_record_order()
 }
 
 /*
- * M7 只显示 Store 原值，不把 level 转为名字，也不自动补 description。
+ * 未知 level 不能让 db_dump 失败，必须显示为 "?"。
+ * description 回填属于后续阶段，因此这里仍保持 Store 中的空字符串。
  */
-void test_does_not_apply_m8_metadata()
+void test_unknown_level_uses_question_mark()
 {
     Engine engine{MonConfig{"db-dump-no-m8", 0U, 1U}};
     initialize(engine);
@@ -392,7 +393,10 @@ void test_does_not_apply_m8_metadata()
         registry.dispatch("db_dump");
 
     assert(result._status == CliDispatchStatus::SUCCESS);
-    assert(result._output.find("lvl=99") != std::string::npos);
+    assert(
+        result._output.find("mid=10 lvl=? fid=20 eid=30")
+        != std::string::npos);
+    assert(result._output.find("lvl=99") == std::string::npos);
     assert(result._output.find("desc=\"\"") != std::string::npos);
 }
 
@@ -511,7 +515,17 @@ void test_dump_and_updates_can_run_concurrently()
                     registry.dispatch("db_dump");
 
                 assert(result._status == CliDispatchStatus::SUCCESS);
-                assert(result._output.find(" entries\n") != std::string::npos);
+
+                /*
+                 * 0 和 1 使用单数 entry，2 及以上使用复数 entries。
+                 * 并发查询得到的快照大小不固定，因此两种合法后缀都接受。
+                 */
+                const bool has_singular_count =
+                    result._output.find(" entry\n") != std::string::npos;
+                const bool has_plural_count =
+                    result._output.find(" entries\n") != std::string::npos;
+
+                assert(has_singular_count || has_plural_count);
             }
         }};
 
@@ -554,7 +568,7 @@ void test_db_dump_ignores_arguments()
         registry.dispatch("db_dump ignored argument");
 
     assert(result._status == CliDispatchStatus::SUCCESS);
-    assert(result._output == "0 entries\n");
+    assert(result._output == "0 entry\n");
 }
 
 /*
@@ -598,7 +612,7 @@ int main()
     test_utf8_string_and_description();
     test_string_escaping();
     test_record_order();
-    test_does_not_apply_m8_metadata();
+    test_unknown_level_uses_question_mark();
     test_timestamp_has_nine_nanosecond_digits();
     test_dump_and_updates_can_run_concurrently();
     test_db_dump_ignores_arguments();

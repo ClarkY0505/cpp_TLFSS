@@ -52,6 +52,21 @@ public:
   std::optional<MonitorModuleInfo> find_by_id(std::uint32_t mid) const;
 
   /*
+   * 根据 mid 和 eid 查询错误元数据。
+   *
+   * _errors 的下标就是 eid。
+   *
+   * 以下情况返回 std::nullopt：
+   *
+   * - mid 未注册。
+   * - 模块错误表为空。
+   * - eid 超出错误表范围。
+   *
+   * 返回值是独立副本，释放 Registry 锁后仍然有效。
+   */
+  std::optional<MonitorErrorInfo> find_error(std::uint32_t mid, std::uint32_t eid) const;
+
+  /*
    * 根据区分大小写的模块名查询。
    *
    * 返回独立副本；未找到时返回 std::nullopt。

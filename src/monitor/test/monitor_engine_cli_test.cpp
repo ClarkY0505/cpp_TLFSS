@@ -310,7 +310,7 @@ void test_m5_publisher_and_cli_can_work_together() {
 
   ScopedFd client = connect_cli(cli.bound_port());
   assert(send_all(client.get(), "db_dump\n"));
-  const std::string dump = receive_until(client.get(), "1 entries\n");
+  const std::string dump = receive_until(client.get(), "1 entry\n");
   assert(dump.find("desc=\"publisher-and-cli\"") != std::string::npos);
 
   assert(runner.stop_and_join() == ENGINESTATE::SUCCESSFUL);
@@ -353,7 +353,7 @@ void test_m6_udp_publisher_and_cli_can_work_together() {
 
   ScopedFd client = connect_cli(cli.bound_port());
   assert(send_all(client.get(), "db_dump\n"));
-  const std::string dump = receive_until(client.get(), "1 entries\n");
+  const std::string dump = receive_until(client.get(), "1 entry\n");
   assert(dump.find("str=\"udp-and-cli\"") != std::string::npos);
   assert(dump.find("desc=\"v2-record\"") != std::string::npos);
 
