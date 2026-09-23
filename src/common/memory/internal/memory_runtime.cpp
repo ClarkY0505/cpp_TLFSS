@@ -170,8 +170,7 @@ void* MemoryRuntime::execute_parallel_copy(std::size_t desired_worker_count, voi
     default:
       return direct_nt_copy(dst, src, size);
   }
-  // Measured on this platform: one background worker is slower than Direct NT
-  // for 128 KiB through 1 MiB, while two workers are consistently faster.
+
   constexpr std::size_t k_min_parallel_worker_count = 2;
   if (active_worker_indices->size() < k_min_parallel_worker_count) {
     return direct_nt_copy(dst, src, size);

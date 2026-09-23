@@ -9,7 +9,6 @@ CopyPlan adapt_auto_plan_for_capabilities(CopyPlan plan,
   switch (plan.strategy) {
     case CopyStrategy::LibcMemcpy:
     case CopyStrategy::RepMovsb:
-      // ERMS changes REP MOVSB performance, not instruction availability.
       return plan;
 
     case CopyStrategy::Avx2Cached:

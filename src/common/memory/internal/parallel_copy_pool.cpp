@@ -171,11 +171,11 @@ void ParallelCopyPool::dispatch_copy(const std::vector<std::size_t>& active_work
   const std::size_t extra_block_count = block_count % active_worker_count;
   std::size_t current_offset = 0;
   //
-  // 当前 dispatch（任务发布）
-  // 暂时仍然使用 mutex（互斥锁）。
+  // 当前 dispatch
+  // 暂时仍然使用 mutex
   //
   // 下一轮 benchmark 后再考虑
-  // 是否把它移出 fast path（快速路径）。
+  // 是否把它移出 fast path
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -194,7 +194,6 @@ void ParallelCopyPool::dispatch_copy(const std::vector<std::size_t>& active_work
 
     for (std::size_t active_rank = 0; active_rank < active_worker_count; ++active_rank) {
       const std::size_t worker_index = active_worker_indices[active_rank];
-
       const std::size_t worker_block_count = base_block_count + (active_rank < extra_block_count ? 1 : 0);
       const std::size_t worker_size = worker_block_count * k_nt_block_size;
 

@@ -29,9 +29,7 @@ void* parallel_nt_copy(ParallelCopyPool& pool,
   const std::size_t active_worker_count = active_worker_indices.size();
   const CopyPartition partition = make_copy_partition(dst, size, active_worker_count);
 
-  //
-  // Prefix（前缀）
-  //
+  // Prefix
   if (partition.prefix_size != 0) {
     tlss_avx2_memcpy_5(dst_bytes, src_bytes, partition.prefix_size);
   }
@@ -39,10 +37,7 @@ void* parallel_nt_copy(ParallelCopyPool& pool,
   const std::size_t tail_offset = partition.prefix_size + partition.body_size;
 
   //
-  // ------------------------------------------------------------
-  // Parallel body（并行主体）
-  // ------------------------------------------------------------
-  //
+  // Parallel body
   if (partition.body_size != 0) {
     //
     // 先发布 Parallel NT 工作。
@@ -55,17 +50,14 @@ void* parallel_nt_copy(ParallelCopyPool& pool,
     // 正在复制 body 的同时，
     // caller 处理 tail。
     //
-    //
     // body 和 tail 是互不重叠的区域，
     // 所以 memcpy 语义下可以并行执行。
-    //
     if (partition.tail_size != 0) {
       tlss_avx2_memcpy_5(dst_bytes + tail_offset, src_bytes + tail_offset, partition.tail_size);
     }
 
     //
     // 最后统一等待 body 完成。
-    //
     pool.wait();
 
     return dst;

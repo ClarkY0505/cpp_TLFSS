@@ -79,7 +79,7 @@ CpuCoreType detect_cpu_core_type(int cpu_id) noexcept {
   // 此时读取 CPUID 0x1A。
   const CpuCoreType core_type = detect_current_cpu_core_type();
 
-  // 恢复 original affinity（原始亲和性）。
+  // 恢复 original affinity
   const int restore_result =
       pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &original_cpu_set);
 

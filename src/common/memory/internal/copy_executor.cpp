@@ -29,7 +29,6 @@ void* execute_copy_plan(const CopyPlan& plan, MemoryRuntime* runtime, void* dst,
       return rep_memcpy(dst, src, size);
 
     case CopyStrategy::DirectNt:
-      /* return tlss_avx2_nt_memcpy_2stream(dst, src, size); */
       return direct_nt_copy(dst, src, size);
 
     case CopyStrategy::ParallelNt: {

@@ -36,7 +36,6 @@ std::vector<int> detect_available_cpu_ids() {
   // 当前先只实现 Linux。
   // 其他平台后续提供 platform-specific implementation
   // 至少不是现在
-  //
   throw std::runtime_error(
       "CPU affinity detection is not supported "
       "on this platform");
