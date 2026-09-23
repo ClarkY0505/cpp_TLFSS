@@ -8,6 +8,7 @@ public:
 
 protected:
     NoCopy() = default;
+    ~NoCopy() = default;
 };
 
 #endif // __INC_COMMON_NOCOPY_H__
