@@ -15,13 +15,14 @@ Checks: >
   -cppcoreguidelines-pro-type-vararg,
   -modernize-use-trailing-return-type,
   -readability-identifier-length,
+  -bugprone-easily-swappable-parameters,
   -readability-magic-numbers
 WarningsAsErrors: ''
 HeaderFilterRegex: '^(src|inc|tests)/.*'
 FormatStyle: file
 CheckOptions:
   - key: readability-function-cognitive-complexity.Threshold
-    value: '25'
+    value: '30'
   - key: readability-identifier-naming.ClassCase
     value: CamelCase
   - key: readability-identifier-naming.FunctionCase

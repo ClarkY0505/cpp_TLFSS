@@ -1,4 +1,4 @@
-add_library(monitor_lib STATIC
+add_library(monitor_lib
     aio_manager.cpp
     alarm_protocol.cpp
     alarm_spool.cpp

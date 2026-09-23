@@ -7,7 +7,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 # project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES C CXX)
-project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES C CXX)
+project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES C CXX ASM_NASM)
 
 # C++17 标准
 set(CMAKE_CXX_STANDARD 17)
@@ -16,7 +16,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 编译选项
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-add_compile_options(-Wall -Wextra -Wpedantic)
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:C>:-Wall>
+    $<$<COMPILE_LANGUAGE:C>:-Wextra>
+    $<$<COMPILE_LANGUAGE:C>:-Wpedantic>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+)
 
 # 构建类型
 if(NOT CMAKE_BUILD_TYPE)
@@ -27,6 +34,7 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
 # =============================================================================
 # 查找依赖
@@ -208,7 +216,7 @@ target_link_libraries(storage-service
 # 测试
 # =============================================================================
 
-if(BUILD_TESTS AND GTest_FOUND)
+if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
