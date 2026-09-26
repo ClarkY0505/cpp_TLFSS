@@ -4,7 +4,7 @@
 CXX ?= g++
 NASM ?= nasm
 
-CPPFLAGS += -I../../../inc -I..
+CPPFLAGS += -I../../../inc -I../../../inc/common/memory/internal
 CXXFLAGS += -std=c++17 -O3 -march=native -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -pthread
 LDLIBS += -pthread
 
@@ -45,7 +45,7 @@ $(OBJ_DIR)/memcpy_glibc_benchmark.o: memcpy_glibc_benchmark.cpp | $(OBJ_DIR)
 $(OBJ_DIR)/benchmark_1.o: benchmark_1.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
-$(OBJ_DIR)/memcpy_dispatch.o: ../memcpy_dispatch.cpp | $(OBJ_DIR)
+$(OBJ_DIR)/memcpy_dispatch.o: ../memory/memcpy_dispatch.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJ_DIR)/internal/%.o: ../memory/internal/%.cpp | $(OBJ_DIR)/internal

@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
-#include "NoCopy.h"
+#include "common/NoCopy.h"
 #include "timestamp.h"
 
 class EventLoop;

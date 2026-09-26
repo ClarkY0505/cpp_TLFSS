@@ -3,7 +3,7 @@
 
 #include "copy_policy.h"
 #include "cpu_capabilities.h"
-#include "common/tlss_memcpy.h"
+#include "common/memory/tlss_memcpy.h"
 
 namespace TLSS::MEMORY::INTERNAL {
 

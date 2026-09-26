@@ -1,5 +1,5 @@
 add_library(tlss_memory SHARED
-    ../memcpy_dispatch.cpp
+    memcpy_dispatch.cpp
     internal/copy_capability_policy.cpp
     internal/copy_executor.cpp
     internal/copy_partition.cpp
@@ -24,10 +24,10 @@ set_target_properties(tlss_memory PROPERTIES
 
 target_include_directories(tlss_memory
     PUBLIC ${PROJECT_SOURCE_DIR}/inc
-    PRIVATE ${PROJECT_SOURCE_DIR}/src/common
+    PRIVATE ${PROJECT_SOURCE_DIR}/inc/common/memory/internal
 )
 
 target_link_libraries(tlss_memory PRIVATE Threads::Threads)
 
 install(TARGETS tlss_memory LIBRARY DESTINATION lib)
-install(FILES ${PROJECT_SOURCE_DIR}/inc/common/tlss_memcpy.h DESTINATION include/common)
+install(FILES ${PROJECT_SOURCE_DIR}/inc/common/memory/tlss_memcpy.h DESTINATION include/common/memory)

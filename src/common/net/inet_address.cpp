@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include "common/inet_address.h"
+#include "common/net/inet_address.h"
 namespace TLSS::NET {
 InetAddress::InetAddress(uint16_t port, std::string ip) : _addr{} {
   memset(&_addr, 0, sizeof _addr);

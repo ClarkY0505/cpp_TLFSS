@@ -1,5 +1,5 @@
-#include "common/channel.h"
-#include "common/timestamp.h"
+#include "common/net/channel.h"
+#include "common/net/timestamp.h"
 #include "logger/logger.h"
 
 #include <sys/epoll.h>

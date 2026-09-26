@@ -21,20 +21,20 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-#include "../memory/internal/copy_executor.h"
-#include "../memory/internal/copy_capability_policy.h"
-#include "../memory/internal/copy_partition.h"
-#include "../memory/internal/copy_policy.h"
-#include "../memory/internal/cpu_affinity.h"
-#include "../memory/internal/cpu_capabilities.h"
-#include "../memory/internal/cpu_core_type.h"
-#include "../memory/internal/cpu_topology.h"
-#include "../memory/internal/direct_nt_copy.h"
-#include "../memory/internal/memory_runtime.h"
-#include "../memory/internal/parallel_copy_pool.h"
-#include "../memory/internal/parallel_nt_copy.h"
-#include "../memory/internal/worker_selection.h"
-#include "common/tlss_memcpy.h"
+#include "common/memory/internal/copy_executor.h"
+#include "common/memory/internal/copy_capability_policy.h"
+#include "common/memory/internal/copy_partition.h"
+#include "common/memory/internal/copy_policy.h"
+#include "common/memory/internal/cpu_affinity.h"
+#include "common/memory/internal/cpu_capabilities.h"
+#include "common/memory/internal/cpu_core_type.h"
+#include "common/memory/internal/cpu_topology.h"
+#include "common/memory/internal/direct_nt_copy.h"
+#include "common/memory/internal/memory_runtime.h"
+#include "common/memory/internal/parallel_copy_pool.h"
+#include "common/memory/internal/parallel_nt_copy.h"
+#include "common/memory/internal/worker_selection.h"
+#include "common/memory/tlss_memcpy.h"
 
 volatile std::uint8_t benchmark_sink = 0;
 namespace {

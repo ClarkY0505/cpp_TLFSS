@@ -6,13 +6,14 @@ if(TLSS_BUILD_MEMCPY_GLIBC_BENCHMARK)
 endif()
 
 add_library(common_lib
-    timestamp.cpp
+    net/timestamp.cpp
     common.cpp
     net.cpp
-    inet_address.cpp
-    channel.cpp
-    event_loop.cpp
-    tcp_server.cpp
+    net/inet_address.cpp
+    net/channel.cpp
+    net/event_loop.cpp
+    net/poller.cpp
+    net/tcp_server.cpp
 )
 
 target_include_directories(common_lib PUBLIC
