@@ -21,6 +21,7 @@
 
 namespace TLSSMON {
 
+/** @brief Engine 初始化和事件循环操作的状态码。 */
 enum class ENGINESTATE : int {
   INITFAILED = -500,
   PIPEINITERR = -501,
@@ -30,8 +31,7 @@ enum class ENGINESTATE : int {
   ALREADYRUNNING = -505,
   WAITFAILED = -506,
   PIPEERROR = -507,
-  AIOINITERR =
-      -508, /* AIOINITERR 表示 WakeupPipe 已创建，但将其读端注册进 AIO 失败*/
+  AIOINITERR = -508, ///< 唤醒管道已创建，但其读端注册到 AIO 失败。
   SUCCESSFUL = 0
 };
 
@@ -66,6 +66,7 @@ public:
    *       those resources are created by init().
    */
   explicit Engine(MonConfig config);
+  /** @brief 释放 Engine 对象；调用方须先停止运行线程并等待其退出。 */
   ~Engine();
 
   /**
@@ -121,18 +122,25 @@ public:
    * thread.
    */
   ENGINESTATE run();
-  /*
-   * @note stop() 原子地提交不可回滚的停止请求，并尽力通过 WakeupPipe 打断
-   * select()； 唤醒失败不会报告或恢复 RUNNING 调用方必须通过 runner.join()
-   * 确认停止完成。
-   * */
+  /**
+   * @brief 提交不可回滚的停止请求，并尝试唤醒事件循环。
+   * @note 调用方须等待运行线程退出，才能确认 Engine 完成停止。
+   */
   void stop();
 
+  /**
+   * @brief 返回当前生命周期阶段。
+   * @return 当前 Engine 生命周期阶段。
+   */
   EnginePhase get_phase() const noexcept;
+  /**
+   * @brief 返回配置中的 CLI 端口。
+   * @return Engine 配置中的 CLI 端口。
+   */
   std::uint16_t cli_port() const noexcept;
 
-  /*
-   * 注册模块及其错误元数据。
+  /**
+   * @brief 注册模块及其错误元数据。
    *
    * 只允许在 READY 阶段调用。
    *
@@ -150,23 +158,32 @@ public:
    *
    * STOPPING/STOPPED：
    *   Engine 不再接受新模块，拒绝。
+   * @param module 要注册的模块信息。
+   * @return 注册状态，包含名称、ID、级别或 Engine 阶段错误。
    */
   ModuleRegisterStatus register_module(MonitorModuleInfo module);
 
   /**
-   * 设置监控数据发布回调。
+   * @brief 设置监控数据发布回调。
    *
    * 只有 READY 和 RUNNING 状态允许设置 Publisher。
    * STOPPING 和 STOPPED 状态拒绝修改 Publisher。
    *
    * Publisher 在 MonitorStore 解锁后同步执行。Engine 不持有
    * _control_mutex 调用 Publisher，因此 Publisher 可以重新进入 Engine。
+   * @param publisher 要注册的发布回调；空回调表示注销。
+   * @return 操作成功时返回 true，否则返回 false。
    */
   bool set_publisher(MonitorPublisher publisher);
 
   /**
-   * Reporter 接口的停止并发语义：
+   * @brief 上报计数值，并按 Store 规则更新记录。
+   * @param key 监控记录的完整主键。
+   * @param value 本次计数值。
+   * @param description 可选的可读描述。
+   * @return 写入结果；Engine 不接受请求时状态为 INVALID。
    *
+   * @note Reporter 接口的停止并发语义：
    * - 在调用入口观察到 READY/RUNNING 的请求已经被接受，即使 Engine 随后
    *   进入 STOPPING，该请求仍允许执行完成。
    * - 在调用入口观察到 STOPPING/STOPPED 的新请求立即返回 INVALID。
@@ -181,15 +198,32 @@ public:
   MonData::UpdateResult report_count(MonData::MonitorKey key,
                                      std::uint32_t value,
                                      std::string description = {});
+  /**
+   * @brief 上报错误值；配置可靠告警通道时，先持久化再更新 Store。
+   * @param key 监控记录的完整主键。
+   * @param value 本次错误值。
+   * @param description 可选的可读描述。
+   * @return 写入或持久化结果。
+   */
   MonData::UpdateResult report_error(MonData::MonitorKey key,
                                      std::uint32_t value,
                                      std::string description = {});
+  /**
+   * @brief 上报字符串值，并按 Store 规则更新记录。
+   * @param key 监控记录的完整主键。
+   * @param value 本次字符串值。
+   * @param description 可选的可读描述。
+   * @return 写入结果。
+   */
   MonData::UpdateResult report_string(MonData::MonitorKey key,
                                       std::string value,
                                       std::string description = {});
 
   /**
-   * 向 Engine 保存一条监控数据。
+   * @brief 向 Engine 保存一条监控数据。
+   * @param data 完整监控记录。
+   * @param force 是否强制写入原本会被忽略的初始零值。
+   * @return 写入结果；不允许写入的阶段返回 INVALID。
    *
    * 只有 READY 和 RUNNING 状态接受写入。
    * CREATED、INITIALIZING、STOPPING 和 STOPPED 状态返回 INVALID。
@@ -199,7 +233,11 @@ public:
   MonData::UpdateResult update_data(MonData::MonitorData data,
                                     bool force = false);
   /**
-   * 使用调用方提供的变化时间保存监控数据。
+   * @brief 使用调用方提供的变化时间保存监控数据。
+   * @param data 完整监控记录。
+   * @param changed_at 生产端提供的变化时间。
+   * @param force 是否强制写入原本会被忽略的初始零值。
+   * @return 写入结果；不允许写入的阶段返回 INVALID。
    *
    * 主要供 V2 Collector 使用。V2 数据报包含生产端 changed_at，
    * Collector 应通过此接口保留该时间。
@@ -213,7 +251,9 @@ public:
                                        bool force = false);
 
   /**
-   * 根据完整 Key 查询一条监控记录。
+   * @brief 根据完整 Key 查询一条监控记录。
+   * @param key 要查询的完整主键。
+   * @return 记录副本；阶段不允许读取或未找到时返回 std::nullopt。
    *
    * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
    * CREATED 和 INITIALIZING 状态返回 std::nullopt。
@@ -224,7 +264,9 @@ public:
   find_data(const MonData::MonitorKey &key) const;
 
   /**
-   * 根据过滤条件查询监控记录快照。
+   * @brief 根据过滤条件查询监控记录快照。
+   * @param filter 要匹配的主键字段；空过滤器匹配全部记录。
+   * @return 按主键顺序排列的记录副本。
    *
    * READY、RUNNING、STOPPING 和 STOPPED 状态允许读取。
    * CREATED 和 INITIALIZING 状态返回空 vector。
@@ -278,21 +320,36 @@ public:
    */
   bool remove_aio(AioHandle handle);
 
+  /**
+   * @brief 在 READY 或 RUNNING 阶段注册定时器。
+   * @param callback 要注册的监控回调。
+   * @param flags 定时器行为标志。
+   * @param delay 首次触发延迟；周期定时器也将其用作间隔。
+   * @return 成功时返回句柄；阶段、参数无效或注册失败时返回 std::nullopt。
+   * @see TimerManager::add
+   */
   std::optional<TimerHandle> set_timer(MonCallback callback, TimerFlags flags,
                                        std::chrono::milliseconds delay);
+  /**
+   * @brief 按 mid 查询模块；未找到时返回 std::nullopt。
+   * @param mid 模块 ID。
+   * @return 找到时返回独立副本，否则返回 std::nullopt。
+   */
   std::optional<MonitorModuleInfo> find_module_by_id(std::uint32_t mid) const;
-  /*
-   * 根据区分大小写的模块名查询模块。
+  /**
+   * @brief 根据区分大小写的模块名查询模块。
    *
    * 所有生命周期阶段都允许读取。
    * 未找到时返回 std::nullopt。
    *
    * 返回的是独立副本。
+   * @param name 区分大小写的名称。
+   * @return 找到时返回独立副本，否则返回 std::nullopt。
    */
   std::optional<MonitorModuleInfo>
   find_module_by_name(std::string_view name) const;
-  /*
-   * 根据 mid 和 eid 查询错误元数据。
+  /**
+   * @brief 根据 mid 和 eid 查询错误元数据。
    *
    * 所有生命周期阶段都允许读取。
    *
@@ -301,19 +358,23 @@ public:
    * - mid 未注册。
    * - 模块错误表为空。
    * - eid 超出错误表范围。
+   * @param mid 模块 ID。
+   * @param eid 事件 ID，即模块错误表的下标。
+   * @return 找到时返回独立副本，否则返回 std::nullopt。
    */
   std::optional<MonitorErrorInfo> find_error(std::uint32_t mid,
                                              std::uint32_t eid) const;
-  /*
-   * 返回全部模块的独立快照。
+  /**
+   * @brief 返回全部模块的独立快照。
    *
    * 顺序继承 MonitorModuleRegistry::modules()：
    * 按模块名字典序排列。
+   * @return 按模块名字典序排列的独立快照。
    */
   std::vector<MonitorModuleInfo> modules() const;
 
   /**
-   * 注册或注销可靠告警 Publisher。
+   * @brief 注册或注销可靠告警 Publisher。
    *
    * READY、RUNNING：
    *   允许注册或注销。
@@ -322,10 +383,12 @@ public:
    *   返回 false，不修改当前 Publisher。
    *
    * 空 AlarmPublisher 表示注销。
+   * @param publisher 可靠告警入队回调；空回调表示注销。
+   * @return 操作成功时返回 true，否则返回 false。
    */
   bool set_alarm_publisher(AlarmPublisher publisher);
 private:
-  // use to control a,b,c and switch operating status
+  /** @brief use to control a,b,c and switch operating status */
   std::mutex _control_mutex;
 
   MonConfig _config;

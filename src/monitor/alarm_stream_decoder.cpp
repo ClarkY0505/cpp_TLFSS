@@ -19,6 +19,7 @@ bool AlarmStreamFeedResult::success() const noexcept {
 AlarmStreamFeedResult
 AlarmStreamDecoder::fail_protocol(AlarmProtocolStatus status,
                                   std::vector<AlarmFrame> completed) noexcept {
+  // 已完成的前序帧仍返回调用方；错误连接进入失败态，必须 reset 后复用。
   _failed = true;
   _failure_status = AlarmStreamStatus::PROTOCOL_ERROR;
   _protocol_error = status;
@@ -44,6 +45,7 @@ AlarmStreamDecoder::fail_stream(AlarmStreamStatus status,
 
 AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t *data,
                                                std::size_t size) noexcept {
+  // 一次 feed 可以补齐半帧，也可以连续解析多个完整帧。
   std::vector<AlarmFrame> completed;
 
   if (_failed) {

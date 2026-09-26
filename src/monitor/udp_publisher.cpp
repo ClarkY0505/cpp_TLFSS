@@ -82,6 +82,7 @@ UdpPublishStatus UdpPublisher::setup_status() const noexcept {
 }
 
 UdpPublishResult UdpPublisher::send(const MonData::StoredRecord &record) const {
+  // 编码失败在发送前返回，并保留 WireStatus 供调用方定位协议错误。
   if (!ready()) {
     return {_impl->_setup_status, WireStatus::SUCCESS, 0, _impl->_setup_error};
   }

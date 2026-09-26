@@ -29,6 +29,7 @@ CallbackStats EnhancedCallback::stats() const{
 }
 
 int EnhancedCallback::invoke_and_record() noexcept{
+    // 用户回调的异常统一隔离，保证事件循环/worker 存活并记录耗时。
     const auto start = std::chrono::steady_clock::now();
     int res = 0;
     try{
@@ -36,7 +37,7 @@ int EnhancedCallback::invoke_and_record() noexcept{
             res = _mcb._cb();
         }
     } catch (...){
-        // TODO Log
+        // TODO：记录回调异常。
         res = -1;
     }
     const auto finish = std::chrono::steady_clock::now();
@@ -103,6 +104,7 @@ int EnhancedCallback::activate(){
             return -1;
         }
     }
+    // 只保存一个待执行标记：忙碌期间的重复触发会合并，避免无限排队。
     _pending = true;
 
     lock.unlock();
@@ -158,7 +160,7 @@ bool EnhancedCallback::asynchronous() const noexcept
 
 void CallbackRegistry::add(EnhancedCallback* cb){
     if(nullptr == cb){
-        // TODO Log
+        // TODO：记录空回调注册。
         return;
     }
 
@@ -174,7 +176,7 @@ void CallbackRegistry::add(EnhancedCallback* cb){
 
 void CallbackRegistry::remove(EnhancedCallback* cb){
     if(nullptr == cb){
-        // TODO Log
+        // TODO：记录空回调注销。
         return ;
     }
 
@@ -191,6 +193,7 @@ void CallbackRegistry::stop_workers(){
         callbacks = _cbs;
     }
 
+    // 先复制指针快照再 join，worker 退出时无需等待 Registry 锁。
     for(EnhancedCallback * cb : callbacks){
         if(nullptr != cb && cb->asynchronous()){
             cb->stop_worker();

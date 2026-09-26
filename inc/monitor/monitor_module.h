@@ -12,48 +12,48 @@
 
 namespace TLSSMON {
 
-/*
- * 模块名称最大长度。
+/**
+ * @brief 模块名称最大长度。
  *
  * 按字节计算，不按 Unicode 字符数量计算。
  * 当前阶段只允许安全 ASCII，因此字节数就是字符数。
  */
 inline constexpr std::size_t MONITOR_MODULE_NAME_MAX = 63U;
 
-/*
- * 注册模块的结果。
+/**
+ * @brief 注册模块的结果。
  */
 enum class ModuleRegisterStatus : std::uint8_t {
-  /*
-   * 注册成功。
+  /**
+   * @brief 注册成功。
    */
   SUCCESS,
-  /*
-   * 模块名称为空、过长、包含非法字符，
+  /**
+   * @brief 模块名称为空、过长、包含非法字符，
    * 或者使用了保留名称 "all"。
    */
   INVALID_NAME,
-  /*
-   * 已经存在相同 mid 的模块。
+  /**
+   * @brief 已经存在相同 mid 的模块。
    */
   DUPLICATE_ID,
-  /*
-   * 已经存在相同名称的模块。
+  /**
+   * @brief 已经存在相同名称的模块。
    */
   DUPLICATE_NAME,
-  /*
-   * 模块错误表中至少存在一个非法 MonitorLevel。
+  /**
+   * @brief 模块错误表中至少存在一个非法 MonitorLevel。
    */
   INVALID_ERROR_LEVEL,
-  /*
-   * 当前 Engine 生命周期阶段不允许注册模块。
+  /**
+   * @brief 当前 Engine 生命周期阶段不允许注册模块。
    */
   INVALID_PHASE
 
 };
 
-/*
- * 一个受监控模块的公共信息。
+/**
+ * @brief 一个受监控模块的公共信息。
  *
  * _mid：
  *   与 MonitorKey::_mid 对应。
@@ -82,9 +82,13 @@ struct MonitorModuleInfo final {
 
   MonitorModuleInfo() = default;
 
-  /*
-   * 第四个参数默认为空错误表，使旧 M7 的三字段初始化在启用
+  /**
+   * @brief 第四个参数默认为空错误表，使旧 M7 的三字段初始化在启用
    * -Wmissing-field-initializers 和 -Werror 时仍能无警告编译。
+   * @param mid 模块 ID。
+   * @param name 区分大小写的名称。
+   * @param description 监控记录的可读描述。
+   * @param errors 按 EID 顺序排列的错误元数据表。
    */
   MonitorModuleInfo(std::uint32_t mid, std::string name,
                     std::string description,
@@ -93,8 +97,8 @@ struct MonitorModuleInfo final {
         _errors(std::move(errors)) {}
 };
 
-/*
- * 判断字符是否属于模块名称允许使用的安全 ASCII 集合。
+/**
+ * @brief 判断字符是否属于模块名称允许使用的安全 ASCII 集合。
  *
  * 合法字符：
  *
@@ -104,6 +108,8 @@ struct MonitorModuleInfo final {
  * -
  * _
  * .
+ * @param character 待验证的字符。
+ * @return 字符属于允许的安全 ASCII 集合时返回 true。
  */
 constexpr bool
 is_valid_module_name_character(unsigned char character) noexcept {
@@ -122,8 +128,8 @@ is_valid_module_name_character(unsigned char character) noexcept {
          character == static_cast<unsigned char>('.');
 }
 
-/*
- * 校验模块名称。
+/**
+ * @brief 校验模块名称。
  *
  * 规则：
  *
@@ -134,6 +140,8 @@ is_valid_module_name_character(unsigned char character) noexcept {
  *
  * 这里显式转换为 unsigned char，避免 char 为有符号类型时，
  * 高位字节参与比较产生平台相关行为。
+ * @param name 区分大小写的名称。
+ * @return 模块名称满足长度、字符和保留名称规则时返回 true。
  */
 inline bool is_valid_module_name(std::string_view name) noexcept {
   if (name.empty() || name.size() > MONITOR_MODULE_NAME_MAX) {
@@ -155,12 +163,15 @@ inline bool is_valid_module_name(std::string_view name) noexcept {
   return true;
 }
 
-/*
- * MonitorModuleInfo 使用完整值语义。
+/**
+ * @brief MonitorModuleInfo 使用完整值语义。
  *
  * description 虽然不参与注册唯一性判断，
  * 但它是 MonitorModuleInfo 的组成部分，因此 operator==
  * 必须比较它。
+ * @param lhs 左操作数。
+ * @param rhs 右操作数。
+ * @return 比较条件成立时返回 true，否则返回 false。
  */
 inline bool operator==(const MonitorModuleInfo &lhs,
                        const MonitorModuleInfo &rhs) {
@@ -168,6 +179,12 @@ inline bool operator==(const MonitorModuleInfo &lhs,
          lhs._description == rhs._description && lhs._errors == rhs._errors;
 }
 
+/**
+ * @brief 判断模块 ID、名称、描述或错误表是否不同。
+ * @param lhs 左操作数。
+ * @param rhs 右操作数。
+ * @return 比较条件成立时返回 true，否则返回 false。
+ */
 inline bool operator!=(const MonitorModuleInfo &lhs,
                        const MonitorModuleInfo &rhs) {
   return !(lhs == rhs);

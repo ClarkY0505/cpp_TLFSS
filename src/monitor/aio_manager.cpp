@@ -38,6 +38,7 @@ AioManager::~AioManager(){
 void AioManager::cleanup(){
     std::list<std::unique_ptr<AioEntry>> entries;
 
+    // 在锁内转移所有权，锁外注销并销毁回调，避免析构时反向获取 Registry 锁。
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if(_cleaned_up){
@@ -127,7 +128,7 @@ bool AioManager::remove(AioHandle handle){
         return false;
     }
 
-    // auto& entry is std::unique_ptr<AioEntry> entry
+    // 容器元素由 unique_ptr 持有，按 handle 查找对应节点。
     const auto pos = std::find_if(_entries.begin(),_entries.end(),
                                   [handle](const auto& entry){
                                   return entry && entry->_id == handle._id;
@@ -137,6 +138,8 @@ bool AioManager::remove(AioHandle handle){
         return false;
     }
 
+    // 本轮 process() 可能还持有节点指针，因此只标记删除；下轮组装
+    // fd_set 时才真正摘除节点，并从 Registry 注销回调。
     (*pos)->_pending_remove = true;
 
     if(_wakeup.wakeup() != PIPESTATUS::SUCCESSFUL){
@@ -158,18 +161,11 @@ int AioManager::process(timeval* timeout){
 
     std::list<std::unique_ptr<AioEntry>> retired;
     /*
-     * 创建armed快照
-     * 原始流程 根据当时的 _entries 构造 fd_set -> select() -> 再次遍历_entries
-     * 如果在select()阻塞期间另一个线程添加了AIO,第二次遍历会看到一个并未参与本轮select()的新节点
-     * 特别是新节点与已有节点使用相同fd时,此时回调可能被错误激活
-     *
-     * 因此，select() 返回后，只遍历 armed_entries，不要遍历最新的 _entries
-     * 当前预期生命周期为
-     * 构造 armed_entries -> select() -> 检查 armed_entries -> 执行回调 
-     * -> process() 返回 -> 下一轮 process() 才回收 pending 节点
-     * 但是这个方法不确定是否可以正确的达到预期
-     * TODO
-     * */
+     * armed_entries 只记录实际加入本轮 fd_set 的节点。
+     * select() 等待期间可以添加新节点；即使新旧节点复用了同一个 fd，
+     * 也只检查本轮已布防的节点，避免误触发新节点回调。
+     * pending_remove 节点在下一轮 process() 开始时回收。
+     */
     std::vector<AioEntry*> armed_entries;
     int max_fd = -1;
 

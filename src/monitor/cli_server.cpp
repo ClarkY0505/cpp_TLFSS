@@ -85,6 +85,7 @@ private:
 };
 
 std::string format_system_reply(std::string_view output) {
+  // 为命令输出的每一行加前缀，便于与交互提示符区分。
   if (output.empty()) {
     return {};
   }
@@ -198,6 +199,7 @@ CliServer::CliServer(Engine &engine, CliRegistry &registry,
 CliServer::~CliServer() { close(); }
 
 bool CliServer::start() {
+  // Listener 只启动一次；连接会话由 Engine AIO 管理。
   std::lock_guard<std::mutex> lock(_mutex);
   if (_ever_started || _listener) {
     return false;
@@ -233,6 +235,7 @@ bool CliServer::start() {
   }
 
   sockaddr_in address{};
+  // CLI 仅监听本机回环地址，供本机诊断和查询。
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(_config._port);
@@ -404,6 +407,7 @@ int CliServer::handle_listener_ready(
           continue;
         }
 
+        // 注册锁确保客户端回调不会早于 _aio_handle 写入而关闭会话。
         std::optional<AioHandle> handle;
         {
           std::lock_guard<std::mutex> registration_lock(
@@ -449,14 +453,14 @@ int CliServer::handle_listener_ready(
 
       /*
        * 单次 accept 错误不终止 Engine。
-       * TODO Log 记录 accept_error。
+       * TODO：记录 accept_error。
        */
       return 0;
     }
   } catch (...) {
     /*
      * 内存分配失败这些异常不能穿透Engine AIO回调
-     * TODO Log 记录异常
+     * TODO：记录异常。
      * */
     return 0;
   }
@@ -519,7 +523,7 @@ int CliServer::handle_client_ready(
   } catch (...) {
     /*
      * std::string 扩容或 Registry 分派过程中发生异常时，
-     * TODO Log 记录上述这些异常
+     * TODO：记录上述异常。
      */
     close_session(state, session);
     return 0;
@@ -528,6 +532,7 @@ int CliServer::handle_client_ready(
 
 bool CliServer::process_input(const std::shared_ptr<ServerState> &state,
                               const std::shared_ptr<ClientSession> &session) {
+  // 输入缓冲可能一次收到多行；逐行分派并保留最后的不完整行。
   for (;;) {
     if (state->_closing.load(std::memory_order_acquire) ||
         session->_closing.load(std::memory_order_acquire) ||
@@ -611,7 +616,7 @@ bool CliServer::send_prompt(
     /*
      * make_cli_prompt() 可能因为字符串分配失败抛出异常。
      * 异常不能穿透 Engine AIO 回调。
-     * TODO Log
+     * TODO：记录提示符生成异常。
      */
     return false;
   }
@@ -619,6 +624,7 @@ bool CliServer::send_prompt(
 
 bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
                          std::string_view output) noexcept {
+  // 慢客户端最多占用固定发送时间，避免阻塞 Engine 的 AIO 回调。
   if (!session || session->_fd < 0) {
     return false;
   }

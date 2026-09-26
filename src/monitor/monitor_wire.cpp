@@ -193,6 +193,7 @@ join_timestamp(std::int64_t seconds, std::uint32_t nanoseconds) {
 } // namespace
 
 EncodeResult encode_v1(const MonData::StoredRecord &record) {
+  // V1 只保存键和值；描述与变化时间不会进入数据报。
   const auto *numeric =
       std::get_if<MonData::NumericValue>(&record._data._value);
   if (numeric != nullptr) {
@@ -209,9 +210,7 @@ EncodeResult encode_v1(const MonData::StoredRecord &record) {
   if (string_value == nullptr) {
     return make_encode_error(WireStatus::INVALID_TYPE);
   }
-  /*
-   * V1 是 NUL 终止协议。std::string 中存在内嵌 NUL 时，
-   **/
+  // V1 字符串以首个 NUL 结束，内嵌 NUL 后的内容无法在线上传输。
   const std::size_t terminator = string_value->find('\0');
   const std::size_t content_size =
       terminator == std::string::npos ? string_value->size() : terminator;
@@ -221,13 +220,7 @@ EncodeResult encode_v1(const MonData::StoredRecord &record) {
 
   std::vector<std::uint8_t> bytes(V1_HEADER_SIZE + content_size + 1U, 0U);
   write_v1_header(bytes, WireValueType::STRING, record._data._key);
-  /*
-   * 想要得到一个大致这个形式的协议帧
-   * ┌──────────────────────┬──────────────────────────────────────┐
-   * │ 头部数据             │ 字符串内容                           │
-   * │ bytes[0]～bytes[17]  │ bytes[18]～bytes[18 + content_size]  │
-   * └──────────────────────┴──────────────────────────────────────┘
-   * */
+  // 18 字节固定头后依次写入字符串内容和一个 NUL 终止字节。
   std::copy_n(reinterpret_cast<const std::uint8_t *>(string_value->data()),
               content_size,
               bytes.begin() + static_cast<std::ptrdiff_t>(V1_HEADER_SIZE));
@@ -381,6 +374,7 @@ EncodeResult encode_v2(const MonData::StoredRecord &record) {
 
 // V2 解码
 DecodeResult decode_v2(const std::uint8_t *data, std::size_t size) {
+  // 头部先验证版本、总长和字段长度，之后的切片才不会越过数据报边界。
   const Detail::V2HeaderResult header_result =
       Detail::read_v2_header(data, size);
 
@@ -446,6 +440,7 @@ EncodeResult encode(const MonData::StoredRecord &record, WireVersion version) {
 }
 
 DecodeResult decode(const std::uint8_t *data, std::size_t size) {
+  // 统一入口只依赖首字节选择版本，具体字段验证留给对应解码器。
   if (data == nullptr || size == 0U) {
     return make_decode_error(WireStatus::EMPTY_INPUT);
   }
@@ -464,7 +459,7 @@ DecodeResult decode(const std::uint8_t *data, std::size_t size) {
 
 namespace Detail {
 void put_u16(std::uint8_t *output, std::uint16_t value) noexcept {
-  // value is 0x1234
+  // 例如 value 为 0x1234，首字节写入高位的 0x12。
   // output[0] = 0x0012 & 0xffU
   // 0001 0010 & 1111 1111 = 0001 0010 = 0x12
   output[0] = static_cast<std::uint8_t>((value >> 8U) & 0xffU);
@@ -612,6 +607,7 @@ WireStatus write_v2_header(std::vector<std::uint8_t> &datagram,
 }
 
 V2HeaderResult read_v2_header(const std::uint8_t *data, std::size_t size) {
+  // 校验所有长度字段后，调用方才可以安全读取 description 与 value。
   if (data == nullptr || size == 0U) {
     return make_v2_header_error(WireStatus::EMPTY_INPUT);
   }

@@ -298,6 +298,7 @@ struct ReliableAlarmCollector::Impl final {
 };
 
 bool ReliableAlarmCollector::Impl::initialize() {
+  // 启动监听前先恢复已落盘 inbox，避免重启后 ACK 已发记录只留在磁盘。
   if (!valid_config(_config)) {
     _setup_status = ReliableAlarmCollectorSetupStatus::INVALID_CONFIG;
     _setup_error = EINVAL;
@@ -433,6 +434,7 @@ bool ReliableAlarmCollector::Impl::collect_recovery_paths(
 }
 
 bool ReliableAlarmCollector::Impl::recover_inbox() {
+  // 恢复时把历史记录重新写入 Engine，并重建本进程的去重集合。
   std::vector<fs::path> paths;
 
   if (!collect_recovery_paths(paths)) {
@@ -671,6 +673,7 @@ bool ReliableAlarmCollector::Impl::process_alarm(Client &client,
     }
 
     if (_accepted.find(identity) != _accepted.end()) {
+      // 内存中已确认过的消息直接 ACK，不重复写 Store。
       record_duplicate();
       return queue_control(client, AlarmWire::AlarmFrameType::ACK, frame);
     }
@@ -691,6 +694,7 @@ bool ReliableAlarmCollector::Impl::process_alarm(Client &client,
     if (stored._status == AlarmWire::AlarmSpoolStatus::SUCCESS) {
       durable_record = std::move(incoming_record);
     } else if (stored._status == AlarmWire::AlarmSpoolStatus::DUPLICATE) {
+      // 磁盘已有同一身份时读取已持久化版本，防止重试包替换历史内容。
       duplicate_on_disk = true;
       record_duplicate();
       durable_record = load_persisted_record(stored._path);
@@ -748,7 +752,7 @@ bool ReliableAlarmCollector::Impl::process_frame(Client &client,
 }
 
 bool ReliableAlarmCollector::Impl::read_client(Client &client) {
-
+  // TCP 只有字节流边界；Decoder 在多次 recv 间保留未完成的帧。
   std::array<std::uint8_t, CLIENT_READ_CHUNK> buffer{};
 
   for (;;) {
@@ -811,7 +815,7 @@ bool ReliableAlarmCollector::Impl::read_client(Client &client) {
 }
 
 bool ReliableAlarmCollector::Impl::write_client(Client &client) {
-
+  // ACK/PONG 留在发送队列中，短写后从上次偏移继续。
   if (client._writes.empty()) {
     return true;
   }
@@ -854,6 +858,7 @@ bool ReliableAlarmCollector::Impl::write_client(Client &client) {
 }
 
 void ReliableAlarmCollector::Impl::accept_clients() {
+  // 每轮限制 accept 次数，给现有客户端和停止请求留出处理机会。
   for (std::size_t attempt = 0U; attempt < MAX_ACCEPTS_PER_ROUND; ++attempt) {
 
     const int client_fd = ::accept(_listener, nullptr, nullptr);
@@ -927,6 +932,8 @@ void ReliableAlarmCollector::Impl::close_all_clients() noexcept {
 }
 
 bool ReliableAlarmCollector::Impl::poll_once() {
+  // 同时监听服务 socket、停止唤醒管道及所有客户端；最近的客户端
+  // 空闲截止时间决定本轮 poll 最长阻塞时间。
   std::vector<pollfd> descriptors;
   descriptors.reserve(2U + _clients.size());
 
@@ -1070,6 +1077,7 @@ void ReliableAlarmCollector::Impl::close_listener() noexcept {
 }
 
 void ReliableAlarmCollector::Impl::stop() noexcept {
+  // 唤醒 poll 并 join 工作线程后，才能关闭它持有的客户端和监听 fd。
   const bool already_stopping = _stop.exchange(true, std::memory_order_acq_rel);
 
   _active.store(false, std::memory_order_release);

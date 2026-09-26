@@ -42,6 +42,7 @@ bool is_valid_cli_prompt_name(std::string_view name) noexcept {
 
 std::string make_cli_prompt(std::string_view default_name,
                             const CliSessionContext &context) {
+  // 当前连接的模块选择只影响自己的提示符，不修改服务端全局名称。
   const std::string_view prompt_name =
       context.has_selected_module()
           ? std::string_view{context._selected_module_name}

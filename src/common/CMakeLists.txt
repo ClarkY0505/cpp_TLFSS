@@ -9,6 +9,10 @@ add_library(common_lib
     timestamp.cpp
     common.cpp
     net.cpp
+    inet_address.cpp
+    channel.cpp
+    event_loop.cpp
+    tcp_server.cpp
 )
 
 target_include_directories(common_lib PUBLIC

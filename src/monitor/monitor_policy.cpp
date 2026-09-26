@@ -134,6 +134,7 @@ public:
       : _threshold(threshold), _period(period),
         _events(count, PolicyTime::zero()) {}
   PolicyFeedResult feed(std::uint32_t value, PolicyTime now) noexcept override {
+    // 未超阈值的采样不算事件，也不主动清除已有告警状态。
     if (value <= _threshold) {
       return PolicyFeedResult{false, current_value()};
     }
@@ -245,7 +246,7 @@ public:
     /*
      * 移动到下一次写入位置。
      *
-     * factory 已保证 samples 不为空，因此不会除零。
+     * 工厂函数已保证 samples 不为空，因此不会除零。
      */
     _head = (_head + 1U) % _samples.size();
 

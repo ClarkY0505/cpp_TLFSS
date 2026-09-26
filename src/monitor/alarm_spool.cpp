@@ -226,6 +226,7 @@ AlarmSpoolStatus resolve_owned_regular_file(const fs::path &base,
                                             const fs::path &input,
                                             fs::path &resolved,
                                             int &system_error) {
+  // read/remove/quarantine 共用所有权检查，只允许操作数据目录内的普通文件。
   std::error_code error;
   const fs::file_status input_status = fs::symlink_status(input, error);
   if (error) {
@@ -263,6 +264,7 @@ AlarmSpoolStatus resolve_owned_regular_file(const fs::path &base,
 }
 
 ScanResult scan_regular_files(const fs::path &directory) {
+  // 同一次扫描得到容量统计和按路径排序的首个待处理文件。
   ScanResult result;
   std::error_code error;
 
@@ -476,6 +478,7 @@ const AlarmSpoolConfig &AlarmSpool::config() const noexcept {
 AlarmSpoolStoreResult AlarmSpool::store(std::uint64_t source_id,
                                         const AlarmMessageId &message_id,
                                         const std::vector<std::uint8_t> &wire) {
+  // 先验证完整帧及消息身份，再进入临界区检查重复与容量。
   if (!ready()) {
     return {AlarmSpoolStatus::NOT_READY, {}, setup_error()};
   }
@@ -569,6 +572,7 @@ AlarmSpoolStoreResult AlarmSpool::store(std::uint64_t source_id,
   }
 
   UniqueFd fd(raw_fd);
+  // 临时文件写入并同步后，才以最终文件名发布给发送/恢复流程。
   const auto remove_temporary = [&]() noexcept {
     (void)::unlink(temporary_path.c_str());
   };
@@ -636,6 +640,7 @@ AlarmSpoolPathResult AlarmSpool::next() const {
 }
 
 AlarmSpoolReadResult AlarmSpool::read(const fs::path &path) {
+  // 读取时再次验证文件类型、大小和协议；损坏文件移入 corrupt。
   if (!ready()) {
     return {AlarmSpoolStatus::NOT_READY, {}, {}, setup_error()};
   }
@@ -721,6 +726,7 @@ AlarmSpoolPathResult AlarmSpool::remove(const fs::path &path) {
     return {AlarmSpoolStatus::IO_ERROR, {}, errno};
   }
 
+  // 删除也需要同步目录项；否则崩溃恢复时旧文件可能重新出现。
   if (!sync_directory(resolved.parent_path(), system_error)) {
     return {AlarmSpoolStatus::IO_ERROR, {}, system_error};
   }

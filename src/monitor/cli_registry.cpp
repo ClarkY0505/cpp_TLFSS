@@ -93,6 +93,7 @@ CliRegisterStatus CliRegistry::register_command(std::string name,
     return CliRegisterStatus::INVALID_HANDLER;
   }
 
+  // 旧式 Handler 不读取会话状态，统一适配到带 Context 的分派路径。
   CliSessionHandler adapted =
       [handler = std::move(handler)](CliSessionContext &,
                                      const CliArguments &arguments) {
@@ -155,6 +156,7 @@ CliDispatchResult CliRegistry::dispatch(std::string_view line, CliSessionContext
     handler = command->second._handler;
   }
 
+  // Handler 在解锁后调用，允许命令内部查询或注册其他命令。
   CliArguments arguments;
   arguments.reserve(tokens.size() - 1U);
   for (std::size_t index = 1U; index < tokens.size(); ++index) {

@@ -155,6 +155,7 @@ std::uint16_t UdpReceiver::bound_port() const noexcept {
 }
 
 UdpReceiveResult UdpReceiver::receive_one() const {
+  // 每次只读取一个数据报；调用方可循环至 WOULD_BLOCK 清空 socket。
   if (!ready()) {
     return UdpReceiveResult{_impl->_setup_status, WireStatus::SUCCESS,
                             std::nullopt, 0U, _impl->_setup_error};

@@ -57,6 +57,7 @@ bool same_monitor_value(const MonData::MonitorData &incoming,
  */
 bool run_prepare(const MonitorStore::PrepareUpdate *prepare,
                  const MonData::StoredRecord &candidate) noexcept {
+  // prepare 是提交前屏障：异常与 false 等价，候选值不进入可见状态。
   if (prepare == nullptr) {
     return true;
   }

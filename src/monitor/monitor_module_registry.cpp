@@ -108,6 +108,7 @@ MonitorModuleRegistry::find_by_id(std::uint32_t mid) const {
 
 std::optional<MonitorErrorInfo> 
 MonitorModuleRegistry::find_error(std::uint32_t mid, std::uint32_t eid) const {
+    // EID 是模块错误表的下标；缺少模块或越界都表示没有可用元数据。
     std::lock_guard<std::mutex> lock{_mutex};
     const auto module = _by_id.find(mid);
     if(module == _by_id.end()){

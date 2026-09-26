@@ -8,8 +8,8 @@
 
 namespace TLSSMON {
 
-/*
- * ReliableAlarmPublisher::enqueue() 的结果。
+/**
+ * @brief ReliableAlarmPublisher::enqueue() 的结果。
  *
  * 只有 SUCCESS 表示候选记录已经可靠写入 outbox，
  * MonitorStore 才允许提交内存状态。
@@ -17,50 +17,55 @@ namespace TLSSMON {
 enum class AlarmEnqueueStatus : std::uint8_t {
   SUCCESS,
 
-  /*
-   * Publisher 尚未完成初始化或者已经停止。
+  /**
+   * @brief Publisher 尚未完成初始化或者已经停止。
    */
   NOT_READY,
 
-  /*
-   * StoredRecord 无法编码成可靠告警。
+  /**
+   * @brief StoredRecord 无法编码成可靠告警。
    */
   ENCODE_FAILED,
 
-  /*
-   * 无法从系统安全随机源生成 message ID。
+  /**
+   * @brief 无法从系统安全随机源生成 message ID。
    */
   RANDOM_FAILED,
 
-  /*
-   * outbox 已达到容量上限。
+  /**
+   * @brief outbox 已达到容量上限。
    */
   SPOOL_FULL,
 
-  /*
-   * outbox 文件写入、同步或重命名失败。
+  /**
+   * @brief outbox 文件写入、同步或重命名失败。
    */
   IO_ERROR
 };
 
+/** @brief 可靠告警入队结果及底层系统错误。 */
 struct AlarmEnqueueResult final {
   AlarmEnqueueStatus _status{AlarmEnqueueStatus::NOT_READY};
 
-  /*
-   * errno 等平台错误。
+  /**
+   * @brief errno 等平台错误。
    *
    * 没有底层系统错误时为 0。
    */
   int _system_error{0};
 
+  /**
+   * @brief 仅 SUCCESS 表示告警已可靠落盘。
+   * @return 记录已完成可靠持久化时返回 true。
+   */
   [[nodiscard]]
   constexpr bool durable() const noexcept {
     return _status == AlarmEnqueueStatus::SUCCESS;
   }
 };
 
-/*
- * 参数使用值语义：
+/**
+ * @brief 参数使用值语义：
  *
  * - Publisher 收到 StoredRecord 副本；
  * - Publisher 修改副本不会影响 Store 候选记录；

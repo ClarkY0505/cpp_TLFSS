@@ -78,15 +78,13 @@ static_assert(accepts_data_read(EnginePhase::STOPPED));
 } // namespace EngineUtil
 
 struct MonContext final {
+  // Store/Reporter 与事件循环资源同生共死；Reporter 引用的 Store 和模块表
+  // 必须先于 Reporter 构造，并在 Reporter 析构后仍保持有效。
   /**
    * @brief 根据监控配置创建运行上下文，并建立 AIO 管理器与回调注册表、
    *        唤醒管道之间的关联。
-   *        Creates the runtime context from the monitoring configuration and
-   *        connects the AIO manager with the callback registry and wakeup pipe.
    *
    * @param config[in] 监控配置。配置内容会被移动到上下文中。
-   *               Monitoring configuration whose contents are moved into the
-   * context.
    */
   explicit MonContext(MonConfig config, const MonitorModuleRegistry &modules)
       : _name(std::move(config._name)), _cli_port(config._port),
@@ -115,7 +113,7 @@ Engine::Engine(MonConfig config) : _config(std::move(config)) {}
 Engine::~Engine() = default;
 
 ENGINESTATE Engine::init() {
-
+  // 先抢占初始化阶段，避免两个线程各自创建一套运行资源。
   EnginePhase expected = EnginePhase::CREATED;
   if (!_phase.compare_exchange_strong(expected, EnginePhase::INITIALIZING,
                                       std::memory_order_acq_rel,
@@ -197,6 +195,8 @@ ENGINESTATE Engine::run() {
 
   ENGINESTATE result = ENGINESTATE::SUCCESSFUL;
 
+  // 定时器给出本轮 select 的最长等待时间；唤醒管道使跨线程新增任务和
+  // stop() 能及时打断等待，下一轮再重新计算超时及 fd 集合。
   while (_phase.load(std::memory_order_acquire) == EnginePhase::RUNNING) {
     timeval timeout{};
     context->_timers.check(timeout);
@@ -211,6 +211,7 @@ ENGINESTATE Engine::run() {
     _phase.store(EnginePhase::STOPPING, std::memory_order_release);
   }
   lock.unlock();
+  // 先等异步回调退出，再销毁持有回调的 Timer/AIO 节点。
   context->_cbs.stop_workers();
   context->_cbs.print_stats();
   context->_timers.cleanup();
@@ -237,10 +238,10 @@ void Engine::stop() {
     if (_context == nullptr) {
       return;
     }
-    // status is STOPPING , now new add/remove will be rejected
+    // 进入 STOPPING 后，新的 AIO 注册和移除请求将被拒绝。
     const PIPESTATUS wakeup_status = _context->_wakeup.wakeup();
     if (wakeup_status != PIPESTATUS::SUCCESSFUL) {
-      // TODO Log
+      // TODO：记录唤醒失败。
       (void)wakeup_status;
     }
   }
@@ -264,7 +265,7 @@ std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb) {
     return std::nullopt;
   }
 
-  // WakeupPipe is  internal contorl fd
+  // 唤醒管道读端是内部控制 fd，不能由外部重复注册。
   if (fd == _context->_wakeup.read_fd()) {
     return std::nullopt;
   }

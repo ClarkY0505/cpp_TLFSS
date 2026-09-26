@@ -16,6 +16,7 @@ WakeupPipe::~WakeupPipe()
 
 PIPESTATUS WakeupPipe::init() noexcept
 {
+    // 状态先进入 INITIALIZING；失败时恢复 UNINITIALIZED，允许重试。
     PipeState expected = PipeState::UNINITIALIZED;
     if (!_state.compare_exchange_strong(
             expected,
@@ -87,6 +88,7 @@ PIPESTATUS WakeupPipe::wakeup() const noexcept
         }
 
         if (result == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // 管道已满意味着读端已经可读，唤醒信号无需再写入。
             return PIPESTATUS::SUCCESSFUL;
         }
 
@@ -100,6 +102,7 @@ PIPESTATUS WakeupPipe::drain() const noexcept
         return PIPESTATUS::PIPECLOSED;
     }
 
+    // 一次读尽积压信号，否则水平触发的 select 会持续立即返回。
     char buffer[64];
     while (true) {
         const auto result = ::read(_read_fd, buffer, sizeof(buffer));

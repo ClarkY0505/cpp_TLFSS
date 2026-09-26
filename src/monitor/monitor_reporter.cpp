@@ -34,7 +34,7 @@ MonitorReporter::update(MonData::MonitorData data, bool force,
     return result;
   }
 
-  //  publisher std::function<void(MonData::StoredRecord)>
+  // 复制发布回调，避免执行用户代码期间持有发布器锁。
   Publisher publisher;
 
   {
@@ -42,6 +42,7 @@ MonitorReporter::update(MonData::MonitorData data, bool force,
     publisher = _publisher;
   }
 
+  // Publisher 在 Store 解锁后执行，允许回调重新查询或上报数据。
   if (publisher) {
     try {
       publisher(*result._record);
@@ -49,7 +50,7 @@ MonitorReporter::update(MonData::MonitorData data, bool force,
       /*
        * Publisher 理论上应自行处理异常。
        * 此处仅隔离遗漏的异常，不重复记录日志。
-       * TODO Log
+       * TODO：记录发布回调异常。
        */
     }
   }

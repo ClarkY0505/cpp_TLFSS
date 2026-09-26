@@ -252,6 +252,7 @@ struct ReliableAlarmPublisher::Impl final {
 };
 
 bool ReliableAlarmPublisher::Impl::initialize() {
+  // 先让 outbox 可用，再启动网络线程；断线不影响后续本地入队。
   if (!valid_config(_config)) {
     _setup_status = ReliableAlarmPublisherSetupStatus::INVALID_CONFIG;
     _setup_error = EINVAL;
@@ -302,6 +303,7 @@ bool ReliableAlarmPublisher::Impl::initialize() {
 }
 
 ReliableAlarmPublisherStatus ReliableAlarmPublisher::Impl::status() const {
+  // 先快照内存计数，再单独扫描 Spool；磁盘统计失败时仍能报告连接状态。
   ReliableAlarmPublisherStatus snapshot;
 
   snapshot._collector_host = _config._collector_host;
@@ -415,7 +417,7 @@ AlarmEnqueueResult ReliableAlarmPublisher::Impl::map_spool_result(
 
 AlarmEnqueueResult
 ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
-
+  // 本路径只做编码与持久化。网络发送交给 worker，成功表示可恢复的入队。
   if (!ready()) {
     return {AlarmEnqueueStatus::NOT_READY, 0};
   }
@@ -498,7 +500,7 @@ ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
 IoStatus
 ReliableAlarmPublisher::Impl::wait_fd(int fd, short events,
                                       Deadline deadline) const noexcept {
-
+  // 使用绝对截止时间，EINTR 或短暂就绪不会重新计满超时。
   for (;;) {
     if (stopping()) {
       return IoStatus::STOPPED;
@@ -799,6 +801,7 @@ ReliableAlarmPublisher::Impl::receive_frame(int fd, Deadline deadline) const {
 
 DeliveryStatus ReliableAlarmPublisher::Impl::send_alarm_and_wait_ack(
     const std::vector<std::uint8_t> &wire, const AlarmWire::AlarmFrame &sent) {
+  // ACK 必须同时匹配类型、来源和消息 ID，才能安全删除 outbox 文件。
 
   const int socket = socket_snapshot();
 
@@ -847,6 +850,7 @@ DeliveryStatus ReliableAlarmPublisher::Impl::send_alarm_and_wait_ack(
 }
 
 bool ReliableAlarmPublisher::Impl::heartbeat() {
+  // 队列空闲但连接仍打开时用 PING/PONG 验证连接可继续复用。
   const int socket = socket_snapshot();
 
   if (socket < 0) {
@@ -950,6 +954,7 @@ void ReliableAlarmPublisher::Impl::reset_backoff() {
 }
 
 void ReliableAlarmPublisher::Impl::run_iteration() {
+  // 每轮只处理队列首条消息，使发送、ACK、删除保持串行顺序。
   const AlarmWire::AlarmSpoolPathResult next = _spool->next();
 
   if (next._status == AlarmWire::AlarmSpoolStatus::EMPTY) {
@@ -1072,7 +1077,7 @@ void ReliableAlarmPublisher::Impl::run_iteration() {
 
   if (!removed.success()) {
     /*
-     * 如果文件仍存在，下轮会按 at-least-once 语义重发；
+     * 如果文件仍存在，下轮会按至少一次送达语义重发；
      * Collector 应根据 source_id + message_id 去重。
      */
     (void)wait_backoff();

@@ -68,6 +68,7 @@ TimerManager::~TimerManager(){
 
 void TimerManager::cleanup(){
     std::list<std::unique_ptr<TimerEntry>> timers;
+    // 锁内摘除全部定时器，锁外注销回调；与并发 add() 由 _cleaned_up 协调。
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_cleaned_up) {
@@ -272,14 +273,14 @@ void TimerManager::check(timeval& timeout){
 
         const Clock::time_point now = Clock::now();
         if(!(earliest->_next < now)){
-            // 计算timeout
+            // 未到期时把最近 deadline 转换为 select 的等待上限。
             Timer::set_timeout_until(timeout, earliest->_next, now);
             return;
         }
 
+        // 到期节点暂时移出有序队列，回调在管理器锁外执行。
         active.splice(active.end(), _timers, _timers.begin());
         lock.unlock();
-        // 检测上述流程是否符合预期
         assert(active.size() == 1);
         assert(active.front());
 
@@ -293,6 +294,7 @@ void TimerManager::check(timeval& timeout){
 
         assert(recurring == has_flag(timer._flags, TimerFlags::RECURRING));
         if(recurring){
+            // 基于上一次计划时间推进，避免回调耗时让周期不断漂移。
             timer._next += timer._interval;
             lock.lock();
             reinsert_sorted_locked(active);

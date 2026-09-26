@@ -177,6 +177,7 @@ std::uint32_t alarm_crc32(const std::uint8_t *data, std::size_t size) noexcept {
 
 AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
                                       std::size_t prefix_size) noexcept {
+  // 只解析固定头即可得出帧边界；TCP 流解码器随后按该长度收齐 payload。
   if (prefix == nullptr || prefix_size == 0U) {
     return make_size_error(AlarmProtocolStatus::EMPTY_INPUT);
   }
@@ -283,6 +284,7 @@ AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept {
 
 AlarmDecodeResult decode_alarm_frame(const std::uint8_t *data,
                                      std::size_t size) noexcept {
+  // 先验证帧长与 CRC，再构造业务字段，防止损坏帧进入后续处理。
   const AlarmFrameSizeResult size_result = alarm_frame_size(data, size);
 
   if (!size_result.success()) {

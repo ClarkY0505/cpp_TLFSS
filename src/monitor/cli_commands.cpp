@@ -89,6 +89,7 @@ std::string format_help(const std::vector<CliCommandInfo> &commands) {
 }
 
 std::string escape_cli_text(const std::string &input) {
+  // db_dump 每条记录占一行；控制字符必须转义，避免破坏输出边界。
   constexpr char hex_digits[] = "0123456789ABCDEF";
 
   std::string output;
@@ -135,6 +136,7 @@ std::string escape_cli_text(const std::string &input) {
 }
 
 std::string format_timestamp(MonData::MonitorTimestamp timestamp) {
+  // 将负时间戳也正规化为 秒 + [0, 1e9) 纳秒 的形式。
   const std::int64_t total_nanoseconds =
       static_cast<std::int64_t>(timestamp.time_since_epoch().count());
   std::int64_t seconds = total_nanoseconds / NANOSECONDS_PER_SECOND;
@@ -259,6 +261,7 @@ void append_record(std::string &output, const MonData::StoredRecord &record,
   }
 
   std::string display_description = data._description;
+  // 线协议自带描述优先；只有为空时才查本地注册的事件描述。
   if (display_description.empty()) {
     const std::optional<MonitorErrorInfo> error =
         engine.find_error(key._mid, key._eid);
