@@ -6,6 +6,7 @@ if(TLSS_BUILD_MEMCPY_GLIBC_BENCHMARK)
 endif()
 
 add_library(common_lib
+    base/current_thread.cpp
     net/timestamp.cpp
     common.cpp
     net.cpp
@@ -13,6 +14,8 @@ add_library(common_lib
     net/channel.cpp
     net/event_loop.cpp
     net/poller.cpp
+    net/dafault_poller.cpp
+    net/epoll_poller.cpp
     net/tcp_server.cpp
 )
 

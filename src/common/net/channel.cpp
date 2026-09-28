@@ -30,6 +30,7 @@ void Channel::update() {
   // 通过channel所属的EventLoop,
   // 调用poller的相应方法，
   // 注册fd的events事件
+  /* _loop->update_channel(this); */
 }
 
 //

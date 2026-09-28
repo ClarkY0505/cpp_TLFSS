@@ -40,8 +40,13 @@ class Channel : NoCopy {
 
   // 防止channel被手动remove, channel还在执行回调操作
   void tie(const std::shared_ptr<void>&);
+
   int fd() const {
     return _fd;
+  }
+
+  int events() const {
+    return _events;
   }
 
   void set_revents(int revt) {
@@ -82,7 +87,7 @@ class Channel : NoCopy {
     return _events & _k_read_event;
   }
 
-  int index() {
+  int index() const {
     return _index;
   }
   void set_index(int idx) {
