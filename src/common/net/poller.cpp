@@ -15,6 +15,7 @@ bool Poller::has_channle(Channel* channel) const {
                            static_cast<const void*>(channel));
 
     assert(false);
+    return false;
   }
 
   if (it->second != channel) {
@@ -23,6 +24,7 @@ bool Poller::has_channle(Channel* channel) const {
                            static_cast<const void*>(it->second));
 
     assert(false);
+    return true;
   }
   return it != _channels.end() && it->second == channel;
 }

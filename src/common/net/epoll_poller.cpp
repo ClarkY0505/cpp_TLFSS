@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 namespace TLSS::NET {
 namespace {
 //
@@ -27,8 +28,10 @@ EpollPoller::EpollPoller(EventLoop* loop)
     : Poller(loop), _epoll_fd(::epoll_create1(EPOLL_CLOEXEC)), _events(_k_init_event_list_size) {
   if (_epoll_fd < 0) {
     const int saved_err = errno;
-    net_logger()->error("epoll_create1 error={}, reason={}", saved_err,
+    net_logger()->critical("epoll_create1 error={}, reason={}", saved_err,
                         std::error_code(saved_err, std::generic_category()).message());
+    net_logger()->flush();
+    std::abort();
   }
 }
 
@@ -76,7 +79,6 @@ void EpollPoller::fill_active_channels(int num_events, ChannelList* active_chann
                              static_cast<const void*>(channel));
 
       assert(false);
-
       continue;
     }
 
@@ -107,6 +109,8 @@ void EpollPoller::update(int operation, Channel* channel) {
       net_logger()->error("epoll_ctl func={}, op={}, fd ={}", __FUNCTION__, operation, fd);
     } else {
       net_logger()->critical("epoll_ctl func={}, op={}, fd ={}", __FUNCTION__, operation, fd);
+      net_logger()->flush();
+      std::abort();
     }
   }
 }

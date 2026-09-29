@@ -1,15 +1,15 @@
 #ifndef __INC_COMMON_CHANNEL_H__
 #define __INC_COMMON_CHANNEL_H__
-#include <sys/stat.h>
-#include <algorithm>
-#include <functional>
-#include <memory>
 #include "common/NoCopy.h"
 #include "timestamp.h"
 
-class EventLoop;
+#include <sys/stat.h>
+#include <functional>
+#include <memory>
 
 namespace TLSS::NET {
+
+class EventLoop;
 //
 // EventLoop、Channel、Poller之间的关系
 // 对应了 Reactor模型的Demultiplex

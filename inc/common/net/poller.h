@@ -6,6 +6,7 @@
 
 #include <csignal>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 namespace TLSS::NET {
@@ -40,10 +41,11 @@ class Poller : NoCopy {
   // 由于Poller是基类
   // 一般情况是派生类引用基类
   // 而不是基类去引用派生类
-  static Poller* new_default_poller(EventLoop* loop);
+  /* static Poller* new_default_poller(EventLoop* loop); */
+  static std::unique_ptr<Poller> new_default_poller(EventLoop* loop);
 
  protected:
-  // 
+  //
   // map<key,value>
   using ChannelMap = std::unordered_map<int, Channel*>;
   ChannelMap _channels;
