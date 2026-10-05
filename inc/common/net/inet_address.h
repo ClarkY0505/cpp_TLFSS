@@ -8,8 +8,9 @@
 namespace TLSS::NET {
 class InetAddress {
  public:
-  explicit InetAddress(uint16_t port, std::string ip = "127.0.0.1");
-  explicit InetAddress(const sockaddr_in& addr) : _addr(addr) {}
+  explicit InetAddress(uint16_t port = 0, std::string ip = "127.0.0.1");
+  explicit InetAddress(const sockaddr_in& addr)
+      : _addr(addr) {}
 
   [[nodiscard]] std::string to_ip() const;
   [[nodiscard]] std::string to_ip_port() const;
@@ -17,9 +18,12 @@ class InetAddress {
   [[nodiscard]] const sockaddr* get_sock_addr() const {
     return reinterpret_cast<const sockaddr*>(&_addr);
   };
+  void set_sock_addr(const sockaddr_in& addr) {
+    _addr = addr;
+  }
 
  private:
   sockaddr_in _addr;
 };
-}  // namespace TLSSNET
+}  // namespace TLSS::NET
 #endif  // __INC_COMMON_INET_ADDRESS_H__

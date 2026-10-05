@@ -2,6 +2,7 @@
 #define __INC_COMMON_EVENT_LOOP_H__
 
 #include "common/NoCopy.h"
+#include "common/base/bounded_queue.h"
 #include "common/base/current_thread.h"
 #include "common/net/timestamp.h"
 
@@ -9,14 +10,19 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace TLSS::NET {
 class Channel;
 class Poller;
-class EventLoop : public NoCopy {
+class EventLoop : NoCopy {
  public:
   using Functor = std::function<void()>;
+  /* using ChannelPtr = std::shared_ptr<Channel>; */
+  /* using ChannelQueue = BASE::BoundedQueue<ChannelPtr>; */
+  /* using ChannelPushResult = ChannelQueue::PushResult; */
+
   EventLoop();
   ~EventLoop();
 
@@ -29,6 +35,13 @@ class EventLoop : public NoCopy {
   TIME::Timestamp poll_return_time() const {
     return _poll_return_time;
   }
+
+  //
+  // 成功时接管 channel；失败时调用者仍持有它。
+  /* ChannelPushResult enqueue_channel(ChannelPtr&& channel); */
+
+  // 请求注销已被本 loop 接管的 Channel。
+  /* void release_channel(ChannelPtr channel); */
 
   //
   // 在当前loop中执行cb
@@ -60,10 +73,17 @@ class EventLoop : public NoCopy {
   // 执行回调
   void do_pending_functors();
 
+  /* void consume_pending_channels(); */
+
+  // 待消费的 Channel，允许跨线程入队。
+  /* ChannelQueue _pending_channels{1024}; */
+
+  // 已消费的 Channel，只允许所属 loop 线程操作。
+  /* std::unordered_map<int, ChannelPtr> _managed_channels; */
+
   using ChannelList = std::vector<Channel*>;
   std::atomic<bool> _looping;
   std::atomic<bool> _quit;
-  std::atomic<bool> _calling_pending_functors;  // 标识当前loop是否有需要执行的回调操作
   const pid_t _thread_id;                       // 记录当前loop所在线程的id
   TIME::Timestamp _poll_return_time;            // poller 返回发生事件的channels的时间点
   std::unique_ptr<Poller> _poller;
@@ -78,6 +98,7 @@ class EventLoop : public NoCopy {
   Channel* _current_active_channel;
 
   mutable std::mutex _mutex;               // 保护下列变量在线程中来安全操作一致性
+  std::atomic<bool> _calling_pending_functors;  // 标识当前loop是否有需要执行的回调操作
   std::vector<Functor> _pending_functors;  // 存储loop需要执行的所有回调操作
 };
 }  // namespace TLSS::NET

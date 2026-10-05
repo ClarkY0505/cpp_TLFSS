@@ -15,7 +15,7 @@
 namespace TLSS::BASE {
 
 template <typename T>
-class BoundeQueue : public NoCopy {
+class BoundedQueue : public NoCopy {
  public:
   enum class PushResult { success, full, closed };
   //
@@ -24,7 +24,7 @@ class BoundeQueue : public NoCopy {
   static_assert(std::is_nothrow_move_constructible_v<T>,
                 "T must support noexcept move construction");
 
-  explicit BoundeQueue(std::size_t capacity)
+  explicit BoundedQueue(std::size_t capacity)
       : _capacity(capacity) {
     if (_capacity == 0) {
       throw std::invalid_argument("BoundedQueue capacity must be greater than zero");

@@ -1,6 +1,7 @@
 #include "common/net/channel.h"
-#include "common/net/timestamp.h"
 #include "common/net/event_loop.h"
+#include "common/net/net_logger.h"
+#include "common/net/timestamp.h"
 
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -27,6 +28,22 @@ void Channel::tie(const std::shared_ptr<void>& obj) {
   _tied = true;
 }
 
+void Channel::prepare_events(int events) {
+  if (_index != -1) {
+    net_logger()->error("Cannot prepare events for a registered Channel");
+  }
+
+  if (events == 0) {
+    net_logger()->error("Channel initial events cannot be empty");
+  }
+
+  _events = events;
+}
+
+void Channel::register_in_loop() {
+  update();
+}
+
 //
 // 当改变channel所表示fd的events事件后，
 // update负责在poller里面更改相应的事件 epoll_ctl
@@ -42,7 +59,7 @@ void Channel::update() {
 // 在channel所属的EventLoop中，
 // 把当前的channel删除掉
 void Channel::remove() {
-    _loop->remove_channel(this);
+  _loop->remove_channel(this);
 }
 
 //

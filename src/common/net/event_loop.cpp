@@ -8,7 +8,7 @@
 #include <sys/eventfd.h>
 #include <sys/poll.h>
 #include <unistd.h>
-#include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <climits>
 #include <csignal>
@@ -46,12 +46,12 @@ int create_event_fd() {
 EventLoop::EventLoop()
     : _looping(false)
     , _quit(false)
-    , _calling_pending_functors(false)
     , _thread_id(BASE::CurrentThread::tid())
     , _poller(Poller::new_default_poller(this))
     , _wakeup_fd(create_event_fd())
     , _wakeup_channel(new Channel(this, _wakeup_fd))
-    , _current_active_channel(nullptr) {
+    , _current_active_channel(nullptr)
+    , _calling_pending_functors(false) {
   net_logger()->debug("EventLoop created {} in thread {}", static_cast<const void*>(this),
                       _thread_id);
   if (t_loop_in_this_thread) {
@@ -70,6 +70,15 @@ EventLoop::EventLoop()
 }
 
 EventLoop::~EventLoop() {
+  /* _pending_channels.close(); */
+  /* for (auto& item : _managed_channels) { */
+  /* auto& channel = item.second; */
+
+  /* channel->disable_all(); */
+  /* channel->remove(); */
+  /* } */
+  /* _managed_channels.clear(); */
+
   _wakeup_channel->disable_all();
   _wakeup_channel->remove();
   ::close(_wakeup_fd);
@@ -92,6 +101,10 @@ void EventLoop::loop() {
       // 通知channel处理相应的事件
       channel->handle_event(_poll_return_time);
     }
+
+    //
+    // 消费待注册的 Channel。
+    /* consume_pending_channels(); */
     //
     // 执行当前EventLoop事件循环需要处理的回调操作
     // IO线程 mainLoop accept fd
@@ -178,18 +191,89 @@ bool EventLoop::has_channel(Channel* channel) {
 }
 
 void EventLoop::do_pending_functors() {
-    std::vector<Functor> functors;
-    _calling_pending_functors = true;
-    {
-        std::lock_guard<std::mutex> lock(_mutex);
-        functors.swap(_pending_functors);
-    }
+  std::vector<Functor> functors;
+  _calling_pending_functors = true;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    functors.swap(_pending_functors);
+  }
 
-    for(const Functor& functor : functors){
-        //
-        // 当前loop执行的回调
-        functor();
-    }
+  for (const Functor& functor : functors) {
+    //
+    // 当前loop执行的回调
+    functor();
+  }
 
-    _calling_pending_functors = false;
+  _calling_pending_functors = false;
 }
+
+/* EventLoop::ChannelPushResult EventLoop::enqueue_channel(ChannelPtr&& channel) { */
+/* if (!channel) { */
+/* throw std::invalid_argument("Channel cannot be null"); */
+/* } */
+
+/* if (channel->owner_loop() != this) { */
+/* throw std::invalid_argument("Channel belongs to another EventLoop"); */
+/* } */
+
+/* if (channel->index() != -1 || channel->is_none_event()) { */
+/* throw std::logic_error("Channel must be prepared and not registered"); */
+/* } */
+
+/* auto result = _pending_channels.try_push(std::move(channel)); */
+
+/* if (result == ChannelPushResult::success) { */
+// 先入队，再通知消费者。
+/* wakeup(); */
+/* } */
+
+/* return result; */
+/* } */
+
+/* void EventLoop::consume_pending_channels() { */
+/* assert(is_in_loop_thread()); */
+
+/* auto channels = _pending_channels.take_batch(64); */
+
+/* for (auto& channel : channels) { */
+/* const int fd = channel->fd(); */
+
+// 同一个 fd 只能对应一个有效 Channel。
+/* auto [it, inserted] = _managed_channels.try_emplace(fd, channel); */
+
+/* if (!inserted) { */
+/* net_logger()->error("Channel already managed: fd={}", fd); */
+/* continue; */
+/* } */
+
+// 先持有对象，再注册到 Poller。
+/* it->second->register_in_loop(); */
+/* } */
+
+/* if (!_pending_channels.empty()) { */
+// 本轮只消费了一批。
+// 保证剩余元素不会等待下一次外部通知。
+/* wakeup(); */
+/* } */
+/* } */
+
+/* void EventLoop::release_channel(ChannelPtr channel) { */
+/* if (!channel || channel->owner_loop() != this) { */
+/* throw std::invalid_argument("Invalid Channel for this EventLoop"); */
+/* } */
+
+// 即使当前就在 loop 线程，也先排队。
+// 注销操作将在本轮事件分发结束后执行。
+/* queue_in_loop([this, channel = std::move(channel)] { */
+/* auto it = _managed_channels.find(channel->fd()); */
+
+/* if (it == _managed_channels.end() || it->second.get() != channel.get()) { */
+/* return; */
+/* } */
+
+/* channel->disable_all(); */
+/* channel->remove(); */
+
+/* _managed_channels.erase(it); */
+/* }); */
+/* } */

@@ -21,6 +21,11 @@ class Channel : NoCopy {
   Channel(EventLoop* loop, int fd);
   ~Channel();
 
+  // 注册前设置初始监听事件，不访问 Poller。
+  void prepare_events(int events);
+  // 消费者在所属 loop 线程中完成首次注册。
+  void register_in_loop();
+
   //
   // fd得到poller通知以后，处理事件
   void handle_event(TLSS::TIME::Timestamp recevie_time);
