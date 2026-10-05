@@ -50,7 +50,7 @@ flowchart TD
 
 `CMakeLists.txt` 将上述源码构建为共享库 `tlss_memory`，输出到项目 `lib/`。`src/common/CMakeLists.txt` 通过 `common_lib PUBLIC tlss_memory` 传递链接依赖。当前搜索到的外部显式调用主要在测试和 benchmark；命名空间中的函数不会自动替换其他代码的 `std::memcpy`。
 
-课程按调用依赖排列，全部已展开：
+按调用依赖排列，全部已展开：
 
 1. 一次公开调用如何决定复制方式。
 2. 第一次并行请求如何准备 CPU 和线程。
@@ -73,7 +73,7 @@ flowchart TD
 4. [copy_capability_policy.cpp](internal/copy_capability_policy.cpp)：检查能力并形成最终计划。
 5. [copy_executor.cpp](internal/copy_executor.cpp)：计划如何落到函数调用。
 
-CPU 探测细节留到第 2 课，汇编细节留到第 5 课。可选验证证据为 `src/common/benchmark/benchmark_1.cpp` 中的 `run_copy_policy_test` 和 `run_backend_plan_contract_test`。
+CPU 探测细节留到章节2，汇编细节留到章节5。可选验证证据为 `src/common/benchmark/benchmark_1.cpp` 中的 `run_copy_policy_test` 和 `run_backend_plan_contract_test`。
 
 ### 1.1 公开契约和核心数据
 
@@ -102,7 +102,7 @@ void* memcpy(void* dst, const void* src, std::size_t size,
 | `get_memory_runtime()` | 首次进入时执行函数局部静态指针的 `new MemoryRuntime()` | 返回共享运行时引用；局部静态初始化具有线程安全性，构造抛异常后允许后续重试 |
 | `try_get_memory_runtime()` | 调用上一个函数，捕获全部异常 | 成功返回指针，失败返回 `nullptr`，使当前请求可以退回单线程 |
 
-局部静态对象是“指针”，指向的 runtime 没有被 `delete`。源码注释明确说明这样做是为了让其他静态对象在析构阶段仍能调用本模块，具体生命周期见第 6 课。
+局部静态对象是“指针”，指向的 runtime 没有被 `delete`。源码注释明确说明这样做是为了让其他静态对象在析构阶段仍能调用本模块，具体生命周期见章节6。
 
 ### 1.3 select_copy_plan：只做策略判断
 
@@ -171,7 +171,7 @@ void* memcpy(void* dst, const void* src, std::size_t size,
 4. [worker_selection.cpp](internal/worker_selection.cpp)：将候选 CPU 转成线程池索引。
 5. [memory_runtime.cpp](internal/memory_runtime.cpp)：连接探测结果与常驻线程。
 
-线程池内部实现留到第 4 课。可选证据：`benchmark_1.cpp` 中的 `run_worker_selection_test`、`run_master_worker_selection_test`、`run_lazy_runtime_test`、`run_concurrent_first_use_test`。
+线程池内部实现留到章节 4。可选证据：`benchmark_1.cpp` 中的 `run_worker_selection_test`、`run_master_worker_selection_test`、`run_lazy_runtime_test`、`run_concurrent_first_use_test`。
 
 ### 2.1 cpu_capabilities.cpp 的三个函数
 
@@ -268,7 +268,7 @@ CPU ID 与 worker index 是不同的编号空间，理解这一点才能看懂�
 
 主链：`direct_nt_copy / parallel_nt_copy → make_copy_partition → prefix + body + tail → 内核与线程池 → 返回 dst`。
 
-必读顺序为 [copy_partition.cpp](internal/copy_partition.cpp)、[direct_nt_copy.cpp](internal/direct_nt_copy.cpp)、[parallel_nt_copy.cpp](internal/parallel_nt_copy.cpp)。可选证据是 `benchmark_1.cpp` 的 `run_copy_partition_test`、`run_parallel_nt_correctness_test`、`run_tlss_memcpy_auto_test`；池内分配留到第 4 课。
+必读顺序为 [copy_partition.cpp](internal/copy_partition.cpp)、[direct_nt_copy.cpp](internal/direct_nt_copy.cpp)、[parallel_nt_copy.cpp](internal/parallel_nt_copy.cpp)。可选证据是 `benchmark_1.cpp` 的 `run_copy_partition_test`、`run_parallel_nt_correctness_test`、`run_tlss_memcpy_auto_test`；池内分配留到章节 4。
 
 ### 3.1 make_copy_partition
 
@@ -340,7 +340,7 @@ blocks = remaining / 8192
 
 主链：`池构造 → worker 绑核并报到 → dispatch_copy → generation 发布 → worker_loop → NT 内核 → completed_count → wait 返回`。
 
-必读为 [parallel_copy_pool.h](../../../inc/common/memory/internal/parallel_copy_pool.h) 和 [parallel_copy_pool.cpp](internal/parallel_copy_pool.cpp)。建议顺序：构造 → `dispatch_copy` → `worker_loop` → `wait` → `stop_and_join`。可选证据为 `benchmark_1.cpp` 的 `run_sparse_active_worker_copy_test`、`run_sparse_worker_stress_test`、`run_memory_runtime_concurrency_test`。具体搬运指令留到第 5 课。
+必读为 [parallel_copy_pool.h](../../../inc/common/memory/internal/parallel_copy_pool.h) 和 [parallel_copy_pool.cpp](internal/parallel_copy_pool.cpp)。建议顺序：构造 → `dispatch_copy` → `worker_loop` → `wait` → `stop_and_join`。可选证据为 `benchmark_1.cpp` 的 `run_sparse_active_worker_copy_test`、`run_sparse_worker_stress_test`、`run_memory_runtime_concurrency_test`。具体搬运指令留到章节 5。
 
 这是一种专用于内存复制的固定线程池：线程常驻并绑定 CPU，每个线程有独立任务槽，一次共同完成一个复制请求，完成后等待下一轮。caller 将主体分给选中的 worker，自己处理头尾，最后等待全部参与者完成。
 
