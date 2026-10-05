@@ -13,6 +13,7 @@ add_library(common_lib
     net.cpp
     net/inet_address.cpp
     net/acceptor.cpp
+    net/buffer.cpp
     net/channel.cpp
     net/event_loop.cpp
     net/event_loop_thread.cpp
@@ -22,6 +23,7 @@ add_library(common_lib
     net/epoll_poller.cpp
     net/socket.cpp
     net/tcp_server.cpp
+    net/tcp_connection.cpp
 )
 
 target_include_directories(common_lib PUBLIC

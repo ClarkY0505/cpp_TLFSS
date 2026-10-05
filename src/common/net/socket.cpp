@@ -4,6 +4,7 @@
 #include "common/utile/utile.h"
 
 /* #include <asm-generic/socket.h> */
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -12,6 +13,31 @@
 #include <cstdlib>
 
 namespace TLSS::NET {
+
+namespace {
+
+#if VALGRIND || defined(NO_ACCEPT4)
+
+void setNonBlockAndCloseOnExec(int sockfd) {
+  // non-block
+  int flags = ::fcntl(sockfd, F_GETFL, 0);
+  flags |= O_NONBLOCK;
+  int ret = ::fcntl(sockfd, F_SETFL, flags);
+  // FIXME check
+
+  // close-on-exec
+  flags = ::fcntl(sockfd, F_GETFD, 0);
+  flags |= FD_CLOEXEC;
+  ret = ::fcntl(sockfd, F_SETFD, flags);
+  // FIXME check
+
+  (void)ret;
+}
+
+#endif
+
+}  // namespace
+
 Socket::~Socket() {
   ::close(_sockfd);
 }
@@ -37,7 +63,21 @@ int Socket::accept(InetAddress* peer_addr) {
   sockaddr_in addr;
   socklen_t len = static_cast<socklen_t>(sizeof addr);
   UTIL::memzero(&addr, sizeof addr);
+
+#if VALGRIND || defined(NO_ACCEPT4)
+
   int connfd = ::accept(_sockfd, reinterpret_cast<sockaddr*>(&addr), &len);
+  if (connfd >= 0) {
+    setNonBlockAndCloseOnExec(connfd);
+  }
+
+#else
+
+  int connfd =
+      ::accept4(_sockfd, reinterpret_cast<sockaddr*>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+#endif
+
   if (connfd >= 0) {
     peer_addr->set_sock_addr(addr);
   }
