@@ -17,15 +17,15 @@ class EchoServer {
       : _loop(loop)
       , _server(_loop, addr, name) {
     // 注册回调函数
-    _server.set_connection_cb(std::bind(&EchoServer::on_connection,this,std::placeholders::_1));
-    _server.set_message_cb(std::bind(&EchoServer::on_message,this,std::placeholders::_1,std::placeholders::_2,std::placeholders::_3));
-
+    _server.set_connection_cb(std::bind(&EchoServer::on_connection, this, std::placeholders::_1));
+    _server.set_message_cb(std::bind(&EchoServer::on_message, this, std::placeholders::_1,
+                                     std::placeholders::_2, std::placeholders::_3));
 
     // 设置合适的loop线程
     _server.set_thread_num(3);
   }
-  void star(){
-      _server.start();
+  void start() {
+    _server.start();
   }
 
  private:
@@ -39,27 +39,32 @@ class EchoServer {
   }
 
   // 可读写事件回调
-  void on_message(const TcpConnectionPtr& conn, Buffer* buf, TLSS::TIME::Timestamp time) {
+  void on_message(const TcpConnectionPtr& conn, Buffer* buf, TLSS::TIME::Timestamp) {
     std::string msg = buf->retrieve_all_as_string();
-    conn->send(msg);
-    /* conn->shutdow(); */
+    // 终端客户端按回车时，通常会附带 LF 或 CRLF。
+    if (msg == "q" || msg == "q\n" || msg == "q\r\n") {
+      conn->send(msg);
+      conn->shutdow();
+    } else {
+      conn->send(msg);
+    }
   }
+
   EventLoop* _loop;
   TcpServer _server;
 };
 
 int main() {
-    TLSSLOG::Logger::initBoth("net", "logs/net.log", spdlog::level::info);
-    TLSSLOG::Logger::initBoth("server", "logs/server.log", spdlog::level::info);
-    TLSSLOG::Logger::get("net")->flush_on(spdlog::level::info);
-    TLSSLOG::Logger::get("server")->flush_on(spdlog::level::info);
+  TLSSLOG::Logger::initBoth("net", "logs/net.log", spdlog::level::info);
+  TLSSLOG::Logger::initBoth("server", "logs/server.log", spdlog::level::info);
+  TLSSLOG::Logger::get("net")->flush_on(spdlog::level::info);
+  TLSSLOG::Logger::get("server")->flush_on(spdlog::level::info);
 
-    EventLoop loop;
-    InetAddress addr(8000);
-    EchoServer server(&loop,addr,"EchoServer");
-    server.star();
-    loop.loop();
+  EventLoop loop;
+  InetAddress addr(8000);
+  EchoServer server(&loop, addr, "EchoServer");
+  server.start();
+  loop.loop();
 
-    return 0;
-
+  return 0;
 }

@@ -1,0 +1,78 @@
+[2026-10-09 00:03:42.447] [info] [82658] func=update_channel, fd=6, event=3, index=-1
+[2026-10-09 00:03:42.448] [info] [82659] func=update_channel, fd=9, event=3, index=-1
+[2026-10-09 00:03:42.448] [info] [82659] EventLoop 0x7af9151fed70 start loop 
+[2026-10-09 00:03:42.448] [info] [82660] func=update_channel, fd=11, event=3, index=-1
+[2026-10-09 00:03:42.448] [info] [82660] EventLoop 0x7af9149fdd70 start loop 
+[2026-10-09 00:03:42.448] [info] [82661] func=update_channel, fd=13, event=3, index=-1
+[2026-10-09 00:03:42.448] [info] [82661] EventLoop 0x7af90fffed70 start loop 
+[2026-10-09 00:03:42.448] [info] [82658] func=update_channel, fd=7, event=3, index=-1
+[2026-10-09 00:03:42.448] [info] [82658] EventLoop 0x7ffc56fbe460 start loop 
+[2026-10-09 00:03:44.035] [info] [82658] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80001] from 127.0.0.1:54842
+[2026-10-09 00:03:44.035] [info] [82658] TcpConnection::ctor[EchoServer-127.0.0.1:80001] at 0x57d6c9421aa0 fd = 14
+[2026-10-09 00:03:44.035] [info] [82659] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:04:41.484] [info] [82878] func=update_channel, fd=6, event=3, index=-1
+[2026-10-09 00:04:41.485] [info] [82879] func=update_channel, fd=9, event=3, index=-1
+[2026-10-09 00:04:41.485] [info] [82879] EventLoop 0x767557dfed70 start loop 
+[2026-10-09 00:04:41.485] [info] [82880] func=update_channel, fd=11, event=3, index=-1
+[2026-10-09 00:04:41.485] [info] [82880] EventLoop 0x7675575fdd70 start loop 
+[2026-10-09 00:04:41.485] [info] [82881] func=update_channel, fd=13, event=3, index=-1
+[2026-10-09 00:04:41.485] [info] [82881] EventLoop 0x767556dfcd70 start loop 
+[2026-10-09 00:04:41.485] [info] [82878] func=update_channel, fd=7, event=3, index=-1
+[2026-10-09 00:04:41.485] [info] [82878] EventLoop 0x7fffd4ee5090 start loop 
+[2026-10-09 00:04:43.751] [info] [82878] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80001] from 127.0.0.1:50432
+[2026-10-09 00:04:43.751] [info] [82878] TcpConnection::ctor[EchoServer-127.0.0.1:80001] at 0x59ccb3d8daa0 fd = 14
+[2026-10-09 00:04:43.751] [info] [82879] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:04:45.639] [info] [82879] func=update_channel, fd=14, event=0, index=1
+[2026-10-09 00:04:45.639] [info] [82878] TcpServer::remove_connection_in_loop [EchoServer] - connection EchoServer-127.0.0.1:80001
+[2026-10-09 00:04:45.639] [info] [82879] TcpConnection::dtor[EchoServer-127.0.0.1:80001] at 0x59ccb3d8daa0 fd = 14 state = kDisconnected
+[2026-10-09 00:05:55.702] [info] [83190] func=update_channel, fd=6, event=3, index=-1
+[2026-10-09 00:05:55.702] [info] [83191] func=update_channel, fd=9, event=3, index=-1
+[2026-10-09 00:05:55.702] [info] [83191] EventLoop 0x7af3d13fed70 start loop 
+[2026-10-09 00:05:55.702] [info] [83192] func=update_channel, fd=11, event=3, index=-1
+[2026-10-09 00:05:55.702] [info] [83192] EventLoop 0x7af3d0bfdd70 start loop 
+[2026-10-09 00:05:55.702] [info] [83193] func=update_channel, fd=13, event=3, index=-1
+[2026-10-09 00:05:55.702] [info] [83193] EventLoop 0x7af3cbffed70 start loop 
+[2026-10-09 00:05:55.702] [info] [83190] func=update_channel, fd=7, event=3, index=-1
+[2026-10-09 00:05:55.702] [info] [83190] EventLoop 0x7ffe9b2e9790 start loop 
+[2026-10-09 00:05:59.144] [info] [83190] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80001] from 127.0.0.1:49092
+[2026-10-09 00:05:59.144] [info] [83190] TcpConnection::ctor[EchoServer-127.0.0.1:80001] at 0x630239766aa0 fd = 14
+[2026-10-09 00:05:59.144] [info] [83191] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:09:11.369] [info] [84160] func=update_channel, fd=6, event=3, index=-1
+[2026-10-09 00:09:11.370] [info] [84161] func=update_channel, fd=9, event=3, index=-1
+[2026-10-09 00:09:11.370] [info] [84161] EventLoop 0x74d5d41fed70 start loop 
+[2026-10-09 00:09:11.370] [info] [84162] func=update_channel, fd=11, event=3, index=-1
+[2026-10-09 00:09:11.370] [info] [84162] EventLoop 0x74d5d39fdd70 start loop 
+[2026-10-09 00:09:11.370] [info] [84163] func=update_channel, fd=13, event=3, index=-1
+[2026-10-09 00:09:11.370] [info] [84163] EventLoop 0x74d5d31fcd70 start loop 
+[2026-10-09 00:09:11.370] [info] [84160] func=update_channel, fd=7, event=3, index=-1
+[2026-10-09 00:09:11.370] [info] [84160] EventLoop 0x7ffc6bc83e00 start loop 
+[2026-10-09 00:09:14.244] [info] [84160] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80001] from 127.0.0.1:32952
+[2026-10-09 00:09:14.244] [info] [84160] TcpConnection::ctor[EchoServer-127.0.0.1:80001] at 0x55b9257a6aa0 fd = 14
+[2026-10-09 00:09:14.244] [info] [84161] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85547] func=update_channel, fd=6, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85548] func=update_channel, fd=9, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85548] EventLoop 0x710059ffed70 start loop 
+[2026-10-09 00:14:26.794] [info] [85549] func=update_channel, fd=11, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85549] EventLoop 0x7100597fdd70 start loop 
+[2026-10-09 00:14:26.794] [info] [85550] func=update_channel, fd=13, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85550] EventLoop 0x710058ffcd70 start loop 
+[2026-10-09 00:14:26.794] [info] [85547] func=update_channel, fd=7, event=3, index=-1
+[2026-10-09 00:14:26.794] [info] [85547] EventLoop 0x7ffdf07d1290 start loop 
+[2026-10-09 00:14:29.121] [info] [85547] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80001] from 127.0.0.1:59456
+[2026-10-09 00:14:29.121] [info] [85547] TcpConnection::ctor[EchoServer-127.0.0.1:80001] at 0x6076ebcefaa0 fd = 14
+[2026-10-09 00:14:29.121] [info] [85548] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:14:30.405] [info] [85548] func=update_channel, fd=14, event=0, index=1
+[2026-10-09 00:14:30.405] [info] [85547] TcpServer::remove_connection_in_loop [EchoServer] - connection EchoServer-127.0.0.1:80001
+[2026-10-09 00:14:30.405] [info] [85548] TcpConnection::dtor[EchoServer-127.0.0.1:80001] at 0x6076ebcefaa0 fd = 14 state = kDisconnected
+[2026-10-09 00:14:31.380] [info] [85547] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80002] from 127.0.0.1:59460
+[2026-10-09 00:14:31.380] [info] [85547] TcpConnection::ctor[EchoServer-127.0.0.1:80002] at 0x6076ebcf1910 fd = 14
+[2026-10-09 00:14:31.380] [info] [85549] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:14:31.973] [info] [85549] func=update_channel, fd=14, event=0, index=1
+[2026-10-09 00:14:31.973] [info] [85547] TcpServer::remove_connection_in_loop [EchoServer] - connection EchoServer-127.0.0.1:80002
+[2026-10-09 00:14:31.973] [info] [85549] TcpConnection::dtor[EchoServer-127.0.0.1:80002] at 0x6076ebcf1910 fd = 14 state = kDisconnected
+[2026-10-09 00:14:32.658] [info] [85547] TcpServer::new_connection [EchoServer] - new connection [EchoServer-127.0.0.1:80003] from 127.0.0.1:59464
+[2026-10-09 00:14:32.658] [info] [85547] TcpConnection::ctor[EchoServer-127.0.0.1:80003] at 0x6076ebcf24b0 fd = 14
+[2026-10-09 00:14:32.659] [info] [85550] func=update_channel, fd=14, event=3, index=-1
+[2026-10-09 00:14:34.367] [info] [85550] func=update_channel, fd=14, event=0, index=1
+[2026-10-09 00:14:34.367] [info] [85547] TcpServer::remove_connection_in_loop [EchoServer] - connection EchoServer-127.0.0.1:80003
+[2026-10-09 00:14:34.367] [info] [85550] TcpConnection::dtor[EchoServer-127.0.0.1:80003] at 0x6076ebcf24b0 fd = 14 state = kDisconnected

@@ -3,7 +3,7 @@
 # C++ 玩具级存储服务 - 构建脚本
 # =============================================================================
 
-set -e
+set -euo pipefail
 
 # 颜色定义
 RED='\033[0;31m'
@@ -49,8 +49,8 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
     -t, --type TYPE     构建类型: Debug, Release, RelWithDebInfo (默认: Release)
     -j, --jobs N        并行编译任务数 (默认: 自动检测CPU核心数)
-    -c, --clean         清理后重新构建
-    -n, --no-tests      不构建测试
+    -c, --clean         清理 build/、bin/、lib/ 后重新构建
+    -n, --no-tests      不构建或运行测试
     -i, --install       构建后安装
     -h, --help          显示此帮助信息
 
@@ -67,10 +67,18 @@ EOF
 while [[ $# -gt 0 ]]; do
     case $1 in
         -t|--type)
+            if [[ $# -lt 2 ]]; then
+                print_error "$1 需要构建类型"
+                exit 1
+            fi
             BUILD_TYPE="$2"
             shift 2
             ;;
         -j|--jobs)
+            if [[ $# -lt 2 ]]; then
+                print_error "$1 需要并行任务数"
+                exit 1
+            fi
             JOBS="$2"
             shift 2
             ;;
@@ -108,6 +116,11 @@ case $BUILD_TYPE in
         exit 1
         ;;
 esac
+
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    print_error "并行任务数必须是正整数: $JOBS"
+    exit 1
+fi
 
 # 打印构建配置
 echo ""
@@ -156,61 +169,37 @@ fi
 
 print_success "依赖检查通过"
 
-# 清理构建目录
+# 清理所有由 CMake 写入的项目内构建输出
 if [ "$CLEAN_BUILD" = true ]; then
-    print_info "清理构建目录..."
-    rm -rf "${BUILD_DIR}"
-    print_success "构建目录已清理"
+    print_info "清理 build/、bin/ 和 lib/ ..."
+    cmake -E rm -rf "${BUILD_DIR}" "${PROJECT_ROOT}/bin" "${PROJECT_ROOT}/lib"
+    print_success "旧构建结果已清理"
 fi
-
-# 创建构建目录
-mkdir -p "${BUILD_DIR}"
-cd "${BUILD_DIR}"
 
 # CMake 配置
 print_info "运行 CMake 配置..."
-cmake \
+cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DBUILD_TESTS="${BUILD_TESTS}" \
-    "${PROJECT_ROOT}"
-
-if [ $? -ne 0 ]; then
-    print_error "CMake 配置失败"
-    exit 1
-fi
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 print_success "CMake 配置完成"
 
 # 编译
 print_info "开始编译 (使用 ${JOBS} 个并行任务)..."
-make -j"${JOBS}"
-
-if [ $? -ne 0 ]; then
-    print_error "编译失败"
-    exit 1
-fi
+cmake --build "${BUILD_DIR}" --parallel "${JOBS}"
 print_success "编译完成"
 
 # 运行测试 (如果构建了测试)
-if [ "$BUILD_TESTS" = "ON" ] && [ -f "${BUILD_DIR}/bin/test_ftp_server" ]; then
+if [ "$BUILD_TESTS" = "ON" ]; then
     print_info "运行单元测试..."
-    ctest --output-on-failure
-    
-    if [ $? -ne 0 ]; then
-        print_warning "部分测试失败"
-    else
-        print_success "所有测试通过"
-    fi
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure
+    print_success "所有测试通过"
 fi
 
 # 安装
 if [ "$INSTALL" = true ]; then
     print_info "安装..."
-    sudo make install
-    
-    if [ $? -ne 0 ]; then
-        print_error "安装失败"
-        exit 1
-    fi
+    cmake --install "${BUILD_DIR}"
     print_success "安装完成"
 fi
 
@@ -220,11 +209,11 @@ echo "==========================================="
 print_success "构建成功!"
 echo "==========================================="
 echo ""
-print_info "可执行文件位置: ${BUILD_DIR}/bin/storage-service"
+print_info "可执行文件位置: ${PROJECT_ROOT}/bin/storage-service"
 echo ""
 
 if [ "$INSTALL" = false ]; then
     print_info "运行以下命令启动服务:"
-    echo "  ${BUILD_DIR}/bin/storage-service --config ${PROJECT_ROOT}/config/config.yaml"
+    echo "  ${PROJECT_ROOT}/bin/storage-service --config ${PROJECT_ROOT}/config/config.yaml"
     echo ""
 fi
