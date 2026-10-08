@@ -3,10 +3,12 @@
 
 #include "common/NoCopy.h"
 #include "common/net/acceptor.h"
+#include "common/net/buffer.h"
 #include "common/net/callbacks.h"
 #include "common/net/event_loop.h"
 #include "common/net/event_loop_thread_pool.h"
 #include "common/net/inet_address.h"
+#include "common/net/tcp_connection.h"
 
 #include <functional>
 #include <memory>
@@ -19,10 +21,11 @@ class TcpServer : NoCopy {
 
   enum Option {
     k_no_reuse_port,
-    k_ruese_port,
+    k_reuse_port,
   };
 
-  TcpServer(EventLoop* loop, const InetAddress& listen_addr, Option option = k_no_reuse_port);
+  TcpServer(EventLoop* loop, const InetAddress& listen_addr, const std::string& name_arg,
+            Option option = k_no_reuse_port);
   ~TcpServer();
 
   //
