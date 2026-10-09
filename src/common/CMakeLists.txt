@@ -8,6 +8,7 @@ endif()
 add_library(common_lib
     base/current_thread.cpp
     base/tlss_thread.cpp
+    base/tlss_thread_pool.cpp
     net/timestamp.cpp
     common.cpp
     net.cpp

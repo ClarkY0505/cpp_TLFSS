@@ -2,6 +2,7 @@
 #define __INC_COMMON_BASE_CURRENT_THREAD_H__
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <string>
 
 namespace TLSS::BASE::CurrentThread {
 extern __thread int t_cached_tid;
@@ -17,6 +18,9 @@ inline int tid(){
     }
     return t_cached_tid;
 }
+
+std::string stack_trace(bool demangle);
+
 }  // namespace TLSS::BASE::CurrentThread
 
 #endif  // __INC_COMMON_BASE_CURRENT_THREAD_H__
