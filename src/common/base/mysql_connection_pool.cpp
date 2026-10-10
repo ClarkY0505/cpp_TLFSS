@@ -94,7 +94,7 @@ bool DbConnectionPool::load_config_file() {
   }
 
   // 按项目的 bin/程序 与 sql/mysql.cnf 布局寻找配置文件。
-  const fs::path config_path = exe.parent_path().parent_path() / "sql" / "mysql.cnf";
+  const fs::path config_path = exe.parent_path().parent_path() / "config" / "mysql.cnf";
 
   // 文件流通过 RAII 关闭；打开失败时不继续解析。
   std::ifstream config(config_path);
