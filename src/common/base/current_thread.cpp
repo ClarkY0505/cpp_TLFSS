@@ -24,7 +24,7 @@ std::string stack_trace(bool demangle) {
   if (strings) {
     size_t len = 256;
     char* demangled = demangle ? static_cast<char*>(::malloc(len)) : nullptr;
-    for (int i = 1; i < nptrs; ++i)  // skipping the 0-th, which is this function
+    for (int i = 1; i < nptrs; ++i)  // 跳过第 0 帧，即当前函数
     {
       if (demangle) {
         // https://panthema.net/2008/0901-stacktrace-demangled/
@@ -44,7 +44,7 @@ std::string stack_trace(bool demangle) {
           char* ret = abi::__cxa_demangle(left_par + 1, demangled, &len, &status);
           *plus = '+';
           if (status == 0) {
-            demangled = ret;  // ret could be realloc()
+            demangled = ret;  // ret 可能由 realloc() 重新分配
             stack.append(strings[i], left_par + 1);
             stack.append(demangled);
             stack.append(plus);
@@ -53,7 +53,7 @@ std::string stack_trace(bool demangle) {
           }
         }
       }
-      // Fallback to mangled names
+      // 解析失败时使用修饰后的符号名
       stack.append(strings[i]);
       stack.push_back('\n');
     }

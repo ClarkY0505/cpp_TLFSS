@@ -1,12 +1,12 @@
 #include "common/base/current_thread.h"
 #include "common/base/tlss_thread.h"
 
+#include <semaphore.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <memory>
 #include <thread>
-#include <semaphore.h>
 namespace TLSS::BASE {
 
 std::atomic<int> Thread::_num_created = 0;
@@ -31,7 +31,6 @@ Thread::~Thread() {
 }
 
 void Thread::start() {
-  _started = true;
   sem_t sem;
   sem_init(&sem, false, 0);
 
@@ -43,6 +42,8 @@ void Thread::start() {
     sem_post(&sem);
     _func();
   });
+  // 只有线程对象创建成功后，析构和线程池回滚才能将其视为已启动。
+  _started = true;
 
   // 这里必须要等待上面线程开始执行后
   // 获取到当前线程的tid后才能执行
@@ -50,8 +51,8 @@ void Thread::start() {
 }
 
 void Thread::join() {
-    _joined = true;
-    _thread->join();
+  _joined = true;
+  _thread->join();
 }
 
 void Thread::set_default_name() {

@@ -9,9 +9,9 @@ add_library(common_lib
     base/current_thread.cpp
     base/tlss_thread.cpp
     base/tlss_thread_pool.cpp
+    base/mysql_connection.cpp
+    base/mysql_connection_pool.cpp
     net/timestamp.cpp
-    common.cpp
-    net.cpp
     net/inet_address.cpp
     net/acceptor.cpp
     net/buffer.cpp
@@ -37,3 +37,5 @@ target_link_libraries(common_lib PUBLIC
     yaml-cpp
     logger_lib
 )
+
+target_link_libraries(common_lib PRIVATE MySQLClient::MySQLClient)

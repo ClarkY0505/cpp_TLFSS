@@ -12,7 +12,7 @@ class Exception : public std::exception {
       , _stack(BASE::CurrentThread::stack_trace(false)) {}
   ~Exception() noexcept override = default;
 
-  // default copy-ctor and operator= are okay.
+  // 使用默认的拷贝构造函数和赋值运算符即可。
 
   const char* what() const noexcept override {
     return _message.c_str();

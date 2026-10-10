@@ -82,6 +82,13 @@ else()
     message(STATUS "yaml-cpp found: ${yaml-cpp_VERSION}")
 endif()
 
+# MySQL client bundled under third/mysql
+add_library(MySQLClient::MySQLClient SHARED IMPORTED)
+set_target_properties(MySQLClient::MySQLClient PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/third/mysql/lib/libmysqlclient.so"
+    INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/third/mysql/inc"
+)
+
 # GTest (可选)
 option(BUILD_TESTS "Build unit tests" ON)
 if(BUILD_TESTS)
