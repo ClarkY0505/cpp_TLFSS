@@ -6,6 +6,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include "common/base/tlss_thread.h"
 
 namespace TLSS::BASE {
 class DbConnection;
@@ -25,6 +26,7 @@ class DbConnectionPool {
 
   void produce_connection_task();
   void scanner_connection();
+  void stop_background_threads();
 
   std::string _ip;
   unsigned short _port;
@@ -35,10 +37,14 @@ class DbConnectionPool {
   int _max_idle_time;  // 连接池最大空闲时间
   int _connection_timeout;
 
+  Thread _produce_thread;
+  Thread _scanner_thread;
+
   std::queue<std::unique_ptr<DbConnection>> _connection_queue;
   std::mutex _mutex;
   std::condition_variable _cond;
   std::atomic<int> _connection_cnt;
+  bool _stopping;
 };
 }  // namespace TLSS::BASE
 #endif  // __INC_COMMON_BASE_MYSQL_CONNECTION_POOL_H__

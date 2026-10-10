@@ -16,7 +16,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -118,7 +117,12 @@ DbConnectionPool::DbConnectionPool()
     , _max_size(1024)
     , _max_idle_time(60)
     , _connection_timeout(100)
-    , _connection_cnt(0) {
+    , _produce_thread(std::bind(&DbConnectionPool::produce_connection_task, this),
+                      "ConnectionPoolProduceThread")
+    , _scanner_thread(std::bind(&DbConnectionPool::scanner_connection, this),
+                      "ConnectionPoolScannerThread")
+    , _connection_cnt(0)
+    , _stopping(false) {
   if (!load_config_file()) {
     mysql_logger()->error("DbConnectionPool init failed");
     std::abort();
@@ -135,21 +139,27 @@ DbConnectionPool::DbConnectionPool()
     _connection_cnt.fetch_add(1);
   }
 
-  // 启动一个新的线程，作为连接的生产者
-  Thread th(std::bind(&DbConnectionPool::produce_connection_task, this), "ConnectionPoolThread");
-  th.start();
-  // 启动一个定时线程，扫描超过max_idel_time的空闲连接，进行连接回收
-  Thread th_time(std::bind(&DbConnectionPool::scanner_connection, this), "ScannerThread");
-  th_time.start();
+  try {
+    // 启动生产和扫描线程；若第二个线程启动失败，先停止已经运行的线程。
+    _produce_thread.start();
+    _scanner_thread.start();
+  } catch (...) {
+    stop_background_threads();
+    throw;
+  }
 }
+
 void DbConnectionPool::scanner_connection() {
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::seconds(_max_idle_time));
-
     // 扫描整个队列，释放多于的连接
     std::vector<std::unique_ptr<DbConnection>> expired;
     {
       std::unique_lock<std::mutex> lock(_mutex);
+      // 析构时的通知可立即结束扫描，不必等满空闲扫描周期。
+      if (_cond.wait_for(lock, std::chrono::seconds(_max_idle_time),
+                         [this]() { return _stopping; })) {
+        return;
+      }
       const auto max_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::seconds(_max_idle_time))
                                    .count();
@@ -176,9 +186,12 @@ void DbConnectionPool::produce_connection_task() {
   for (;;) {
     std::unique_lock<std::mutex> lock(_mutex);
     _cond.wait(lock, [this]() {
-      return _connection_queue.empty() &&
-             _connection_cnt.load(std::memory_order_relaxed) < _max_size;
+      return _stopping || (_connection_queue.empty() &&
+                           _connection_cnt.load(std::memory_order_relaxed) < _max_size);
     });
+    if (_stopping) {
+      return;
+    }
     // 预留容量，连接过程不占用队列互斥锁。
     _connection_cnt.fetch_add(1);
     lock.unlock();
@@ -189,7 +202,11 @@ void DbConnectionPool::produce_connection_task() {
       mysql_logger()->warn("MySQL connection failed; retrying in {} ms", retry_delay.count());
       p.reset();
       _cond.notify_all();
-      std::this_thread::sleep_for(retry_delay);
+      // 重试等待也能响应析构通知。
+      std::unique_lock<std::mutex> retry_lock(_mutex);
+      if (_cond.wait_for(retry_lock, retry_delay, [this]() { return _stopping; })) {
+        return;
+      }
       retry_delay = std::min(retry_delay * 2, max_retry_delay);
       continue;
     }
@@ -197,10 +214,34 @@ void DbConnectionPool::produce_connection_task() {
     p->refresh_alive_time();
 
     lock.lock();
+    // 连接期间可能已开始析构；释放预留容量并丢弃这条连接。
+    if (_stopping) {
+      _connection_cnt.fetch_sub(1);
+      return;
+    }
     _connection_queue.push(std::move(p));
     lock.unlock();
     _cond.notify_all();
   }
+}
+
+void DbConnectionPool::stop_background_threads() {
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _stopping = true;
+  }
+  _cond.notify_all();
+
+  if (_produce_thread.started()) {
+    _produce_thread.join();
+  }
+  if (_scanner_thread.started()) {
+    _scanner_thread.join();
+  }
+}
+
+DbConnectionPool::~DbConnectionPool() {
+  stop_background_threads();
 }
 
 std::shared_ptr<DbConnection> DbConnectionPool::get_connection() {
@@ -208,7 +249,9 @@ std::shared_ptr<DbConnection> DbConnectionPool::get_connection() {
       std::chrono::steady_clock::now() + std::chrono::milliseconds(_connection_timeout);
   std::unique_lock<std::mutex> lock(_mutex);
   for (;;) {
-    if (!_cond.wait_until(lock, deadline, [this]() { return !_connection_queue.empty(); })) {
+    if (!_cond.wait_until(lock, deadline, [this]() {
+          return !_connection_queue.empty();
+        })) {
       mysql_logger()->warn("get connection timeout");
       return nullptr;
     }

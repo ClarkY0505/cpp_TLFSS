@@ -21,7 +21,7 @@ DEPS := $(OBJECTS:.o=.d)
 
 vpath %.cpp . .. $(ROOT_DIR)/src/logger
 
-.PHONY: all clean
+.PHONY: all clean test_thread_detach_lifetime
 all: $(TARGETS)
 
 thread_pool: $(BUILD_DIR)/thread_pool_test.o $(THREAD_OBJECTS)
@@ -43,6 +43,11 @@ $(BUILD_DIR)/%.o: %.cpp Makefile | $(BUILD_DIR)
 
 $(BUILD_DIR):
 	mkdir -p $@
+
+test_thread_detach_lifetime: thread_detach_lifetime_test.cpp ../tlss_thread.cpp ../current_thread.cpp | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) -std=c++17 -O1 -g -fsanitize=address -fno-omit-frame-pointer \
+		-pthread $^ -ldl -o $(BUILD_DIR)/thread_detach_lifetime_test_asan
+	ASAN_OPTIONS=detect_leaks=0 timeout 5s ./$(BUILD_DIR)/thread_detach_lifetime_test_asan
 
 clean:
 	$(RM) $(TARGETS) $(OBJECTS) $(DEPS)
