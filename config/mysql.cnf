@@ -7,7 +7,7 @@ maxSize=1024
 maxIdleTime=60
 ConnectionTimeOut=100
 # mysql设置项
-# 建立连接超市
+# 建立连接超时
 connectTimeout=5
 # 网络读取超时
 readTimeout=5
