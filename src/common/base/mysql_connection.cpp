@@ -15,7 +15,19 @@ DbConnection::~DbConnection() {
 }
 
 bool DbConnection::connect(const std::string& ip, unsigned short port, const std::string& username,
-                           const std::string& password, const std::string& dbname) {
+                           const std::string& password, const std::string& dbname,
+                           unsigned int connect_timeout_sec, unsigned int read_timeout_sec,
+                           unsigned int write_timeout_sec) {
+  // 选项必须在建连前设置；同一条连接后续的 ping/query 也使用读写超时。
+  // MySQL 使用秒作为选项单位；这些超时不是整个 SQL 操作的严格截止时间。
+  if (_conn == nullptr ||
+      mysql_options(_conn, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_sec) != 0 ||
+      mysql_options(_conn, MYSQL_OPT_READ_TIMEOUT, &read_timeout_sec) != 0 ||
+      mysql_options(_conn, MYSQL_OPT_WRITE_TIMEOUT, &write_timeout_sec) != 0) {
+    mysql_logger()->error("Failed to configure MySQL connection timeouts");
+    return false;
+  }
+  // 网络建连在配置了客户端超时之后执行；失败交给连接池决定重试或停止。
   MYSQL* p = mysql_real_connect(_conn, ip.c_str(), username.c_str(), password.c_str(),
                                 dbname.c_str(), port, nullptr, 0);
   if (p == nullptr) {

@@ -10,8 +10,12 @@ class DbConnection {
   // 初始化数据库连接
   DbConnection();
   ~DbConnection();
+  // 在建立连接前设置 MySQL 网络超时；三个可选参数的单位均为秒。
+  // 未指定时使用 5 秒默认值，连接池可按配置显式传入其他值。
   bool connect(const std::string& ip, unsigned short port, const std::string& username,
-               const std::string& password, const std::string& dbname);
+               const std::string& password, const std::string& dbname,
+               unsigned int connect_timeout_sec = 5, unsigned int read_timeout_sec = 5,
+               unsigned int write_timeout_sec = 5);
   bool ping();
   // insert delete update
   bool update(const std::string &sql);

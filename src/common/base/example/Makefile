@@ -10,12 +10,14 @@ THREAD_SOURCES := ../tlss_thread_pool.cpp ../tlss_thread.cpp ../current_thread.c
 MYSQL_SOURCES := ../mysql_connection.cpp ../mysql_connection_pool.cpp \
                  $(ROOT_DIR)/src/logger/logger.cpp
 SOURCES := thread_pool_test.cpp thread_pool_start_failure_test.cpp mysql_conn_test.cpp \
+           mysql_conn_handle_shutdown_test.cpp mysql_pool_lifecycle_test.cpp \
            $(THREAD_SOURCES) $(MYSQL_SOURCES)
 OBJECTS := $(addprefix $(BUILD_DIR)/,$(notdir $(SOURCES:.cpp=.o)))
 THREAD_OBJECTS := $(addprefix $(BUILD_DIR)/,$(notdir $(THREAD_SOURCES:.cpp=.o)))
 MYSQL_OBJECTS := $(BUILD_DIR)/mysql_conn_test.o \
                  $(BUILD_DIR)/tlss_thread.o $(BUILD_DIR)/current_thread.o \
                  $(addprefix $(BUILD_DIR)/,$(notdir $(MYSQL_SOURCES:.cpp=.o)))
+MYSQL_POOL_OBJECTS := $(filter-out $(BUILD_DIR)/mysql_conn_test.o,$(MYSQL_OBJECTS))
 MYSQL_LIBRARY := $(MYSQL_DIR)/lib/libmysqlclient.so
 DEPS := $(OBJECTS:.o=.d)
 
@@ -38,6 +40,16 @@ mysql_conn_test: $(MYSQL_OBJECTS) $(MYSQL_LIBRARY)
 	$(CXX) $(LDFLAGS) -o $@ $(MYSQL_OBJECTS) -L$(MYSQL_DIR)/lib \
 		-Wl,-rpath,$(abspath $(MYSQL_DIR)/lib) -lmysqlclient -pthread $(LDLIBS)
 
+mysql_conn_handle_shutdown_test: $(BUILD_DIR)/mysql_conn_handle_shutdown_test.o $(MYSQL_POOL_OBJECTS) $(MYSQL_LIBRARY)
+	$(CXX) $(LDFLAGS) -o $@ $(BUILD_DIR)/mysql_conn_handle_shutdown_test.o \
+		$(MYSQL_POOL_OBJECTS) -L$(MYSQL_DIR)/lib \
+		-Wl,-rpath,$(abspath $(MYSQL_DIR)/lib) -lmysqlclient -pthread $(LDLIBS)
+
+mysql_pool_lifecycle_test: $(BUILD_DIR)/mysql_pool_lifecycle_test.o $(MYSQL_POOL_OBJECTS) $(MYSQL_LIBRARY)
+	$(CXX) $(LDFLAGS) -o $@ $(BUILD_DIR)/mysql_pool_lifecycle_test.o \
+		$(MYSQL_POOL_OBJECTS) -L$(MYSQL_DIR)/lib \
+		-Wl,-rpath,$(abspath $(MYSQL_DIR)/lib) -lmysqlclient -pthread $(LDLIBS)
+
 $(BUILD_DIR)/%.o: %.cpp Makefile | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -pthread -MMD -MP -c $< -o $@
 
@@ -50,6 +62,6 @@ test_thread_detach_lifetime: thread_detach_lifetime_test.cpp ../tlss_thread.cpp 
 	ASAN_OPTIONS=detect_leaks=0 timeout 5s ./$(BUILD_DIR)/thread_detach_lifetime_test_asan
 
 clean:
-	$(RM) $(TARGETS) $(OBJECTS) $(DEPS)
+	$(RM) $(TARGETS) mysql_conn_handle_shutdown_test mysql_pool_lifecycle_test $(OBJECTS) $(DEPS)
 
 -include $(DEPS)
