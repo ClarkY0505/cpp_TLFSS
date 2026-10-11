@@ -374,7 +374,9 @@ void TcpConnection::send_in_loop(const void* data, std::size_t len) {
   std::size_t remaining = len;
 
   if (!_channel->is_writing() && queued == 0) {
-    written = ::write(_channel->fd(), data, len);
+    // 失败可能产生 SIGPIPE这个问题
+    /* written = ::write(_channel->fd(), data, len); */
+    written = ::send(_channel->fd(), data, len, MSG_NOSIGNAL);
 
     if (written < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {

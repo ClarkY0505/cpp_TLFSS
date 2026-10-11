@@ -3,6 +3,7 @@
 #include "common/net/net_logger.h"
 #include "common/utile/utile.h"
 
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -111,10 +112,13 @@ ssize_t Buffer::read_fd(int fd, int* save_err) {
 }
 
 ssize_t Buffer::write_fd(int fd, int* save_err) {
-  ssize_t n = ::write(fd, peek(), readable_bytes());
+  /* ssize_t n = ::write(fd, peek(), readable_bytes()); */
+  // 禁止发送失败时产生 SIGPIPE。
+  const ssize_t n = ::send(fd, peek(), readable_bytes(), MSG_NOSIGNAL);
   if (n < 0) {
     *save_err = errno;
-    net_logger()->error("{}:write failed", BASE::CurrentThread::tid());
+    net_logger()->error("{}:{}:{}:write failed : ", __FILE__, __FUNCTION__,
+                        BASE::CurrentThread::tid(), *save_err);
   }
   return n;
 }
