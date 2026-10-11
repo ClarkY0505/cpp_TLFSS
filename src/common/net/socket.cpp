@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cerrno>
 #include <cstdlib>
 
 namespace TLSS::NET {
@@ -85,14 +86,14 @@ int Socket::accept(InetAddress* peer_addr) {
   return connfd;
 }
 
-//
-// 简单的关闭写端
-// 先存在这个功能
-// 后期完成屏障机制再来补充细节
-// TODO
+// 半关闭写端，使对端读到 EOF，同时保留读端以等待对端关闭。
 void Socket::shutdown_write() {
   if (::shutdown(_sockfd, SHUT_WR) < 0) {
-    net_logger()->critical("shutdown write: error");
+    // 对端已关闭或 socket 未连接时，交由连接事件或停机超时路径清理。
+    if (errno == ENOTCONN || errno == EPIPE || errno == ECONNRESET) {
+      return;
+    }
+    net_logger()->critical("shutdown write: error {}", errno);
     std::abort();
   }
 }

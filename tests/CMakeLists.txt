@@ -6,6 +6,11 @@ add_dependencies(test_tlss_memory_link prepare_runtime_directories)
 target_link_libraries(test_tlss_memory_link PRIVATE common_lib)
 add_test(NAME tlss_memory_link_test COMMAND test_tlss_memory_link)
 
+add_executable(test_tcp_server_shutdown test_tcp_server_shutdown.cpp)
+add_dependencies(test_tcp_server_shutdown prepare_runtime_directories)
+target_link_libraries(test_tcp_server_shutdown PRIVATE common_lib)
+add_test(NAME tcp_server_shutdown_test COMMAND test_tcp_server_shutdown)
+
 if(GTest_FOUND)
     add_executable(test_ftp_server test_ftp_server.cpp)
     add_dependencies(test_ftp_server prepare_runtime_directories)

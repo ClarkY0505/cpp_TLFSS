@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -56,11 +57,13 @@ TcpConnection::TcpConnection(EventLoop* loop, const std::string& name, int sockf
     , _name(name)
     , _state(k_connecting)
     , _reading(true)
+    , _read_paused_for_shutdown(false)
     , _socket(new Socket(sockfd))
     , _channel(new Channel(loop, sockfd))
     , _local_addr(local_addr)
     , _peer_addr(peer_addr)
     , _high_water_mark(std::size_t{64} * 1024 * 1024) {
+  // 停机读取标志从 false 开始；读写事件始终由连接所属的 loop 处理。
   // Poller 给channel通知感兴趣的事件发生了; channel会回调相应的操作函数
   _channel->set_read_cb(std::bind(&TcpConnection::handle_read, this, std::placeholders::_1));
   _channel->set_write_cb(std::bind(&TcpConnection::handle_write, this));
@@ -128,7 +131,8 @@ void TcpConnection::send(std::string message) {
 
 void TcpConnection::set_high_water_mark(std::size_t bytes) {
   if (!_loop->is_in_loop_thread() || bytes == 0 || bytes > kMaxPendingBytes) {
-    throw std::invalid_argument("invalid high water mark");
+    net_logger()->error("invalid high water mark");
+    std::abort();
   }
   _high_water_mark = bytes;
 }
@@ -152,13 +156,43 @@ void TcpConnection::stop_read() {
 void TcpConnection::start_read() {
   auto self = shared_from_this();
   _loop->run_in_loop([self] {
-    if (self->_state.load() != k_connected || self->_reading ||
+    // 写缓冲区排空后可恢复读取，但停机暂停标志优先于普通背压控制。
+    if (self->_state.load() != k_connected || self->_reading || self->_read_paused_for_shutdown ||
         self->_output_buffer.readable_bytes() != 0) {
       return;
     }
 
     self->_reading = true;
     self->_channel->enable_reading();
+  });
+}
+
+void TcpConnection::pause_read_for_shutdown() {
+  auto self = shared_from_this();
+  _loop->run_in_loop([self] {
+    // 在所属 loop 中设置标志，阻止已经排队的写完成回调重新打开读取。
+    self->_read_paused_for_shutdown = true;
+    if (self->_reading && self->_state.load() == k_connected) {
+      self->_reading = false;
+      self->_channel->disable_reading();
+    }
+  });
+}
+
+void TcpConnection::shutdown_for_server_stop() {
+  auto self = shared_from_this();
+  _loop->run_in_loop([self] {
+    if (self->_state.load() != k_connected) {
+      return;
+    }
+    self->set_state(k_disconnecting);
+    // 重新监听读事件只为识别对端 FIN；收到的数据会被丢弃。
+    if (!self->_reading) {
+      self->_reading = true;
+      self->_channel->enable_reading();
+    }
+    // 若输出缓冲区仍有数据，实际关闭写端由 handle_write 在排空后完成。
+    self->shutdown_in_loop();
   });
 }
 
@@ -194,7 +228,12 @@ void TcpConnection::handle_read(TIME::Timestamp receive_time) {
   int save_err = 0;
   ssize_t n = _input_buffer.read_fd(_channel->fd(), &save_err);
   if (n > 0) {
-    _mess_cb(shared_from_this(), &_input_buffer, receive_time);
+    // 停机阶段仍读 socket 以捕获 EOF，但不再把新数据交给业务回调。
+    if (_read_paused_for_shutdown) {
+      _input_buffer.retrieve_all();
+    } else {
+      _mess_cb(shared_from_this(), &_input_buffer, receive_time);
+    }
   } else if (n == 0) {
     handle_close();
   } else {

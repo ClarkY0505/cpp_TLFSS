@@ -20,9 +20,11 @@ class EventLoopThread : NoCopy {
 
  private:
   void thread_func();
+  // 请求 loop 退出并 join 已启动的线程；与 thread_func 对 _loop 的修改同步。
+  void stop();
 
   EventLoop* _loop;
-  bool _exiting;
+  bool _joined = false;
   BASE::Thread _thread;
   std::mutex _mutex;
   std::condition_variable _cond;

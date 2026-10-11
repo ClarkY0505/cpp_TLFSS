@@ -72,6 +72,10 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   void set_high_water_mark(std::size_t bytes);
   void stop_read();
   void start_read();
+  // 在所属 loop 暂停读取新请求；后续写完成回调也不会重新开启读取。
+  void pause_read_for_shutdown();
+  // 发送缓冲区排空后半关闭写端；继续读取并丢弃数据，以等待对端 FIN。
+  void shutdown_for_server_stop();
   void force_close();
 
   // 连接建立
@@ -99,6 +103,7 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   const std::string _name;
   std::atomic<StateE> _state;
   bool _reading;
+  bool _read_paused_for_shutdown;
 
   std::unique_ptr<Socket> _socket;
   std::unique_ptr<Channel> _channel;

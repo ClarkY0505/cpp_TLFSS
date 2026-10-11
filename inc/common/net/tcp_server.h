@@ -45,12 +45,24 @@ class TcpServer : NoCopy {
   }
 
   void start();
+  using Completion = std::function<void()>;
+  // 关闭监听并暂停已有连接读取；所有 IO loop 执行完暂停操作后在主 loop 调用 done。
+  // 调用方须保持 TcpServer 存活。
+  void stop_accepting(Completion done);
+  // 对已有连接发起半关闭；连接及其 IO 清理完成后在主 loop 调用 done。
+  void shutdown_connections(Completion done);
+  // 对宽限期内未关闭的连接发起强制关闭，完成时仍由上面的 done 通知。
+  void force_close_connections();
+  // 回收 IO 线程；只能在主 EventLoop 线程以外、连接清理完成之后调用。
+  void stop_io_threads();
 
  private:
   using ConnectionMap = std::unordered_map<std::string, TcpConnectionPtr>;
   void new_connection(int sockfd, const InetAddress& peer_addr);
   void remove_connection(const TcpConnectionPtr& conn);
   void remove_connection_in_loop(const TcpConnectionPtr& conn);
+  void when_io_idle(Completion done);
+  void finish_drain_if_empty();
   //
   // baseloop
   EventLoop* _loop;
@@ -79,6 +91,8 @@ class TcpServer : NoCopy {
   int _next_conn_id;
   // 保存所有的连接
   ConnectionMap _connections;
+  Completion _drain_callback;
+  std::atomic<bool> _stopping{false};
 };
 }  // namespace TLSS::NET
 

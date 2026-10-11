@@ -2,17 +2,29 @@
 #include "common/net/event_loop.h"
 #include "common/net/event_loop_thread.h"
 using namespace TLSS::NET;
+// EventLoop 在工作线程栈上创建，_loop 仅在该线程存活期间有效。
 EventLoopThread::EventLoopThread(const ThreadInitCallback& cb, const std::string& name)
     : _loop(nullptr)
-    , _exiting(false)
     , _thread(std::bind(&EventLoopThread::thread_func, this), name)
     , _cb(cb) {}
 
 EventLoopThread::~EventLoopThread() {
-  _exiting = true;
-  if (_loop != nullptr) {
-    _loop->quit();
+  // 统一退出并回收线程，即使 loop 已自行停止也不能跳过 join。
+  stop();
+}
+
+void EventLoopThread::stop() {
+  // 持锁期间请求退出，防止工作线程先清空指针并销毁栈上的 EventLoop。
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_loop != nullptr) {
+      _loop->quit();
+    }
+  }
+  // 即使 loop 已自行退出，也必须 join，不能由 Thread 析构时 detach。
+  if (_thread.started() && !_joined) {
     _thread.join();
+    _joined = true;
   }
 }
 
