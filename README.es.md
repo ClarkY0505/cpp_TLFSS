@@ -1,304 +1,99 @@
-# C++ Toy-level Storage Service Design Document
+# TLFSS: C++ File Storage Service Experiment
 
- [简体中文](README.md) | **English**
+[简体中文](README.md) | **English**
 
-## 1. Introduction
+TLFSS is a C++17 learning project aimed at building a file storage service. The repository currently contains a TCP event loop, thread pools, a MySQL connection pool, logging, a memory copy library, and a monitoring subsystem that runs independently. File transfer, the gateway, and gRPC services are still under development. This document describes the current source code and distinguishes working features from planned ones.
 
-A Toy-Level File Storage Service Sys(Hereinafter referred to as ”TLFSS“) that comprises four core modules:
+## What works today
 
-- **FTP Service**: A toy-level file transfer service that supports FTPS encryption and resume from interruption.
-- **Proxy Gateway**: Request for Forwarding and Load Balancing
-- **Monitoring System**: Detailed Indicator Collection, Anomaly Alerting, and Log Output
-- **RPC Service Layer**: A gRPC-based inter-module communication framework that supports distributed deployment
+| Component | Current state | Entry points |
+| --- | --- | --- |
+| Main service | Listens for TCP connections on port `9000`; splits commands on `\r\n`, echoes them, and closes a connection after `q`. Handles `SIGINT`/`SIGTERM` with an orderly shutdown | `src/main.cpp`, `src/ftp/server.cpp` |
+| Networking and infrastructure | epoll based `EventLoop`, `TcpServer`, connection buffers, and an IO thread pool; also includes an application worker pool and a MySQL connection pool | `src/common/net/`, `src/common/base/` |
+| Monitoring | Independent metric store, module registry, timers, policies, CLI, UDP metric transport, and reliable TCP alarm transport; includes standalone demos and tests | `src/monitor/` |
+| Memory copy | Shared library exposing `TLSS::MEMORY::memcpy`, with runtime backend selection and assembly implementations | `src/common/memory/` |
+| Gateway and RPC | Builds gateway and RPC placeholder code and generated code for four Protobuf/gRPC contracts; the main executable does not start a gateway or gRPC server | `src/gateway/`, `src/rpc/`, `proto/` |
 
-Target Platform: Linux(Ubuntu 22.04.5 LTS) | Build: CMake | RPC Framework : gRPC | Language: C++17/20
+**Current scope:** The main service is a command echo prototype, not a complete FTP server. FTP commands such as `USER`, `STOR`, `RETR`, `LIST`, `AUTH TLS`, and `REST` are not wired up. The monitoring demos are also separate from the main service.
 
-## 2.Architecture
+## Code layout and execution flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Client Requests                          │
-│                    (FTP Client / gRPC Client)                   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-          ┌───────────────────┴───────────────────┐
-          ▼                                       ▼
-┌──────────────────────┐              ┌──────────────────────────┐
-│   FTP Protocol       │              │   gRPC API Gateway       │
-│   (Port 21/990)      │              │   (Port 50051)           │
-└──────────────────────┘              └──────────────────────────┘
-          │                                       │
-          └───────────────────┬───────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Proxy Gateway (gRPC)                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │Load Balancer│  │RequestRouter│  │  Connection Pool        │  │
-│  │   (gRPC)    │  │   (gRPC)    │  │       (gRPC)            │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼ gRPC Calls
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
-│ Storage Node #1   │ │ Storage Node #2   │ │ Storage Node #N   │
-│  ┌─────────────┐  │ │  ┌─────────────┐  │ │  ┌─────────────┐  │
-│  │ FTP Server  │  │ │  │ FTP Server  │  │ │  │ FTP Server  │  │
-│  │ gRPC Service│  │ │  │ gRPC Service│  │ │  │ gRPC Service│  │
-│  │ File Manager│  │ │  │ File Manager│  │ │  │ File Manager│  │
-│  └─────────────┘  │ │  └─────────────┘  │ │  └─────────────┘  │
-└───────────────────┘ └───────────────────┘ └───────────────────┘
-            │                 │                 │
-            └─────────────────┼─────────────────┘
-                              ▼ gRPC Metrics/Logs
-┌─────────────────────────────────────────────────────────────────┐
-│                  Monitoring System (gRPC)                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
-│  │MetricsService│  │ AlertService │  │ LogService            │  │
-│  │   (gRPC)     │  │   (gRPC)     │  │   (gRPC)              │  │
-│  └──────────────┘  └──────────────┘  └───────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+```text
+src/main.cpp
+  └─ StorageService (src/ftp/server.cpp)
+       ├─ TcpServer → EventLoop / epoll → TcpConnection
+       ├─ ThreadPool (application workers; current command handling does not submit tasks)
+       └─ DbConnectionPool (opens MySQL connections during startup)
+
+src/monitor/demo/* (standalone executables)
+  └─ Engine → Timer / AIO → MonitorReporter → MonitorStore
+                              ├─ UDP metric publishing
+                              └─ reliable alarm publishing → local spool → TCP collector
 ```
 
-## 3. Module 1: FTP Server
+After a connection opens, the main service sends a `tlss>` prompt. When `StorageService::on_message` receives a complete CRLF terminated command, it echoes the command and sends another prompt. During shutdown, it stops accepting connections, drains application tasks, closes existing connections, joins IO threads, shuts down the database pool, and exits the main event loop.
 
-### 3.1 Feature list
+The monitoring subsystem has its own `TLSSMON::Engine` lifecycle. Its demos cover module registration, sampling, policy evaluation, reporting, transport, and CLI queries. `demo-m9-node` and `demo-m9-collector` form a separate two process example.
 
-| Functional Classification | Specific functions             | FTP command |
-| ------------------------- | ------------------------------ | ----------- |
-| Basic transmission        | Upload File                    | STOR        |
-| Basic transmission        | Download file                  | RETR        |
-| Basic transmission        | File List                      | LIST, NLST  |
-| File Management           | Delete file                    | DELE        |
-| File Management           | Rename file                    | RNFR, RNTO  |
-| Directory Management      | Create directory               | MKD         |
-| Directory Management      | Delete directory               | RMD         |
-| Directory Management      | Change directory               | CWD, CDUP   |
-| Directory Management      | Display the current directory  | PWD         |
-| TLFSS characteristics     | FTPS encryption                | AUTH TLS    |
-| TLFSS characteristics     | Resuming interrupted downloads | REST, APPE  |
-| Session Management        | Sign In                        | USER, PASS  |
-| Session Management        | Sign Up                        | REGI,REG    |
-| Session Management        | Log out                        | QUIT        |
+| Path | Purpose |
+| --- | --- |
+| `inc/`, `src/` | Headers and implementations grouped under `common`, `ftp`, `gateway`, `logger`, `monitor`, and `rpc` |
+| `proto/` | Storage, authentication, monitoring, and gateway contracts; generated sources go into `build/generated/` |
+| `tests/`, `src/monitor/test/` | Tests for the main service and infrastructure, plus monitoring subsystem tests |
+| `config/`, `sql/` | MySQL connection settings and schema script; `config/config.yaml.example` is empty, and the main program does not read YAML |
+| `scripts/build.sh` | Wrapper for configuration, compilation, and tests |
+| `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
+| `doc/` | Supplementary material for the networking and memory copy subsystems |
 
-```cpp
-// Command processor
-    void cmd_user(const std::string& username);
-    void cmd_pass(const std::string& password);
-    void cmd_stor(const std::string& filename);
-    void cmd_retr(const std::string& filename);
-    void cmd_list(const std::string& path);
-    void cmd_dele(const std::string& filename);
-    void cmd_rnfr(const std::string& filename);
-    void cmd_rnto(const std::string& filename);
-    void cmd_mkd(const std::string& dirname);
-    void cmd_rmd(const std::string& dirname);
-    void cmd_cwd(const std::string& path);
-    void cmd_pwd();
-    void cmd_rest(const std::string& offset);  // Resuming interrupted downloads
-    void cmd_auth_tls();  // FTPS
+## Build and run
 
-// Resuming interrupted downloads
-    // File reading that supports "REST" commands
-    std::ifstream open_for_read(const std::string& path, size_t offset);
-    // Supports appending to the "APPE" command.
-    std::ofstream open_for_append(const std::string& path);
-    // Supports "REST+STOR" breakpoint upload
-    std::ofstream open_for_write(const std::string& path, size_t offset);
+### Requirements
+
+- Linux, a C++17 compiler, CMake 3.21+, Make, NASM, and pkg-config.
+- OpenSSL, Protobuf (including `protoc`), gRPC (including `grpc_cpp_plugin`), yaml-cpp, and pthreads. GoogleTest is needed for some optional tests.
+- The CMake build uses the MySQL client files at `third/mysql/inc` and `third/mysql/lib/libmysqlclient.so`. Running the main service also requires a reachable MySQL 8.0 instance; the schema script uses a MySQL 8.0 collation.
+
+The upstream gRPC and Protobuf repositories are recorded as Git submodules. Run `git submodule update --init --recursive` if you need their source. CMake currently looks for installed Protobuf and gRPC packages instead of building the submodules automatically.
+
+### Configure the database
+
+Constructing `StorageService` initializes the MySQL connection pool, which connects to a database named `tlss_db`. Create the database and tables locally, then adjust the connection settings for your environment:
+
+```bash
+mysql -u root -p < sql/init_tlss_db.sql
 ```
 
-## 4. Module 2: Proxy Gateway
+The pool reads `config/mysql.cnf` from the **parent directory of the executable's directory**. With the default layout, `bin/storage-service` uses `config/mysql.cnf` in the repository root. The file uses `key=value` lines without surrounding spaces; key settings include `ip`, `port`, `username`, `password`, `initSize`, and `maxSize`. Do not commit real credentials. The process exits if it cannot load the configuration or open its initial database connections.
 
-### 4.1 Functional design
+### Compile, test, and start
 
-- **Load Balancing Strategy**: Round Robin, Weighted Round Robin, Least Connections, IP Hash
-- **Request Forwarding**: Transparent proxy FTP control connection and data connection
-- **Connection Pool Management**: Reuse backend FTP connections to reduce connection overhead
-- **Health Check**: Regularly check the status of backend servers
-
-```cpp
-    // FTP Protocol Proxy Details
-	void proxy_pasv();   // Passive mode requires modification of the returned IP/Port.
-    void proxy_port();   // Active mode requires the establishment of a data channel proxy.
-    void proxy_data_transfer();  // Data transfer agent
+```bash
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
+./bin/storage-service
 ```
 
-## 5. Module 3: Monitoring System
+Start the program from the repository root so relative log files are written under `logs/`. The main program does not currently parse command line options; its listening port is fixed at `9000`. In another terminal, check the basic connection:
 
-### 5.1 Monitoring Indicators
-
-| Indicator Categories    | Specific Indicators                    | Sampling Frequency |
-| ----------------------- | -------------------------------------- | ------------------ |
-| Connectivity metrics    | Current number of connections          | Real time          |
-| Connectivity metrics    | Total number of historical connections | Grand total        |
-| Connectivity metrics    | Active sessions                        | Real time          |
-| Transmission Indicators | Upload speed (bytes/s)                 | 1s                 |
-| Transmission Indicators | Download speed (bytes/s)               | 1s                 |
-| Transmission Indicators | Total number of bytes transferred      | Grand total        |
-| Storage metrics         | Total disk capacity                    | 60s                |
-| Storage metrics         | Disk space used                        | 60s                |
-| Storage metrics         | Disk usage                             | 60s                |
-| Operation Log           | User Login/Logout                      | Event-driven       |
-| Operation Log           | File upload/download                   | Event-driven       |
-| Operation Log           | File deletion/renaming                 | Event-driven       |
-| Error tracking          | Number of authentication failures      | Event-driven       |
-| Error tracking          | Number of transmission errors          | Event-driven       |
-| Error tracking          | System Error Details                   | Event-driven       |
-| User behavior           | User operation statistics              | Rollup             |
-| User behavior           | Popular Files Ranking                  | Rollup             |
-
-### 5.2 **Alerting Rule**
-
-```cpp
-struct AlertRule {
-    std::string name;
-    std::string metric;
-    AlertCondition condition;  // >, <, ==, >=, <=
-    double threshold;
-    AlertSeverity severity;    // Info, Warning, Critical
-    std::chrono::seconds cooldown;
-};
-
-// Predefined Alert Rules
-const std::vector<AlertRule> DEFAULT_RULES = {
-    {"disk_full", "disk_usage_percent", Greater, 90.0, Critical, 300s},
-    {"disk_warning", "disk_usage_percent", Greater, 80.0, Warning, 600s},
-    {"high_connections", "current_connections", Greater, 1000, Warning, 60s},
-    {"connection_limit", "current_connections", Greater, 5000, Critical, 30s},
-    {"auth_failure_spike", "auth_failures_per_min", Greater, 50, Critical, 60s},
-    {"transfer_error_rate", "error_rate_percent", Greater, 5.0, Warning, 300s},
-};
+```bash
+printf 'hello\r\nq\r\n' | nc 127.0.0.1 9000
 ```
 
-## 6. Module 4: RPC Service Layer
+The service attempts an orderly shutdown on `SIGINT` or `SIGTERM`. `scripts/build.sh -t Debug` also configures, builds, and tests the project. Use `-n` to skip tests. The `-c` option deletes `build/`, `bin/`, and `lib/`, so check those directories for local files first. For an optimized build, run `cmake --preset release && cmake --build --preset release`. Both presets share `build/`; reconfigure when switching build types.
 
+Monitoring demos are placed in `bin/dome/`. For example, `./bin/dome/demo-m9-policy` demonstrates three monitoring policies. `demo-m9-collector` and `demo-m9-node` run separately: by default, the collector listens on local UDP `9300` for metrics, TCP `9400` for alarms, and TCP `9310` for its CLI. The node requires a module, source ID, outbox directory, and CLI port. See `src/monitor/demo/` for details.
 
+## Tests and where to start reading
 
-## 7. **Common Module**
+`ctest --preset debug` runs the tests registered with CMake. `tests/` covers TCP shutdown, memory copy linking, and optional GoogleTest cases for FTP and timers. `src/monitor/test/` covers the monitoring engine, policies, wire protocols, storage, CLI, and reliable alarms. If GoogleTest is unavailable, only tests that require it are skipped; the other tests are still registered.
 
-### 7.1 **Network Infrastructure**
+Suggested source reading order:
 
-```cpp
-class IOContext {
-public:
-    void run();
-    void stop();
-    void post(std::function<void()> task);
-};
+1. `src/main.cpp` → `src/ftp/server.cpp`: current executable entry point and shutdown flow.
+2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`: connection and message handling.
+3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
+4. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
+5. `proto/`, `src/rpc/`, `src/gateway/`: planned protocol boundaries and services that remain to be implemented.
 
-class Socket {
-public:
-    Socket();
-    explicit Socket(int fd);
-    
-    void bind(const std::string& addr, uint16_t port);
-    void listen(int backlog = 128);
-    Socket accept();
-    void connect(const std::string& addr, uint16_t port);
-    
-    ssize_t read(void* buf, size_t len);
-    ssize_t write(const void* buf, size_t len);
-    std::string read_line();
-    void write_line(const std::string& line);
-    
-    void set_nonblocking(bool nonblocking);
-    void set_reuse_addr(bool reuse);
-    void close();
-    
-    int fd() const { return fd_; }
-    
-private:
-    int fd_ = -1;
-};
-```
-
-### 7.2 Thread Pool
-
-```cpp
-class ThreadPool {
-public:
-    explicit ThreadPool(size_t num_threads);
-    ~ThreadPool();
-    
-    template<typename F, typename... Args>
-    auto submit(F&& f, Args&&... args) 
-        -> std::future<std::invoke_result_t<F, Args...>>;
-    
-private:
-    std::vector<std::thread> workers_;
-    std::queue<std::function<void()>> tasks_;
-    std::mutex mutex_;
-    std::condition_variable condition_;
-    std::atomic<bool> stop_{false};
-};
-```
-
-### 7.3 **Configuration Management**
-
-Read the configuration file (based) on the YAML file
-
-## 8. **Dependency**
-
-| Dependency | **Purpose**                         | **Must-have** |
-| ---------- | ----------------------------------- | ------------- |
-| gRPC       | RPC Framework                       | Yes           |
-| Protobuf   | Serialization / Protocol Definition | Yes           |
-| OpenSSL    | FTPS/TLS Encryption                 | Yes           |
-| yaml-cpp   | Configuration File Parsing          | Yes           |
-| pthread    | Multi-threaded Support              | Yes           |
-| GTest      | Unit Tests (Optional)               | NO            |
-
----
-
-## 9. **Expected Outcomes**
-
-1. Standalone FTP server supporting toy features
-2. High-performance proxy gateway supporting multiple load balancing strategies
-
-3. Complete monitoring system with real-time metric collection and anomaly alerts
-
-4. gRPC-based service communication layer supporting distributed deployment
-
-5. Complete Proto protocol definition for easy integration by multi-language clients
-
-6. gRPC interceptor enables unified processing of authentication, logging, and monitoring
-
-7. Comprehensive logging support for operation auditing
-
----
-
-## 10. **Progress**
-
-1. Implement Common Basic Modules
-
-- 1.1: (TODO) Implement socket.h/cpp, including the bind/listen/accept/connect/read/write/read_line/write_line methods of the Socket class.
-
-- 1.2: (TODO) Implement thread_pool.h/cpp, including the submit task submission and worker thread management of the thread pool.
-
-- 1.3: (TODO) Implement io_context.h/cpp, including the run/stop/post methods of the event loop.
-
-- 1.4: (TODO) Implement config.h/cpp, including the FTPServerConfig/GatewayConfig/MonitorConfig structures and YAML loading/saving.
-
-- 1.5: (TODO) Implement the reactor multi-reactive + thread pool model (using a third-party library is better in a real environment). In this project, I chose to implement it myself to understand and master this model.
-
-
-2. Implement File Storage Service (FTP)
-
-- 2.1: (TODO) A simple implementation: start the server, then start the client. The client can then use command prompt (cmd) to perform file processing on the server.
-
-- 2.2: (TODO) Implement authentication functionality
-
-- 2.3: (TODO) 
-
-- 2.4: (TODO) 
-
-- 2.5: (TODO) 
-
-## 11.Finally
-
-- This is just the beginning of my learning a framework design. It records my technical iterations. The ultimate goal of this project is to learn the design of a complete microservice architecture and the understanding of middleware.
-- Initially, I wanted to design a key-value storage service. After continuous technology selection, I found that my personal skills were insufficient to support the completion of a Redis-like service, so I settled for a file storage service.
-
-- This project will continue to be updated as expected.
-- Lose yourself to find yourself
+This project is licensed under Apache License 2.0. See [LICENSE](LICENSE).
