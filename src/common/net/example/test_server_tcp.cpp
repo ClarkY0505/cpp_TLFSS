@@ -1,9 +1,9 @@
 #include <functional>
-#include "common/net/event_loop.h"
-#include "common/net/inet_address.h"
+/* #include "common/net/event_loop.h" */
+/* #include "common/net/inet_address.h" */
 #include "common/net/tcp_server.h"
 #include "logger/logger.h"
-#include "spdlog/common.h"
+/* #include "spdlog/common.h" */
 using namespace TLSS::NET;
 
 inline const TLSSLOG::Logger::LoggerPtr& server_logger() {
@@ -33,6 +33,7 @@ class EchoServer {
   void on_connection(const TcpConnectionPtr& conn) {
     if (conn->connected()) {
       server_logger()->info("conn up : {}", conn->peer_addr().to_ip_port());
+      conn->send("tlss>");
     } else {
       server_logger()->info("conn down : {}", conn->peer_addr().to_ip_port().c_str());
     }
@@ -47,6 +48,7 @@ class EchoServer {
       conn->shutdow();
     } else {
       conn->send(msg);
+      conn->send("tlss>");
     }
   }
 

@@ -47,7 +47,10 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
   /* void send(const void* message, int len); */
   /* void send(Buffer* buf); */
-  void send(const std::string& buf);
+
+  // 可能存在buf.c_str()在执行回调前失效
+  /* void send(const std::string& buf); */
+  void send(std::string message);
   void shutdow();
 
   void set_connection_cb(const ConnectionCb& cb) {
@@ -62,9 +65,14 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   void set_close_cb(const CloseCb& cb) {
     _close_cb = cb;
   }
+
   void set_high_water_mark_cb(const HighWaterMarkCb& cb) {
     _high_water_cb = cb;
   }
+  void set_high_water_mark(std::size_t bytes);
+  void stop_read();
+  void start_read();
+  void force_close();
 
   // 连接建立
   void connect_established();

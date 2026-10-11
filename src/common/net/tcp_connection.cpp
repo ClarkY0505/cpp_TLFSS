@@ -27,6 +27,8 @@ void defaultMessageCallback(const TcpConnectionPtr& conn, Buffer* buffer,
 }
 
 namespace {
+constexpr std::size_t kMaxPendingBytes = 1024 * 1024;
+
 EventLoop* check_loop_not_null(EventLoop* loop) {
   if (loop == nullptr) {
     net_logger()->critical("{}:{}:{} TcpConnection loop is null", __FILE__, __FUNCTION__, __LINE__);
@@ -95,14 +97,77 @@ std::string TcpConnection::state_to_string() const {
 
 /* void TcpConnection::send(const void* message, int len) {} */
 
-void TcpConnection::send(const std::string& buf) {
-  if (_state == k_connected) {
-    if (_loop->is_in_loop_thread()) {
-      send_in_loop(buf.c_str(), buf.size());
-    } else {
-      _loop->run_in_loop(std::bind(&TcpConnection::send_in_loop, this, buf.c_str(), buf.size()));
-    }
+// 增加高水位回调后，使用该方法可能存在 buf.c_str()在执行前失效
+/* void TcpConnection::send(const std::string& buf) { */
+/*   if (_state == k_connected) { */
+/*     if (_loop->is_in_loop_thread()) { */
+/*       send_in_loop(buf.c_str(), buf.size()); */
+/*     } else { */
+/*       _loop->run_in_loop(std::bind(&TcpConnection::send_in_loop, this, buf.c_str(), buf.size()));
+ */
+/*     } */
+/*   } */
+/* } */
+
+void TcpConnection::send(std::string message) {
+  if (message.empty() || _state.load() != k_connected) {
+    return;
   }
+
+  if (_loop->is_in_loop_thread()) {
+    send_in_loop(message.data(), message.size());
+    return;
+  }
+
+  // 回调持有数据和连接，避免 c_str()、this 在执行前失效。
+  auto self = shared_from_this();
+  _loop->queue_in_loop([self, message = std::move(message)] {
+    self->send_in_loop(message.data(), message.size());
+  });
+}
+
+void TcpConnection::set_high_water_mark(std::size_t bytes) {
+  if (!_loop->is_in_loop_thread() || bytes == 0 || bytes > kMaxPendingBytes) {
+    throw std::invalid_argument("invalid high water mark");
+  }
+  _high_water_mark = bytes;
+}
+
+// 增加高水位函数后对应策略
+void TcpConnection::stop_read() {
+  auto self = shared_from_this();
+  _loop->run_in_loop([self] {
+    // 回调可能排队了一段时间；执行时重新检查水位。
+    if (self->_state.load() != k_connected || !self->_reading ||
+        self->_output_buffer.readable_bytes() < self->_high_water_mark) {
+      return;
+    }
+
+    self->_reading = false;
+    self->_channel->disable_reading();
+  });
+}
+
+// 增加高水位函数后对应策略
+void TcpConnection::start_read() {
+  auto self = shared_from_this();
+  _loop->run_in_loop([self] {
+    if (self->_state.load() != k_connected || self->_reading ||
+        self->_output_buffer.readable_bytes() != 0) {
+      return;
+    }
+
+    self->_reading = true;
+    self->_channel->enable_reading();
+  });
+}
+
+// 增加高水位函数后对应策略
+void TcpConnection::force_close() {
+  auto self = shared_from_this();
+  _loop->queue_in_loop([self] {
+    self->handle_close();
+  });
 }
 
 void TcpConnection::connect_established() {
@@ -163,13 +228,27 @@ void TcpConnection::handle_write() {
   }
 }
 
+/* void TcpConnection::handle_close() { */
+/*   net_logger()->trace("fd = {} state = {}", _channel->fd(), state_to_string()); */
+/*   set_state(k_disconnected); */
+/*   _channel->disable_all(); */
+/*   TcpConnectionPtr guard_this(shared_from_this()); */
+/*   _conn_cb(guard_this); */
+/*   _close_cb(guard_this);  // 执行由TcpSever 提供的TcpServer::remove_connection回调函数 */
+/* } */
+
+// 使用高水位设置后的修改函数
 void TcpConnection::handle_close() {
-  net_logger()->trace("fd = {} state = {}", _channel->fd(), state_to_string());
+  if (_state.load() == k_disconnected) {
+    return;  // 防止网络关闭事件与 force_close 重复执行
+  }
+
   set_state(k_disconnected);
   _channel->disable_all();
-  TcpConnectionPtr guard_this(shared_from_this());
-  _conn_cb(guard_this);
-  _close_cb(guard_this);  // 执行由TcpSever 提供的TcpServer::remove_connection回调函数
+
+  auto self = shared_from_this();
+  _conn_cb(self);
+  _close_cb(self);
 }
 
 void TcpConnection::handle_error() {
@@ -184,58 +263,124 @@ void TcpConnection::handle_error() {
 // 发送数据 应用写的快，内核发送数据慢
 // 需要把待发送数据写入缓冲区
 // 并且设置水位回调,防止发送过快
-void TcpConnection::send_in_loop(const void* data, size_t len) {
-  ssize_t nwrote = 0;
-  size_t remaining = len;
-  bool fault_err = false;
-  if (_state.load() == k_disconnected) {
-    net_logger()->warn("disconnected, give up writing");
+/* void TcpConnection::send_in_loop(const void* data, size_t len) { */
+/*   ssize_t nwrote = 0; */
+/*   size_t remaining = len; */
+/*   bool fault_err = false; */
+/*   if (_state.load() == k_disconnected) { */
+/*     net_logger()->warn("disconnected, give up writing"); */
+/*     return; */
+/*   } */
+/*   // */
+/*   // 表示channel第一次开始写数据，而且缓冲区没有待发送数据 */
+/*   if (!_channel->is_writing() && _output_buffer.readable_bytes() == 0) { */
+/*     nwrote = ::write(_channel->fd(), data, len); */
+/*     if (nwrote >= 0) { */
+/*       remaining = len - nwrote; */
+/*       if (remaining == 0 && _write_cb) { */
+/*         // 此时一次性数据发送完成， */
+/*         // 就不用在给channel设置epollout事件 */
+/*         _loop->queue_in_loop(std::bind(_write_cb, shared_from_this())); */
+/*       } */
+/*     } else { */
+/*       nwrote = 0; */
+/*       if (errno != EWOULDBLOCK) { */
+/*         net_logger()->error("TcpConnection::send_in_loop"); */
+/*         if (errno == EPIPE || errno == ECONNRESET) { */
+/*           fault_err = true; */
+/*         } */
+/*       } */
+/*     } */
+/*   } */
+
+/*   if (!fault_err && remaining > 0) { */
+/*     // 此时说明当前这一次write,并没有把数据全部发送出去， */
+/*     // 剩余的数据需要保存到缓冲区中， */
+/*     // 给channel注册epollout事件，poller发现tcp的缓冲区有空间， */
+/*     // 会通知相应的sock->channel,调用handle_write回调方法 */
+/*     // 最终通过handle_write方法，把缓冲区中所有数据发送完成 */
+/*     size_t old_len = _output_buffer.readable_bytes(); */
+/*     if (old_len + remaining >= _high_water_mark && old_len < _high_water_mark && _high_water_cb)
+ * { */
+/*       _loop->queue_in_loop(std::bind(_high_water_cb, shared_from_this(), old_len + remaining));
+ */
+/*     } */
+/*     _output_buffer.append(static_cast<const char*>(data) + nwrote, remaining); */
+/*     if (!_channel->is_writing()) { */
+/*       _channel->enable_writing(); */
+/*     } */
+/*   } */
+/* } */
+
+/* void TcpConnection::shutdow() { */
+/*   if (_state == k_connected) { */
+/*     set_state(k_disconnecting); */
+/*     _loop->run_in_loop(std::bind(&TcpConnection::shutdown_in_loop, this)); */
+/*   } */
+/* } */
+
+// 新增高水位背压机制后的loop
+void TcpConnection::send_in_loop(const void* data, std::size_t len) {
+  if (_state.load() != k_connected) {
+    return;  // 排队期间连接可能已经关闭
+  }
+
+  const std::size_t queued = _output_buffer.readable_bytes();
+  if (len > kMaxPendingBytes - queued) {
+    force_close();
     return;
   }
-  //
-  // 表示channel第一次开始写数据，而且缓冲区没有待发送数据
-  if (!_channel->is_writing() && _output_buffer.readable_bytes() == 0) {
-    nwrote = ::write(_channel->fd(), data, len);
-    if (nwrote >= 0) {
-      remaining = len - nwrote;
-      if (remaining == 0 && _write_cb) {
-        // 此时一次性数据发送完成，
-        // 就不用在给channel设置epollout事件
-        _loop->queue_in_loop(std::bind(_write_cb, shared_from_this()));
+
+  ssize_t written = 0;
+  std::size_t remaining = len;
+
+  if (!_channel->is_writing() && queued == 0) {
+    written = ::write(_channel->fd(), data, len);
+
+    if (written < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        written = 0;
+      } else {
+        force_close();
+        return;
       }
     } else {
-      nwrote = 0;
-      if (errno != EWOULDBLOCK) {
-        net_logger()->error("TcpConnection::send_in_loop");
-        if (errno == EPIPE || errno == ECONNRESET) {
-          fault_err = true;
-        }
+      remaining -= static_cast<std::size_t>(written);
+      if (remaining == 0 && _write_cb) {
+        _loop->queue_in_loop(std::bind(_write_cb, shared_from_this()));
       }
     }
   }
 
-  if (!fault_err && remaining > 0) {
-    // 此时说明当前这一次write,并没有把数据全部发送出去，
-    // 剩余的数据需要保存到缓冲区中，
-    // 给channel注册epollout事件，poller发现tcp的缓冲区有空间，
-    // 会通知相应的sock->channel,调用handle_write回调方法
-    // 最终通过handle_write方法，把缓冲区中所有数据发送完成
-    size_t old_len = _output_buffer.readable_bytes();
-    if (old_len + remaining >= _high_water_mark && old_len < _high_water_mark && _high_water_cb) {
-      _loop->queue_in_loop(std::bind(_high_water_cb, shared_from_this(), old_len + remaining));
-    }
-    _output_buffer.append(static_cast<const char*>(data) + nwrote, remaining);
-    if (!_channel->is_writing()) {
-      _channel->enable_writing();
-    }
+  if (remaining == 0) {
+    return;
+  }
+
+  const std::size_t old_size = _output_buffer.readable_bytes();
+  _output_buffer.append(static_cast<const char*>(data) + written, remaining);
+  const std::size_t new_size = _output_buffer.readable_bytes();
+
+  // 沿用已有的“首次跨过高水位”通知机制。
+  if (old_size < _high_water_mark && new_size >= _high_water_mark && _high_water_cb) {
+    _loop->queue_in_loop(std::bind(_high_water_cb, shared_from_this(), new_size));
+  }
+
+  if (!_channel->is_writing()) {
+    _channel->enable_writing();
   }
 }
 
+// 使用了高水位函数后的shutdow
 void TcpConnection::shutdow() {
-  if (_state == k_connected) {
-    set_state(k_disconnecting);
-    _loop->run_in_loop(std::bind(&TcpConnection::shutdown_in_loop, this));
-  }
+  auto self = shared_from_this();
+  _loop->run_in_loop([self] {
+    if (self->_state.load() != k_connected) {
+      return;
+    }
+
+    self->set_state(k_disconnecting);
+    self->shutdown_in_loop();
+  });
 }
 
 void TcpConnection::shutdown_in_loop() {

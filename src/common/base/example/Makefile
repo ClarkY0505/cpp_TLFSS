@@ -36,8 +36,8 @@ thread_pool_start_failure_test: $(BUILD_DIR)/thread_pool_start_failure_test.o $(
 $(MYSQL_OBJECTS): CPPFLAGS += -I$(MYSQL_DIR)/inc
 
 # 记录运行时库路径，使程序无需另设 LD_LIBRARY_PATH。
-mysql_conn_test: $(MYSQL_OBJECTS) $(MYSQL_LIBRARY)
-	$(CXX) $(LDFLAGS) -o $@ $(MYSQL_OBJECTS) -L$(MYSQL_DIR)/lib \
+mysql_conn_test: $(MYSQL_OBJECTS) $(BUILD_DIR)/tlss_thread_pool.o $(MYSQL_LIBRARY)
+	$(CXX) $(LDFLAGS) -o $@ $(MYSQL_OBJECTS) $(BUILD_DIR)/tlss_thread_pool.o -L$(MYSQL_DIR)/lib \
 		-Wl,-rpath,$(abspath $(MYSQL_DIR)/lib) -lmysqlclient -pthread $(LDLIBS)
 
 mysql_conn_handle_shutdown_test: $(BUILD_DIR)/mysql_conn_handle_shutdown_test.o $(MYSQL_POOL_OBJECTS) $(MYSQL_LIBRARY)

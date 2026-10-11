@@ -59,9 +59,28 @@ target_link_libraries(demo-m9-node PRIVATE monitor_lib)
 add_executable(demo-m9-policy demo/demo-m9-policy.cpp)
 target_link_libraries(demo-m9-policy PRIVATE monitor_lib)
 
+set(MONITOR_DEMO_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dome")
+file(MAKE_DIRECTORY "${MONITOR_DEMO_OUTPUT_DIR}")
+set_target_properties(
+    m3-demo
+    demo_pub
+    demo-m7
+    demo-m8
+    demo-m9-collector
+    demo-m9-node
+    demo-m9-policy
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${MONITOR_DEMO_OUTPUT_DIR}"
+)
+foreach(demo_target IN ITEMS
+    m3-demo demo_pub demo-m7 demo-m8 demo-m9-collector demo-m9-node demo-m9-policy
+)
+    add_dependencies(${demo_target} prepare_runtime_directories)
+endforeach()
+
 if(BUILD_TESTS)
     function(add_monitor_test target source)
         add_executable(${target} ${source})
+        add_dependencies(${target} prepare_runtime_directories)
         set_target_properties(${target} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test"
         )

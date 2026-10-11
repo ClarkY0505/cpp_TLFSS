@@ -35,6 +35,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+add_custom_target(prepare_runtime_directories
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dome"
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test"
+    VERBATIM
+)
 
 # =============================================================================
 # 查找依赖
@@ -205,6 +212,7 @@ add_subdirectory(src/rpc)
 # =============================================================================
 
 add_executable(storage-service src/main.cpp)
+add_dependencies(storage-service prepare_runtime_directories)
 
 target_link_libraries(storage-service
     common_lib
