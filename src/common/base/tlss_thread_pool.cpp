@@ -47,7 +47,8 @@ ThreadPool::ThreadPool(const std::string& name_arg)
     : _name(name_arg)
     , _max_queue_size(0)
     , _active_inline_tasks(0)
-    , _state(State::k_created) {}
+    , _state(State::k_created)
+    , _max_wait_queue_size(0) {}
 
 ThreadPool::~ThreadPool() {
   // 销毁前完成停机，等待已接受的任务和工作线程结束。
@@ -108,16 +109,27 @@ void ThreadPool::start(int num_threads) {
       // 逐个启动；Thread::start() 会等待对应工作线程进入线程入口。
       th->start();
     }
+
+    // 新增异步任务线程能力
+    if (num_threads > 0 && _max_wait_queue_size > 0) {
+      _deadline_thread = std::thread(&ThreadPool::deadline_loop, this);
+    }
   } catch (...) {
     // 启动失败时拒绝任务，并在释放队列锁后等待已启动的线程退出。
     _state = State::k_stopping;
     _not_full.notify_all();
     _not_empty.notify_all();
+    // 异步任务线程的唤醒
+    _deadline_changed.notify_all();
     lock.unlock();
     for (auto& th : _threads) {
       if (th->started()) {
         th->join();
       }
+    }
+    // 异步任务线程的回收
+    if (_deadline_thread.joinable()) {
+      _deadline_thread.join();
     }
     lock.lock();
     _state = State::k_stopped;
@@ -171,6 +183,8 @@ void ThreadPool::run_in_thread() {
 }
 
 ThreadPool::Task ThreadPool::take() {
+  Task task;
+  std::vector<Task> expired_callbacks;
   std::unique_lock<std::mutex> lock(_mutex);
   // 队列空且仍在运行时等待；停机通知会唤醒等待中的工作线程。
   _not_empty.wait(lock, [this] {
@@ -182,11 +196,41 @@ ThreadPool::Task ThreadPool::take() {
   }
 
   // 停机期间也继续取走已入队任务，直到队列排空。
-  Task task = std::move(_queue.front());
+  task = std::move(_queue.front());
   _queue.pop_front();
-  // 有界队列释放一个位置后，唤醒一个等待提交的调用者。
-  if (_max_queue_size > 0) {
+
+  // 新增对异步线程等待任务
+  // 先照顾已经接收的异步等待任务。
+  while (_max_queue_size > 0 && _queue.size() < _max_queue_size && !_waiters.empty()) {
+    PendingTask pending = std::move(_waiters.front());
+    _waiters.pop_front();
+
+    if (std::chrono::steady_clock::now() >= pending.deadline) {
+      if (pending.on_timeout) {
+        expired_callbacks.push_back(std::move(pending.on_timeout));
+      }
+      continue;
+    }
+
+    _queue.push_back(std::move(pending.task));
+  }
+
+  // 没有新增异步线程等待任务时候的条件
+  // 有界队列释放一个位置后，唤醒一个等待提交的调用者
+  /* if (_max_queue_size > 0 ) { */
+  // 新增异步线程等待任务的条件
+  // 补入等待任务后仍有空位，才唤醒正在 run() 中等待的提交者
+  if (_max_queue_size > 0 && !is_full()) {
     _not_full.notify_one();
+  }
+
+  lock.unlock();
+
+  // 新增异步线程等待任务后
+  // 新增逻辑
+  // 回调可能向 EventLoop 投递任务，不能持有线程池的锁调用。
+  for (auto& callback : expired_callbacks) {
+    callback();
   }
   return task;
 }
@@ -235,6 +279,44 @@ bool ThreadPool::run(Task task) {
   return true;
 }
 
+bool ThreadPool::try_run(Task task) {
+  if (!task) {
+    throw std::invalid_argument("ThreadPool task must not be empty");
+  }
+
+  std::unique_lock<std::mutex> lock(_mutex);
+
+  if (_state != State::k_running) {
+    return false;
+  }
+
+  // 保持与 run() 一致的零线程行为，以及 stop() 所需的任务计数。
+  if (_threads.empty()) {
+    ++_active_inline_tasks;
+    lock.unlock();
+
+    PoolExecution execution(this);
+    try {
+      task();
+    } catch (...) {
+      finish_inline_task();
+      throw;
+    }
+
+    finish_inline_task();
+    return true;
+  }
+
+  // 与 run() 的区别：队列满时直接拒绝，不等待 _not_full。
+  if (is_full()) {
+    return false;
+  }
+
+  _queue.push_back(std::move(task));
+  _not_empty.notify_one();
+  return true;
+}
+
 void ThreadPool::finish_inline_task() {
   std::lock_guard<std::mutex> lock(_mutex);
   // 最后一个同步任务结束时，唤醒等待所有同步任务完成的 stop()。
@@ -261,6 +343,10 @@ void ThreadPool::stop() {
     _state = State::k_stopping;
     _not_full.notify_all();
     _not_empty.notify_all();
+    // 新增对异步线程的清除和唤醒
+    _waiters.clear();                // 停机时取消尚未进入执行队列的任务
+    _deadline_changed.notify_all();  // 唤醒到期线程退出
+
     // 零线程模式下，等待其他调用者线程里已接受的任务执行完。
     _inline_finished.wait(lock, [this] {
       return _active_inline_tasks == 0;
@@ -269,6 +355,11 @@ void ThreadPool::stop() {
   // 释放队列锁后等待工作线程；它们仍需持锁取完队列中的任务。
   for (auto& th : _threads) {
     th->join();
+  }
+
+  // 新增对异步线程的回收
+  if (_deadline_thread.joinable()) {
+    _deadline_thread.join();
   }
   // 所有已接受任务及工作线程结束后，发布最终状态。
   std::lock_guard<std::mutex> lock(_mutex);
@@ -285,4 +376,87 @@ size_t ThreadPool::queue_size() const {
   std::lock_guard<std::mutex> lock(_mutex);
   return _queue.size();
 }
+
+// ----------------------- 异步线程等待任务操作 -------------------------
+// 以下新增对异步线程等待的操作
+// 在take()也也有部分新增
+void ThreadPool::set_max_wait_queue_size(int queue_max_size) {
+  if (queue_max_size < 0) {
+    throw std::invalid_argument("ThreadPool wait queue size must be nonnegative");
+  }
+
+  std::lock_guard<std::mutex> lock(_mutex);
+  if (_state != State::k_created) {
+    throw std::logic_error("ThreadPool configuration requires an unstarted pool");
+  }
+  _max_wait_queue_size = static_cast<size_t>(queue_max_size);
+}
+
+bool ThreadPool::submit_async(Task task, std::chrono::steady_clock::time_point deadline,
+                              Task on_timeout) {
+  if (!task) {
+    throw std::invalid_argument("ThreadPool task must not be empty");
+  }
+
+  std::lock_guard<std::mutex> lock(_mutex);
+  if (_state != State::k_running || _threads.empty() ||
+      std::chrono::steady_clock::now() >= deadline) {
+    return false;
+  }
+
+  if (!is_full()) {
+    _queue.push_back(std::move(task));
+    _not_empty.notify_one();
+    return true;
+  }
+
+  if (_waiters.size() >= _max_wait_queue_size) {
+    return false;
+  }
+
+  _waiters.push_back(PendingTask{std::move(task), deadline, std::move(on_timeout)});
+  _deadline_changed.notify_one();
+  return true;
+}
+
+// 到期线程处理“队列一直没有腾出空位”的情形。它只负责移除到期任务并调用回调，不执行该任务：
+void ThreadPool::deadline_loop() {
+  // 与工作线程相同，标记为本线程池内部回调上下文。
+  PoolExecution execution(this);
+
+  for (;;) {
+    Task timeout_callback;
+
+    {
+      std::unique_lock<std::mutex> lock(_mutex);
+
+      _deadline_changed.wait(lock, [this] {
+        return _state != State::k_running || !_waiters.empty();
+      });
+      if (_state != State::k_running) {
+        return;
+      }
+
+      auto earliest = std::min_element(_waiters.begin(), _waiters.end(),
+                                       [](const PendingTask& a, const PendingTask& b) {
+                                         return a.deadline < b.deadline;
+                                       });
+
+      const auto now = std::chrono::steady_clock::now();
+      if (now < earliest->deadline) {
+        // 新任务若有更早的截止时间，submit_async() 会唤醒此线程重算。
+        _deadline_changed.wait_until(lock, earliest->deadline);
+        continue;
+      }
+
+      timeout_callback = std::move(earliest->on_timeout);
+      _waiters.erase(earliest);
+    }
+
+    if (timeout_callback) {
+      timeout_callback();
+    }
+  }
+}
+
 }  // namespace TLSS::BASE

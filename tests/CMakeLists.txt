@@ -11,6 +11,12 @@ add_dependencies(test_tcp_server_shutdown prepare_runtime_directories)
 target_link_libraries(test_tcp_server_shutdown PRIVATE common_lib)
 add_test(NAME tcp_server_shutdown_test COMMAND test_tcp_server_shutdown)
 
+add_executable(test_thread_pool_async test_thread_pool_async.cpp)
+add_dependencies(test_thread_pool_async prepare_runtime_directories)
+target_link_libraries(test_thread_pool_async PRIVATE common_lib)
+add_test(NAME thread_pool_async_test COMMAND test_thread_pool_async)
+set_tests_properties(thread_pool_async_test PROPERTIES TIMEOUT 15)
+
 if(GTest_FOUND)
     add_executable(test_ftp_server test_ftp_server.cpp)
     add_dependencies(test_ftp_server prepare_runtime_directories)

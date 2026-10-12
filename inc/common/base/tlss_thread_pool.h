@@ -40,6 +40,18 @@ class ThreadPool : NoCopy {
   // 异步任务或初始化回调中的异常沿用现有的进程终止策略；
   // 零线程模式下同步执行产生的异常会传播给调用者。
   bool run(Task task);
+  // 不等待队列空位；未运行或队列已满时返回 false。
+  // 空任务抛出 invalid_argument。
+  // 零线程模式与 run() 一样，在调用者线程执行任务。
+  bool try_run(Task task);
+
+  // 新增异步线程等待
+  // 必须在 start() 前调用；0 表示不允许等待任务。
+  void set_max_wait_queue_size(int queue_max_size);
+  // 成功接收任务返回 true；未运行、零工作线程、截止时间已到，
+  // 或执行队列与等待队列都满时返回 false。
+  // on_timeout 只在“已接收但等待入执行队列时超时”才调用。
+  bool submit_async(Task task, std::chrono::steady_clock::time_point deadline, Task on_timeout);
 
  private:
   enum class State { k_created, k_running, k_stopping, k_stopped };
@@ -61,6 +73,22 @@ class ThreadPool : NoCopy {
   size_t _max_queue_size;
   size_t _active_inline_tasks;
   State _state;
+
+  // 新增对异步线程等待成员
+  struct PendingTask {
+    Task task;
+    std::chrono::steady_clock::time_point deadline;
+    Task on_timeout;
+  };
+
+  void deadline_loop();
+  // 与现有 _not_empty、_not_full 放在一起
+  std::condition_variable _deadline_changed;
+  // 与现有 _threads、_queue 放在一起
+  std::thread _deadline_thread;
+  std::deque<PendingTask> _waiters;
+  // 放在现有 _max_queue_size 之后，并按此顺序初始化
+  size_t _max_wait_queue_size;
 };
 }  // namespace TLSS::BASE
 #endif  // __INC_COMMON_BASE_TLSS_THREAD_POOL_H__

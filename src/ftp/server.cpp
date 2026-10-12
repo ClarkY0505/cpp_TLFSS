@@ -1,5 +1,6 @@
 /* #include "common/base/mysql_connection_pool.h" */
 /* #include "common/base/tlss_thread_pool.h" */
+#include "ftp/context.h"
 #include "ftp/server.h"
 #include "ftp/service_logger.h"
 
@@ -10,6 +11,11 @@
 #include <memory>
 #include <stdexcept>
 namespace TLSS::FileStorage {
+
+namespace {
+enum HandleCommand { cd, ls, pwd, mkdir, download, uoload };
+}
+
 StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
                                const std::string& name, int subloop_size,
                                int thread_pool_threads_num, int thrad_pool_queue_max_size)
@@ -17,13 +23,15 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _loop(loop)
     , _tcp_server(_loop, addr, name)
     , _db_conn_pool(BASE::DbConnectionPool::get_connection_pool())
-    , _th_pool("tlss_worker") {
+    , _th_pool("tlss_worker")
+    , _storage_engine(*_db_conn_pool) {
   _tcp_server.set_connection_cb(
       std::bind(&StorageService::on_connection, this, std::placeholders::_1));
   _tcp_server.set_message_cb(std::bind(&StorageService::on_message, this, std::placeholders::_1,
                                        std::placeholders::_2, std::placeholders::_3));
   _tcp_server.set_thread_num(subloop_size);
   _th_pool.set_max_queue_size(thrad_pool_queue_max_size);
+  _th_pool.set_max_wait_queue_size(128);
 }
 
 StorageService::~StorageService() {
@@ -107,21 +115,28 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
 void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
   if (!conn->connected()) {
     service_logger()->info("conn down : {}", conn->peer_addr().to_ip_port());
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    _sessions.erase(conn.get());
     return;
   }
 
+  // 连接背压
   conn->set_high_water_mark(256ULL * 1024);
-
   conn->set_high_water_mark_cb([](const NET::TcpConnectionPtr& c, std::size_t) {
     c->stop_read();
   });
-
   conn->set_write_complete_cb([](const NET::TcpConnectionPtr& c) {
     c->start_read();
   });
 
+  auto session = std::make_shared<ConnectionSession>();
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    _sessions.emplace(conn.get(), session);
+  }
   service_logger()->info("conn up : {}", conn->peer_addr().to_ip_port());
-  conn->send("tlss>");
+  conn->send("Please enter your username.\r\n");
+  conn->send("Username:");
 }
 
 void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buf,
@@ -134,12 +149,11 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
   }
 
   constexpr std::size_t k_max_command_bytes = 4096;
-  constexpr char k_crlf[] = "\r\n";
 
   while (conn->connected()) {
     const char* begin = buf->peek();
     const char* end = begin + buf->readable_bytes();
-    const char* delimiter = std::search(begin, end, k_crlf, k_crlf + 2);
+    const char* delimiter = std::find(begin, end, '\n');
 
     if (delimiter == end) {
       // 允许末尾的 '\r' 等待下次读取补上 '\n'。
@@ -150,7 +164,9 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
       return;
     }
 
-    const std::size_t length = static_cast<std::size_t>(delimiter - begin);
+    const std::size_t line_length = static_cast<std::size_t>(delimiter - begin);
+    const std::size_t length =
+        line_length > 0 && delimiter[-1] == '\r' ? line_length - 1 : line_length;
     if (length > k_max_command_bytes) {
       buf->retrieve_all();
       conn->force_close();
@@ -158,17 +174,165 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
     }
 
     std::string command(begin, length);
-    buf->retrieve(length + 2);
+    buf->retrieve(line_length + 1);
 
-    if (command == "q") {
+    std::shared_ptr<ConnectionSession> session;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      auto it = _sessions.find(conn.get());
+      if (it == _sessions.end()) {
+        return;
+      }
+      session = it->second;
+    }
+
+    if (command == "q" || command == "quit") {
       conn->send("bye!\r\n");
       conn->shutdow();
       return;
     }
 
-    // TODO 接入命令分配器后 将command改为 res
-    conn->send(command + "\r\ntlss>");
+    if (handle_login_command(conn, session, command)) {
+      continue;
+    }
+
+    conn->send(command + "\r\ntlss@" + session->name + ":" + session->current_directory + ">");
   }
+}
+
+// -------- private fun----------------------------------------------
+
+bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
+                                          const std::shared_ptr<ConnectionSession>& session,
+                                          const std::string& command) {
+  if (session->login_state == LoginState::k_verifying) {
+    conn->send("Please wait.\r\n");
+    return true;
+  }
+
+  if (session->login_state == LoginState::k_await_username) {
+    session->name = command;
+    session->login_state = LoginState::k_verifying;
+    auto query_session = std::make_shared<ConnectionSession>(*session);
+
+    // 原生线程
+    /* bool accepted = */
+    /*     _th_pool.run(std::bind(&StorageService::lookup_username, this, query_session, */
+    /*                            std::weak_ptr<ConnectionSession>(session), */
+    /*                            std::weak_ptr<NET::TcpConnection>(conn), conn->get_loop())); */
+
+    // 异步任务线程 225-240
+    auto original = std::weak_ptr<ConnectionSession>(session);
+    auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+    auto* io_loop = conn->get_loop();
+
+    auto task = std::bind(&StorageService::lookup_username, this, query_session, original,
+                          connection, io_loop);
+
+    // 超时回调由线程池的计时线程调用，因此把 session 操作投递回 IO 线程。
+    auto on_timeout = [this, original, connection, io_loop] {
+      io_loop->queue_in_loop(
+          std::bind(&StorageService::finish_username_wait_timeout, this, original, connection));
+    };
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
+    const bool accepted = _th_pool.submit_async(std::move(task), deadline, std::move(on_timeout));
+
+    if (!accepted) {
+      session->name.clear();
+      session->login_state = LoginState::k_await_username;
+      conn->send("Service unavailable.\r\nUsername:");
+    }
+    return true;
+  }
+
+  if (session->login_state == LoginState::k_await_password) {
+    if (command == session->pass) {
+      session->login_state = LoginState::k_authenticated;
+      session->pass.clear();
+      conn->send("Login successful.\r\ntlss@" + session->name + ":" + session->current_directory +
+                 ">");
+    } else {
+      conn->send("Invalid password.\r\nPassword:");
+    }
+    return true;
+  }
+
+  return false;  // 已认证，交给后续命令处理
+}
+
+void StorageService::lookup_username(std::shared_ptr<ConnectionSession> query_session,
+                                     std::weak_ptr<ConnectionSession> original,
+                                     std::weak_ptr<NET::TcpConnection> connection,
+                                     NET::EventLoop* io_loop) {
+  StorageContext<std::shared_ptr<ConnectionSession>> result;
+  result = _storage_engine.find_user_by_name(query_session);
+
+  io_loop->queue_in_loop(std::bind(&StorageService::finish_username_lookup, this,
+                                   std::move(original), std::move(connection), std::move(result)));
+}
+
+void StorageService::finish_username_lookup(
+    std::weak_ptr<ConnectionSession>& original, std::weak_ptr<NET::TcpConnection>& connection,
+    StorageContext<std::shared_ptr<ConnectionSession>>& result) {
+  auto session = original.lock();
+  auto conn = connection.lock();
+  if (!session || !conn || !conn->connected()) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = _sessions.find(conn.get());
+    if (it == _sessions.end() || it->second != session) {
+      return;
+    }
+  }
+  if (session->login_state != LoginState::k_verifying) {
+    return;
+  }
+
+  if (result.success && result.result) {
+    session->user_id = result.result->user_id;
+    session->salt = result.result->salt;
+    session->pass = result.result->pass;
+    session->login_state = LoginState::k_await_password;
+    conn->send("Password:");
+  } else {
+    session->name.clear();
+    session->user_id = 0;
+    session->login_state = LoginState::k_await_username;
+    conn->send("Username not found.\r\n");
+    conn->send("Username:");
+  }
+}
+
+// 异步线程超时处理
+void StorageService::finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
+                                                  std::weak_ptr<NET::TcpConnection> connection) {
+  auto session = original.lock();
+  auto conn = connection.lock();
+  if (!session || !conn || !conn->connected()) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = _sessions.find(conn.get());
+    if (it == _sessions.end() || it->second != session) {
+      return;
+    }
+  }
+
+  if (session->login_state != LoginState::k_verifying) {
+    return;
+  }
+
+  session->name.clear();
+  session->user_id = 0;
+  session->login_state = LoginState::k_await_username;
+  conn->send("Server busy. Please retry.\r\nUsername:");
 }
 
 }  // namespace TLSS::FileStorage

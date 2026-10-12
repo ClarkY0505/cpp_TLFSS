@@ -34,6 +34,12 @@ CREATE TABLE virtual_files (
     path VARCHAR(1024) NOT NULL,
     file_type ENUM('file', 'directory') NOT NULL,
 
+    -- SHA-256，目录为 NULL，文件保存内容哈希
+    object_hash CHAR(64)
+        CHARACTER SET ascii
+        COLLATE ascii_bin
+        DEFAULT NULL,
+
     PRIMARY KEY (id),
 
     UNIQUE KEY uk_virtual_files_sibling
@@ -41,6 +47,9 @@ CREATE TABLE virtual_files (
 
     KEY idx_virtual_files_user_parent
         (username, parent_id),
+
+    KEY idx_virtual_files_object_hash
+        (object_hash),
 
     CONSTRAINT fk_virtual_files_user
         FOREIGN KEY (username)
