@@ -53,12 +53,14 @@ struct ConnectionSession {
   std::string pass;
   std::uint64_t user_id = 0;
   std::string current_directory = "/";
+  bool directory_change_pending = false;
 };
 
 struct FileInfo {
-  std::uint64_t file_id = 0;
   std::string file_name;
-  std::string path;
+  std::string type;
+  std::string create_at;
+  std::string update_at;
 };
 }  // namespace TLSS::FileStorage
 

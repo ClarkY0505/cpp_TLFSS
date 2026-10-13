@@ -32,25 +32,25 @@ int main() {
     TLSS::NET::InetAddress addr(9000);
     TLSS::FileStorage::StorageService server(&loop, addr);
     server.start();
-    /* TLSS::BASE::Thread main_loop_shutdown( */
-        /* [&] { */
-          /* int signal_number = 0; */
-          /* if (sigwait(&shutdown_signals, &signal_number) == 0) { */
-            /* stopped = server.stop(); */
-          /* } */
-        /* }, */
-        /* "mainLoop_shutdown_thread"); */
-    /* main_loop_shutdown.start(); */
+    TLSS::BASE::Thread main_loop_shutdown(
+        [&] {
+          int signal_number = 0;
+          if (sigwait(&shutdown_signals, &signal_number) == 0) {
+            stopped = server.stop();
+          }
+        },
+        "mainLoop_shutdown_thread");
+    main_loop_shutdown.start();
     // 信号由专用线程同步接收，避免在异步信号处理函数中操作锁和资源。
-    std::thread shutdown_thread([&] {
-      int signal_number = 0;
-      if (sigwait(&shutdown_signals, &signal_number) == 0) {
-        stopped = server.stop();
-      }
-    });
+    /* std::thread shutdown_thread([&] { */
+    /* int signal_number = 0; */
+    /* if (sigwait(&shutdown_signals, &signal_number) == 0) { */
+    /* stopped = server.stop(); */
+    /* } */
+    /* }); */
     loop.loop();
-    shutdown_thread.join();
-    /* main_loop_shutdown.join(); */
+    /* shutdown_thread.join(); */
+    main_loop_shutdown.join();
   }
 
   // 所有服务对象和后台线程销毁后，日志系统才能关闭。

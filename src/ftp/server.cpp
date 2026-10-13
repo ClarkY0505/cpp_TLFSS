@@ -1,5 +1,3 @@
-/* #include "common/base/mysql_connection_pool.h" */
-/* #include "common/base/tlss_thread_pool.h" */
 #include "ftp/context.h"
 #include "ftp/server.h"
 #include "ftp/service_logger.h"
@@ -8,17 +6,44 @@
 #include <exception>
 #include <functional>
 #include <future>
+#include <iomanip>
 #include <memory>
-#include <stdexcept>
+#include <sstream>
+#include <utility>
+/* #include <stdexcept> */
 namespace TLSS::FileStorage {
 
 namespace {
-enum HandleCommand { cd, ls, pwd, mkdir, download, uoload };
+enum HandleCommand { cd, ls, pwd, mkdir, download, upload, unknown };
+
+std::optional<HandleCommand> string_to_command(std::string_view command) {
+  if (command == "cd") {
+    return HandleCommand::cd;
+  }
+  if (command == "ls") {
+    return HandleCommand::ls;
+  }
+  if (command == "pwd") {
+    return HandleCommand::pwd;
+  }
+  if (command == "mkdir") {
+    return HandleCommand::mkdir;
+  }
+  if (command == "download") {
+    return HandleCommand::download;
+  }
+  if (command == "upload") {
+    return HandleCommand::upload;
+  }
+
+  return HandleCommand::unknown;
 }
+
+}  // namespace
 
 StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
                                const std::string& name, int subloop_size,
-                               int thread_pool_threads_num, int thrad_pool_queue_max_size)
+                               int thread_pool_threads_num, int thread_pool_queue_max_size)
     : _thread_pool_threads_num(thread_pool_threads_num)
     , _loop(loop)
     , _tcp_server(_loop, addr, name)
@@ -30,7 +55,7 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
   _tcp_server.set_message_cb(std::bind(&StorageService::on_message, this, std::placeholders::_1,
                                        std::placeholders::_2, std::placeholders::_3));
   _tcp_server.set_thread_num(subloop_size);
-  _th_pool.set_max_queue_size(thrad_pool_queue_max_size);
+  _th_pool.set_max_queue_size(thread_pool_queue_max_size);
   _th_pool.set_max_wait_queue_size(128);
 }
 
@@ -195,12 +220,159 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
     if (handle_login_command(conn, session, command)) {
       continue;
     }
+    if (session->directory_change_pending) {
+      conn->send("Please wait.\r\n");
+      continue;
+    }
+    if (command.empty()) {
+      conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
+      continue;
+    }
+    if (dispatch_task(conn, session, command)) {
+      continue;
+    }
 
-    conn->send(command + "\r\ntlss@" + session->name + ":" + session->current_directory + ">");
+    conn->send("\r\ntlss@" + session->name + ":" + session->current_directory + ">");
   }
 }
 
 // -------- private fun----------------------------------------------
+
+bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
+                                   const std::shared_ptr<ConnectionSession>& session,
+                                   std::string_view command) {
+  std::istringstream input{std::string(command)};
+  std::string cmd;
+  std::string args;
+
+  input >> cmd;
+  std::getline(input >> std::ws, args);
+  const auto command_type = string_to_command(cmd);
+  switch (*command_type) {
+    case HandleCommand::cd:
+      if (args.empty()) {
+        conn->send("Usage: cd <directory>");
+        return false;
+      }
+
+      handle_cd(conn, session, args);
+      break;
+
+    case HandleCommand::ls:
+      handle_ls(conn, session);
+      break;
+
+    case HandleCommand::pwd:
+      handle_pwd(conn, session);
+      break;
+
+    case HandleCommand::mkdir:
+      /* handle_mkdir(); */
+      break;
+
+    case HandleCommand::download:
+      /* handle_download(); */
+      break;
+
+    case HandleCommand::upload:
+      /* handle_upload(); */
+      break;
+
+    default:
+      conn->send("Invalid command");
+      return false;
+  }
+
+  return true;
+}
+
+void StorageService::handle_cd(const NET::TcpConnectionPtr& conn,
+                               const std::shared_ptr<ConnectionSession>& session,
+                               const std::string& directory) {
+  if (session->login_state == LoginState::k_authenticated) {
+    auto query_session = std::make_shared<ConnectionSession>(*session);
+    auto original = std::weak_ptr<ConnectionSession>(session);
+    auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+    auto task = std::bind(&StorageService::move_file_by_cur_dir, this, query_session, original,
+                          connection, directory, conn->get_loop());
+    session->directory_change_pending = true;
+    const bool accepted = _th_pool.try_run(std::move(task));
+    if (!accepted) {
+      session->directory_change_pending = false;
+      conn->send("Server busy. Please retry.\r\ntlss@" + session->name + ":" +
+                 session->current_directory + ">");
+      return;
+    }
+  }
+}
+
+void StorageService::move_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+                                          std::weak_ptr<ConnectionSession> original,
+                                          std::weak_ptr<NET::TcpConnection> connection,
+                                          const std::string& directory, NET::EventLoop* io_loop) {
+  auto cur_path = _storage_engine.move_dir_by_current_dir(query_session, directory);
+  io_loop->queue_in_loop([original, connection, cur_path = std::move(cur_path)] {
+    auto session = original.lock();
+    auto conn = connection.lock();
+    if (!session || !conn || !conn->connected()) {
+      return;
+    }
+
+    session->directory_change_pending = false;
+    if (cur_path.success) {
+      session->current_directory = cur_path.result;
+    } else {
+      conn->send("Cannot change directory.\r\n");
+    }
+    conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
+  });
+}
+
+void StorageService::handle_ls(const NET::TcpConnectionPtr& conn,
+                               const std::shared_ptr<ConnectionSession>& session) {
+  if (session->login_state == LoginState::k_authenticated) {
+    auto query_session = std::make_shared<ConnectionSession>(*session);
+    auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+    auto task = std::bind(&StorageService::lookup_file_by_cur_dir, this, query_session, connection);
+    const bool accepted = _th_pool.try_run(std::move(task));
+    if (!accepted) {
+      conn->send("Server busy. Please retry.\r\n");
+      return;
+    }
+  }
+}
+
+void StorageService::lookup_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+                                            std::weak_ptr<NET::TcpConnection>& connection) {
+  auto files_info = _storage_engine.find_file_by_current_dir(query_session);
+  auto conn = connection.lock();
+  std::string msg;
+
+  if (!files_info.success) {
+    msg = "Query failed.\r\n";
+  } else if (files_info.result.empty()) {
+    conn->send("\r\ntlss@" + query_session->name + ":" + query_session->current_directory + ">");
+  } else {
+    std::ostringstream out;
+    out << std::left;  // 左对齐
+
+    for (const auto& file : files_info.result) {
+      out << std::setw(8) << file.file_name << "  " << std::setw(9) << file.type << "  "
+          << file.create_at << "  " << file.update_at << "\r\n";
+    }
+
+    msg = out.str();
+  }
+  conn->send(msg + "tlss@" + query_session->name + ":" + query_session->current_directory + ">");
+}
+
+void StorageService::handle_pwd(const NET::TcpConnectionPtr& conn,
+                                const std::shared_ptr<ConnectionSession>& session) {
+  if (session->login_state == LoginState::k_authenticated) {
+    conn->send(session->current_directory + "\r\ntlss@" + session->name + ":" +
+               session->current_directory + ">");
+  }
+}
 
 bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
                                           const std::shared_ptr<ConnectionSession>& session,

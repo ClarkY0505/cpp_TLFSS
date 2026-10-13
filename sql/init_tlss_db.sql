@@ -40,6 +40,15 @@ CREATE TABLE virtual_files (
         COLLATE ascii_bin
         DEFAULT NULL,
 
+     -- 文件或目录的创建时间
+    created_at DATETIME NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+    -- 当前记录的最后更新时间
+    updated_at DATETIME NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+
     PRIMARY KEY (id),
 
     UNIQUE KEY uk_virtual_files_sibling

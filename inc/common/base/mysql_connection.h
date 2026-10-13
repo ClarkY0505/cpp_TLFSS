@@ -1,10 +1,21 @@
 #ifndef __INC_COMMON_BASE_MYSQL_CONNECTION_H__
 #define __INC_COMMON_BASE_MYSQL_CONNECTION_H__
 
-#include <chrono>
-#include <string>
 #include "mysql/mysql.h"
+
+#include <chrono>
+#include <optional>
+#include <string>
+#include <vector>
 namespace TLSS::BASE {
+using DbValue = std::optional<std::string>;
+using DbRow = std::vector<DbValue>;
+
+struct DbQueryResult {
+  bool success = false;
+  std::vector<DbRow> rows;
+};
+
 class DbConnection {
  public:
   // 初始化数据库连接
@@ -18,9 +29,15 @@ class DbConnection {
                unsigned int write_timeout_sec = 5);
   bool ping();
   // insert delete update
-  bool update(const std::string &sql);
+  bool update(const std::string& sql);
   //  select
-  MYSQL_RES* query(const std::string &sql);
+  MYSQL_RES* query(const std::string& sql);
+
+  // 参数化 SELECT：没有匹配记录时，success 为 true，rows 为空。
+  DbQueryResult query_prepared(const std::string& sql, const std::vector<DbValue>& params = {});
+
+  // 参数化 INSERT、UPDATE、DELETE，以及不返回结果集的语句。
+  bool update_prepared(const std::string& sql, const std::vector<DbValue>& params = {});
 
   // 刷新连接的起始空闲时间点
   void refresh_alive_time() {
@@ -28,8 +45,8 @@ class DbConnection {
   }
   // 返回存活时间
   std::chrono::milliseconds::rep get_alive_time() const {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - _alive_time)
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                 _alive_time)
         .count();
   }
 

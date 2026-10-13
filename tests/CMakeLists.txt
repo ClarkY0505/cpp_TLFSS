@@ -17,6 +17,12 @@ target_link_libraries(test_thread_pool_async PRIVATE common_lib)
 add_test(NAME thread_pool_async_test COMMAND test_thread_pool_async)
 set_tests_properties(thread_pool_async_test PROPERTIES TIMEOUT 15)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME ftp_cd_lookup_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ftp_cd.py)
+endif()
+
 if(GTest_FOUND)
     add_executable(test_ftp_server test_ftp_server.cpp)
     add_dependencies(test_ftp_server prepare_runtime_directories)

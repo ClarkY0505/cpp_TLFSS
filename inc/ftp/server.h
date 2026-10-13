@@ -3,13 +3,13 @@
 
 #include "common/base/mysql_connection_pool.h"
 #include "common/base/tlss_thread_pool.h"
-#include "common/net/callbacks.h"
 #include "common/net/tcp_server.h"
 #include "ftp/service_engine.h"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 namespace TLSS::FileStorage {
@@ -17,7 +17,7 @@ class StorageService {
  public:
   explicit StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
                           const std::string& name = "tlss_service", int subloop_size = 4,
-                          int thread_pool_threads_num = 8, int thrad_pool_queue_max_size = 256);
+                          int thread_pool_threads_num = 8, int thread_pool_queue_max_size = 256);
   ~StorageService();
   void start();
   // 从主 EventLoop 线程以外调用；先排空任务和连接，再释放资源。
@@ -27,6 +27,8 @@ class StorageService {
  private:
   void on_connection(const NET::TcpConnectionPtr& conn);
   void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buf, TIME::Timestamp);
+  bool dispatch_task(const NET::TcpConnectionPtr& conn,
+                     const std::shared_ptr<ConnectionSession>& session, std::string_view command);
 
   void lookup_username(std::shared_ptr<ConnectionSession> query_session,
                        std::weak_ptr<ConnectionSession> original,
@@ -41,7 +43,19 @@ class StorageService {
   void handle_file_query();
   void handle_upload();
   void handle_download();
-
+  void handle_cd(const NET::TcpConnectionPtr& conn,
+                 const std::shared_ptr<ConnectionSession>& session, const std::string& directory);
+  void move_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+                            std::weak_ptr<ConnectionSession> original,
+                            std::weak_ptr<NET::TcpConnection> connection,
+                            const std::string& directory, NET::EventLoop* io_loop);
+  void handle_ls(const NET::TcpConnectionPtr& conn,
+                 const std::shared_ptr<ConnectionSession>& session);
+  void lookup_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+                              std::weak_ptr<NET::TcpConnection>& connection);
+  void handle_pwd(const NET::TcpConnectionPtr& conn,
+                  const std::shared_ptr<ConnectionSession>& session);
+  void handle_mkdir();
   // 异步线程超时处理
   void finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
                                     std::weak_ptr<NET::TcpConnection> connection);

@@ -1,39 +1,35 @@
+#include "monitor/callback_registry.h"
+#include "monitor/engine_type.h"
+#include "monitor/timer_manager.h"
+#include "monitor/wake_pipe.h"
+
 #include <gtest/gtest.h>
 
-extern "C" {
-#include "monitor/monitoringSys.h"
-#include "monitor/monttoringTimer.h"
-}
-
-namespace {
-
-int count_callback(void *arg[])
-{
-    int *count = static_cast<int *>(arg[0]);
-    ++(*count);
-    return 0;
-}
-
-} // namespace
+#include <chrono>
+#include <thread>
 
 TEST(MonitorTimer, FiresReadyOneShotTimer)
 {
-    sys_mon_timer_cleanup();
+    TLSSMON::CallbackRegistry registry;
+    TLSSMON::WakeupPipe wakeup;
+    ASSERT_EQ(TLSSMON::PIPESTATUS::SUCCESSFUL, wakeup.init());
 
+    TLSSMON::TimerManager manager(registry, wakeup);
     int count = 0;
-    SysMonCallback_t cb = {
-        "count_callback",
-        count_callback,
-        {&count, nullptr, nullptr, nullptr},
-    };
+    const auto handle = manager.add(
+        TLSSMON::MonCallback{"count_callback", [&count] {
+            ++count;
+            return 0;
+        }, false},
+        TLSSMON::TimerFlags::ONCE,
+        std::chrono::milliseconds{5});
+    ASSERT_TRUE(handle.has_value());
 
-    ASSERT_NE(nullptr, sys_mon_timer_set(&cb, SM_TIMER_ONCE, 0));
-
-    struct timeval sleep = {};
-    EXPECT_EQ(1, sys_mon_timer_check(&sleep));
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    timeval timeout{};
+    manager.check(timeout);
     EXPECT_EQ(1, count);
 
-    EXPECT_EQ(0, sys_mon_timer_check(&sleep));
-
-    sys_mon_timer_cleanup();
+    manager.check(timeout);
+    EXPECT_EQ(1, count);
 }
