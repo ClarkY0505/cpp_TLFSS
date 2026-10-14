@@ -8,6 +8,7 @@
 #include <future>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <utility>
 /* #include <stdexcept> */
@@ -55,11 +56,15 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _tcp_server(_loop, addr, name)
     , _db_conn_pool(BASE::DbConnectionPool::get_connection_pool())
     , _th_pool("tlss_worker")
+    , _user_repository(*_db_conn_pool)
+    , _auth_service(_user_repository)
     , _storage_engine(*_db_conn_pool) {
   _tcp_server.set_connection_cb(
       std::bind(&StorageService::on_connection, this, std::placeholders::_1));
+
   _tcp_server.set_message_cb(std::bind(&StorageService::on_message, this, std::placeholders::_1,
                                        std::placeholders::_2, std::placeholders::_3));
+
   _tcp_server.set_thread_num(subloop_size);
   _th_pool.set_max_queue_size(thread_pool_queue_max_size);
   _th_pool.set_max_wait_queue_size(128);
@@ -230,7 +235,7 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
 bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
                                    const std::shared_ptr<ConnectionSession>& session,
                                    std::string_view command) {
-  if (handle_login_command(conn, session, std::string(command))) {
+  if (handle_auth_command(conn, session, std::string(command))) {
     return true;
   }
 
@@ -276,7 +281,7 @@ bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
       break;
 
     case HandleCommand::mkdir:
-      /* handle_mkdir(); */
+      handle_mkdir(conn, session, args);
       break;
 
     case HandleCommand::download:
@@ -330,6 +335,7 @@ void StorageService::move_file_by_cur_dir(const std::string& username,
 
     session->directory_change_pending = false;
     if (cur_path.success) {
+      session->current_directory.clear();
       session->current_directory = cur_path.result;
     } else {
       conn->send("Cannot change directory.\r\n");
@@ -365,7 +371,7 @@ void StorageService::lookup_file_by_cur_dir(const std::string& username,
   if (!files_info.success) {
     msg = "Query failed.\r\n";
   } else if (files_info.result.empty()) {
-    conn->send("\r\ntlss@" + username + ":" + current_directory + ">");
+    conn->send("tlss@" + username + ":" + current_directory + ">");
     return;
   } else {
     std::ostringstream out;
@@ -389,143 +395,298 @@ void StorageService::handle_pwd(const NET::TcpConnectionPtr& conn,
   }
 }
 
-bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
-                                          const std::shared_ptr<ConnectionSession>& session,
-                                          const std::string& command) {
-  if (session->login_state == LoginState::k_await_choice) {
-    if (command == "login") {
-      session->login_state = LoginState::k_await_username;
-      conn->send("Username:");
-    } else if (command == "signup") {
-      // TODO
-      session->login_state = LoginState::k_await_signup;
-      conn->send("Username:");
-    } else {
-      conn->send("Please enter login or signup:\r\n>");
-    }
-
-    return true;
-  }
-  if (session->login_state == LoginState::k_verifying) {
-    conn->send("Please wait.\r\n");
-    return true;
-  }
-
-  if (session->login_state == LoginState::k_await_username) {
-    session->name = command;
-    session->login_state = LoginState::k_verifying;
-
-    // 异步任务线程 225-240
-    auto original = std::weak_ptr<ConnectionSession>(session);
+void StorageService::handle_mkdir(const NET::TcpConnectionPtr& conn,
+                                  const std::shared_ptr<ConnectionSession>& session,
+                                  const std::string& directory) {
+  if (session->login_state == LoginState::k_authenticated) {
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-    auto* io_loop = conn->get_loop();
-
-    auto task = std::bind(&StorageService::lookup_username, this, session->name, original,
-                          connection, io_loop);
-
-    // 超时回调由线程池的计时线程调用，因此把 session 操作投递回 IO 线程。
-    auto on_timeout = [this, original, connection, io_loop] {
-      io_loop->queue_in_loop(
-          std::bind(&StorageService::finish_username_wait_timeout, this, original, connection));
-    };
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-
-    const bool accepted = _th_pool.submit_async(std::move(task), deadline, std::move(on_timeout));
-
+    auto task = std::bind(&StorageService::create_dir, this, session->name,
+                          session->current_directory, directory, connection);
+    const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
-      session->name.clear();
-      session->login_state = LoginState::k_await_username;
-      conn->send("Service unavailable.\r\nUsername:");
-    }
-    return true;
-  }
-
-  if (session->login_state == LoginState::k_await_password) {
-    if (command == session->pass) {
-      session->login_state = LoginState::k_authenticated;
-      session->pass.clear();
-      conn->send("Login successful.\r\ntlss@" + session->name + ":" + session->current_directory +
-                 ">");
-    } else {
-      conn->send("Invalid password.\r\nPassword:");
-    }
-    return true;
-  }
-
-  return false;  // 已认证，交给后续命令处理
-}
-
-void StorageService::lookup_username(const std::string& username,
-                                     std::weak_ptr<ConnectionSession> original,
-                                     std::weak_ptr<NET::TcpConnection> connection,
-                                     NET::EventLoop* io_loop) {
-  auto result = _storage_engine.find_user_by_name(username);
-
-  io_loop->queue_in_loop(std::bind(&StorageService::finish_username_lookup, this,
-                                   std::move(original), std::move(connection), std::move(result)));
-}
-
-void StorageService::finish_username_lookup(std::weak_ptr<ConnectionSession>& original,
-                                            std::weak_ptr<NET::TcpConnection>& connection,
-                                            StorageContext<UserInfo>& result) {
-  auto session = original.lock();
-  auto conn = connection.lock();
-  if (!session || !conn || !conn->connected()) {
-    return;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    auto it = _sessions.find(conn.get());
-    if (it == _sessions.end() || it->second != session) {
+      conn->send("Server busy. Please retry.\r\n");
       return;
     }
   }
-  if (session->login_state != LoginState::k_verifying) {
+}
+
+void StorageService::create_dir(const std::string& username, const std::string& current_directory,
+                                const std::string& directory,
+                                std::weak_ptr<NET::TcpConnection>& connection) {
+  bool res = _storage_engine.create_dir(username, current_directory, directory);
+  auto conn = connection.lock();
+  if (!conn || !conn->connected()) {
+    return;
+  }
+  if (!res) {
+    conn->send("create dir failed\r\n");
+    return;
+  }
+  conn->send("tlss@" + username + ":" + current_directory + ">");
+}
+
+bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
+                                         const std::shared_ptr<ConnectionSession>& session,
+                                         const std::string& command) {
+  switch (session->login_state) {
+    case LoginState::k_authenticated:
+      // 交给后续 ls、cd、pwd 等命令处理。
+      return false;
+
+    case LoginState::k_await_choice:
+      if (command == "login") {
+        session->pending_username.clear();
+        session->name.clear();
+        session->user_id = 0;
+        session->login_state = LoginState::k_await_username;
+        conn->send("Username:");
+      } else if (command == "signup") {
+        session->pending_username.clear();
+        session->signup_password.clear();
+        session->name.clear();
+        session->user_id = 0;
+        session->login_state = LoginState::k_signup_username;
+        conn->send("New username (3-64 letters, digits or underscore):");
+      } else {
+        conn->send("Please enter login or signup:\r\ntlss>");
+      }
+      return true;
+
+    case LoginState::k_await_username:
+      if (command.empty() || command.size() > 64) {
+        conn->send(
+            "Username must contain 1 to 64 bytes.\r\n"
+            "Username:");
+        return true;
+      }
+
+      session->pending_username = command;
+      session->login_state = LoginState::k_await_password;
+      conn->send("Password:");
+      return true;
+
+    case LoginState::k_verifying:
+    case LoginState::k_registering:
+      conn->send("Please wait.\r\n");
+      return true;
+
+    case LoginState::k_signup_username:
+    case LoginState::k_signup_password:
+    case LoginState::k_signup_confirm:
+      handle_signup_command(conn, session, command);
+      return true;
+
+    case LoginState::k_await_password:
+      break;
+  }
+
+  if (command.empty() || command.size() > 128) {
+    conn->send(
+        "Password must contain 1 to 128 bytes.\r\n"
+        "Password:");
+    return true;
+  }
+
+  AUTH::LoginRequest request{
+      session->pending_username,
+      command,
+  };
+
+  session->login_state = LoginState::k_verifying;
+  const std::uint64_t attempt = ++session->auth_attempt;
+
+  const auto original = std::weak_ptr<ConnectionSession>(session);
+  const auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+  auto* io_loop = conn->get_loop();
+
+  auto task = [this, original, connection, io_loop, attempt, request = std::move(request)] {
+    // 数据库访问和密码计算都发生在业务线程。
+    auto result = _auth_service.authenticate(request);
+
+    io_loop->queue_in_loop(
+        [this, original, connection, attempt, result = std::move(result)]() mutable {
+          finish_authentication(original, connection, attempt, std::move(result));
+        });
+  };
+
+  auto on_timeout = [this, original, connection, io_loop, attempt] {
+    // submit_async 的超时回调不在连接 IO 线程中执行。
+    io_loop->queue_in_loop([this, original, connection, attempt] {
+      finish_authentication(original, connection, attempt, AUTH::AuthResult{});
+    });
+  };
+
+  // 这里只限制等待进入执行队列的时间。
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
+  const bool accepted = _th_pool.submit_async(std::move(task), deadline, std::move(on_timeout));
+
+  if (!accepted) {
+    // 当前已经在该连接的 IO 线程，可以直接处理失败结果。
+    finish_authentication(original, connection, attempt, AUTH::AuthResult{});
+  }
+
+  return true;
+}
+
+void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
+                                           const std::shared_ptr<ConnectionSession>& session,
+                                           const std::string& command) {
+  if (session->login_state == LoginState::k_signup_username) {
+    if (!AUTH::AuthService::valid_signup_username(command)) {
+      conn->send("Use 3-64 letters, digits or underscore.\r\nNew username:");
+      return;
+    }
+    session->pending_username = command;
+    session->login_state = LoginState::k_signup_password;
+    conn->send("New password (8-128 bytes, no control characters):");
+    return;
+  }
+  if (session->login_state == LoginState::k_signup_password) {
+    if (!AUTH::AuthService::valid_signup_password(command)) {
+      conn->send("Use 8-128 bytes without control characters.\r\nNew password:");
+      return;
+    }
+    session->signup_password = command;
+    session->login_state = LoginState::k_signup_confirm;
+    conn->send("Confirm password:");
+    return;
+  }
+  if (command != session->signup_password) {
+    session->signup_password.clear();
+    session->login_state = LoginState::k_signup_password;
+    conn->send("Passwords do not match.\r\nNew password:");
     return;
   }
 
-  if (result.success) {
-    session->user_id = result.result.user_id;
-    session->salt = result.result.salt;
-    session->pass = result.result.password_hash;
-    session->login_state = LoginState::k_await_password;
-    conn->send("Password:");
-  } else {
-    session->name.clear();
-    session->user_id = 0;
-    session->login_state = LoginState::k_await_username;
-    conn->send("Username not found.\r\n");
-    conn->send("Username:");
+  AUTH::SignupRequest request{session->pending_username, std::move(session->signup_password)};
+  session->signup_password.clear();
+  session->login_state = LoginState::k_registering;
+  const auto attempt = ++session->auth_attempt;
+  const auto original = std::weak_ptr<ConnectionSession>(session);
+  const auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+  auto* io_loop = conn->get_loop();
+
+  auto task = [this, original, connection, io_loop, attempt, request = std::move(request)] {
+    auto result = _auth_service.signup(request);
+    io_loop->queue_in_loop(
+        [this, original, connection, attempt, result = std::move(result)]() mutable {
+          finish_signup(original, connection, attempt, std::move(result));
+        });
+  };
+  auto on_timeout = [this, original, connection, io_loop, attempt] {
+    io_loop->queue_in_loop([this, original, connection, attempt] {
+      finish_signup(original, connection, attempt, {});
+    });
+  };
+  // 只限制排队等待时间；已开始的注册不能通过超时回调宣告失败。
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  if (!_th_pool.submit_async(std::move(task), deadline, std::move(on_timeout))) {
+    finish_signup(original, connection, attempt, {});
   }
 }
 
-// 异步线程超时处理
-void StorageService::finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
-                                                  std::weak_ptr<NET::TcpConnection> connection) {
+void StorageService::finish_signup(std::weak_ptr<ConnectionSession> original,
+                                   std::weak_ptr<NET::TcpConnection> connection,
+                                   std::uint64_t attempt, AUTH::SignupResult result) {
   auto session = original.lock();
   auto conn = connection.lock();
-  if (!session || !conn || !conn->connected()) {
+  if (!session || !conn || !conn->connected())
     return;
-  }
-
   {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    auto it = _sessions.find(conn.get());
-    if (it == _sessions.end() || it->second != session) {
+    const auto it = _sessions.find(conn.get());
+    if (it == _sessions.end() || it->second != session)
       return;
-    }
   }
-
-  if (session->login_state != LoginState::k_verifying) {
+  if (session->login_state != LoginState::k_registering || session->auth_attempt != attempt)
     return;
-  }
 
+  session->signup_password.clear();
+  // 注册成功也不会自动获得登录身份。
   session->name.clear();
   session->user_id = 0;
+  session->current_directory = "/";
+  session->directory_change_pending = false;
+
+  if (result.status == AUTH::SignupStatus::k_invalid_password) {
+    session->login_state = LoginState::k_signup_password;
+    conn->send("Use 8-128 bytes without control characters.\r\nNew password:");
+    return;
+  }
+  session->pending_username.clear();
+  if (result.status == AUTH::SignupStatus::k_username_taken ||
+      result.status == AUTH::SignupStatus::k_invalid_username) {
+    session->login_state = LoginState::k_signup_username;
+    conn->send(result.status == AUTH::SignupStatus::k_username_taken
+                   ? "Username is already taken.\r\nNew username:"
+                   : "Use 3-64 letters, digits or underscore.\r\nNew username:");
+    return;
+  }
+  session->login_state = LoginState::k_await_choice;
+  if (result.status == AUTH::SignupStatus::k_created) {
+    conn->send("Signup successful. Please log in.\r\n");
+  } else if (result.status == AUTH::SignupStatus::k_outcome_unknown) {
+    conn->send("Signup result is unknown. Try logging in before signing up again.\r\n");
+  } else {
+    conn->send("Service unavailable. Please retry.\r\n");
+  }
+  conn->send("Please enter login or signup:\r\ntlss>");
+}
+
+void StorageService::finish_authentication(std::weak_ptr<ConnectionSession> original,
+                                           std::weak_ptr<NET::TcpConnection> connection,
+                                           std::uint64_t attempt, AUTH::AuthResult result) {
+  auto session = original.lock();
+  auto conn = connection.lock();
+
+  if (!session || !conn || !conn->connected()) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+
+    const auto it = _sessions.find(conn.get());
+
+    if (it == _sessions.end() || it->second != session) {
+      return;
+    }
+  }
+
+  if (session->login_state != LoginState::k_verifying || session->auth_attempt != attempt) {
+    return;
+  }
+
+  session->pending_username.clear();
+
+  if (result.status == AUTH::AuthStatus::k_authenticated) {
+    session->user_id = result.user_id;
+    session->name = std::move(result.username);
+    session->current_directory = "/";
+    session->directory_change_pending = false;
+    session->login_state = LoginState::k_authenticated;
+
+    conn->send("Login successful.\r\ntlss@" + session->name + ":" + session->current_directory +
+               ">");
+
+    return;
+  }
+
+  session->user_id = 0;
+  session->name.clear();
+  session->current_directory = "/";
   session->login_state = LoginState::k_await_username;
-  conn->send("Server busy. Please retry.\r\nUsername:");
+
+  if (result.status == AUTH::AuthStatus::k_invalid_credentials) {
+    conn->send(
+        "Invalid username or password.\r\n"
+        "Username:");
+  } else {
+    conn->send(
+        "Service unavailable. Please retry.\r\n"
+        "Username:");
+  }
 }
 
 }  // namespace TLSS::FileStorage

@@ -429,9 +429,9 @@ void DbConnectionPool::release_connection(DbConnection* conn) noexcept {
   std::unique_ptr<DbConnection> owned(conn);
   {
     std::lock_guard<std::mutex> lock(_mutex);
-    // 记录关闭期间是否跳过入队，以决定是否减少总容量。
+    // 停机、连接失效或事务未结束时，不允许重新入队。
     bool requeued = false;
-    if (!_stopping) {
+    if (!_stopping && owned->is_reusable()) {
       // 重新计算空闲起点，然后将所有权从局部变量转交给空闲队列。
       owned->refresh_alive_time();
       _connection_queue.push(std::move(owned));
@@ -440,7 +440,7 @@ void DbConnectionPool::release_connection(DbConnection* conn) noexcept {
     // 无论归还入队还是销毁，这条连接都不再属于借出状态。
     --_borrowed_count;
     if (!requeued) {
-      // 关闭期间没有重新入队时，连接退出池并撤销总容量计数。
+      // 没有重新入队时，连接退出池并撤销总容量计数。
       _connection_cnt.fetch_sub(1);
     }
     // 在释放锁前通知，析构线程才能在本次归还不再访问池时继续。

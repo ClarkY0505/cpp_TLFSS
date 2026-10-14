@@ -1,59 +1,46 @@
 #ifndef __INC_FTP_CONTEXT_H__
 #define __INC_FTP_CONTEXT_H__
 
-#include <cstddef>
 #include <cstdint>
-#include <deque>
-#include <optional>
 #include <string>
-#include <utility>
 
 namespace TLSS::FileStorage {
+
 template <typename T>
 struct StorageContext {
-  bool success = false;  // 操作是否成功
-  T result{};            // 操作结果
-};
-
-
-enum class AuthStatus {
-  k_authenticated,
-  k_invalid_credentials,
-  k_backend_unavailable,
-};
-
-struct AuthResult {
-  AuthStatus status = AuthStatus::k_backend_unavailable;
-  std::uint64_t user_id = 0;  // 仅认证成功时有效
-};
-
-enum class UserLookupStatus {
-  k_found,
-  k_not_found,
-  k_backend_unavailable,
-};
-
-struct UserLookupResult {
-  UserLookupStatus status = UserLookupStatus::k_backend_unavailable;
-  std::uint64_t user_id = 0;  // 仅找到用户时有效
+  bool success = false;
+  T result{};
 };
 
 enum class LoginState {
   k_await_choice,
-  k_await_signup,
   k_await_username,
   k_await_password,
   k_verifying,
+  k_signup_username,
+  k_signup_password,
+  k_signup_confirm,
+  k_registering,
   k_authenticated,
 };
 
 struct ConnectionSession {
-  // 这些字段只由该连接所属的 IO 线程读写。
+  // 只允许连接所属的 IO 线程读写。
   LoginState login_state = LoginState::k_await_choice;
+
+  // 登录或注册交互阶段暂存的用户名，不作为已认证身份使用。
+  std::string pending_username;
+
+  // 只在注册等待确认密码期间保存，提交或确认失败后立即清空。
+  std::string signup_password;
+
+  // 每次提交认证任务时递增，用于识别过期回调。
+  std::uint64_t auth_attempt = 0;
+
+  // 仅认证成功后填写。
   std::string name;
-  std::string salt;
-  std::string pass;
   std::uint64_t user_id = 0;
+
   std::string current_directory = "/";
   bool directory_change_pending = false;
 };
@@ -63,12 +50,6 @@ struct FileInfo {
   std::string type;
   std::string create_at;
   std::string update_at;
-};
-
-struct UserInfo {
-    std::uint64_t user_id = 0;
-    std::string salt;
-    std::string password_hash;
 };
 
 }  // namespace TLSS::FileStorage

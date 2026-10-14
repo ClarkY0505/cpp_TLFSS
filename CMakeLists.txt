@@ -201,6 +201,7 @@ include_directories(
 # =============================================================================
 
 add_subdirectory(src/common)
+add_subdirectory(src/auth)
 add_subdirectory(src/ftp)
 add_subdirectory(src/gateway)
 add_subdirectory(src/logger)

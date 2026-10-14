@@ -2,7 +2,10 @@
 #include "common/base/mysql_connection.h"
 
 #include <mysql/mysql.h>
+#include <mysql/errmsg.h>
 #include <cstdlib>
+#include <memory>
+#include <utility>
 namespace TLSS::BASE {
 namespace {
 
@@ -11,34 +14,45 @@ using StatementHandle = std::unique_ptr<MYSQL_STMT, decltype(&mysql_stmt_close)>
 
 // 通用的准备、绑定和执行逻辑。
 MYSQL_STMT* prepare_and_execute(MYSQL* conn, const std::string& sql,
-                                const std::vector<DbValue>& params, bool expect_result) {
-  if (conn == nullptr) {
-    mysql_logger()->error("MySQL connection is null");
+                                const std::vector<DbValue>& params, bool expect_result,
+                                unsigned int* error_code = nullptr) {
+  if (error_code != nullptr) {
+    *error_code = 0;
+  }
+  auto fail = [error_code](unsigned int code) -> MYSQL_STMT* {
+    if (code == 0) {
+      code = CR_UNKNOWN_ERROR;
+    }
+    if (error_code != nullptr) {
+      *error_code = code;
+    }
+    mysql_logger()->error("MySQL prepared statement failed, errno: {}", code);
     return nullptr;
+  };
+  if (conn == nullptr) {
+    return fail(CR_SERVER_GONE_ERROR);
   }
 
   StatementHandle stmt(mysql_stmt_init(conn), &mysql_stmt_close);
   if (!stmt) {
-    mysql_logger()->error("MySQL statement initialization failed: {}", mysql_error(conn));
-    return nullptr;
+    return fail(mysql_errno(conn));
   }
 
   if (mysql_stmt_prepare(stmt.get(), sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
-    mysql_logger()->error("MySQL prepare failed: {}", mysql_stmt_error(stmt.get()));
-    return nullptr;
+    return fail(mysql_stmt_errno(stmt.get()));
   }
 
   // 参数必须与 SQL 中的占位符一一对应。
   if (mysql_stmt_param_count(stmt.get()) != params.size()) {
     mysql_logger()->error("MySQL parameter count mismatch");
-    return nullptr;
+    return fail(CR_UNKNOWN_ERROR);
   }
 
   // 执行前检查，避免误用 query_prepared() 执行 UPDATE 等语句。
   const bool has_result = mysql_stmt_field_count(stmt.get()) != 0;
   if (has_result != expect_result) {
     mysql_logger()->error("MySQL statement result type mismatch");
-    return nullptr;
+    return fail(CR_UNKNOWN_ERROR);
   }
 
   std::vector<MYSQL_BIND> bindings(params.size());
@@ -58,13 +72,11 @@ MYSQL_STMT* prepare_and_execute(MYSQL* conn, const std::string& sql,
   }
 
   if (!bindings.empty() && mysql_stmt_bind_param(stmt.get(), bindings.data()) != 0) {
-    mysql_logger()->error("MySQL parameter binding failed: {}", mysql_stmt_error(stmt.get()));
-    return nullptr;
+    return fail(mysql_stmt_errno(stmt.get()));
   }
 
   if (mysql_stmt_execute(stmt.get()) != 0) {
-    mysql_logger()->error("MySQL execute failed: {}", mysql_stmt_error(stmt.get()));
-    return nullptr;
+    return fail(mysql_stmt_errno(stmt.get()));
   }
 
   // 调用者立即用 StatementHandle 接管，负责关闭语句。
@@ -77,8 +89,15 @@ DbConnection::DbConnection()
     , _alive_time(std::chrono::steady_clock::now()) {}
 
 DbConnection::~DbConnection() {
+  invalidate();
+}
+
+void DbConnection::invalidate() noexcept {
+  _connected = false;
+  _transaction_active = false;
   if (_conn != nullptr) {
     mysql_close(_conn);
+    _conn = nullptr;
   }
 }
 
@@ -86,13 +105,18 @@ bool DbConnection::connect(const std::string& ip, unsigned short port, const std
                            const std::string& password, const std::string& dbname,
                            unsigned int connect_timeout_sec, unsigned int read_timeout_sec,
                            unsigned int write_timeout_sec) {
+  if (_conn == nullptr || _connected) {
+    return false;
+  }
+  // mysql_init 默认禁用自动重连，本类不启用它，避免事务跨会话继续执行。
+  // 不调用已弃用的 MYSQL_OPT_RECONNECT（即使设为 false 也会输出警告）。
   // 选项必须在建连前设置；同一条连接后续的 ping/query 也使用读写超时。
   // MySQL 使用秒作为选项单位；这些超时不是整个 SQL 操作的严格截止时间。
-  if (_conn == nullptr ||
-      mysql_options(_conn, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_sec) != 0 ||
+  if (mysql_options(_conn, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_sec) != 0 ||
       mysql_options(_conn, MYSQL_OPT_READ_TIMEOUT, &read_timeout_sec) != 0 ||
       mysql_options(_conn, MYSQL_OPT_WRITE_TIMEOUT, &write_timeout_sec) != 0) {
-    mysql_logger()->error("Failed to configure MySQL connection timeouts");
+    mysql_logger()->error("Failed to configure MySQL connection options");
+    invalidate();
     return false;
   }
   // 网络建连在配置了客户端超时之后执行；失败交给连接池决定重试或停止。
@@ -100,13 +124,21 @@ bool DbConnection::connect(const std::string& ip, unsigned short port, const std
                                 dbname.c_str(), port, nullptr, 0);
   if (p == nullptr) {
     mysql_logger()->error("mysql_real_connect failed : {}", mysql_errno(_conn));
+    invalidate();
     return false;
   }
+  // 固定连接池的基础会话状态；业务通过 START TRANSACTION 临时开启事务。
+  if (mysql_autocommit(_conn, true) != 0) {
+    mysql_logger()->error("Failed to enable MySQL autocommit, errno: {}", mysql_errno(_conn));
+    invalidate();
+    return false;
+  }
+  _connected = true;
   return true;
 }
 
 bool DbConnection::ping() {
-  return _conn != nullptr && mysql_ping(_conn) == 0;
+  return _connected && _conn != nullptr && mysql_ping(_conn) == 0;
 }
 
 bool DbConnection::update(const std::string& sql) {
@@ -142,9 +174,25 @@ MYSQL_RES* DbConnection::query(const std::string& sql) {
 }
 
 bool DbConnection::update_prepared(const std::string& sql, const std::vector<DbValue>& params) {
-  StatementHandle stmt(prepare_and_execute(_conn, sql, params, false), &mysql_stmt_close);
+  return execute_prepared(sql, params).success;
+}
 
-  return stmt != nullptr;
+DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
+                                              const std::vector<DbValue>& params) {
+  DbExecuteResult result;
+  if (!_connected || _conn == nullptr) {
+    result.error_code = CR_SERVER_GONE_ERROR;
+    return result;
+  }
+  StatementHandle stmt(prepare_and_execute(_conn, sql, params, false, &result.error_code),
+                       &mysql_stmt_close);
+  if (!stmt) {
+    return result;
+  }
+  result.success = true;
+  result.affected_rows = static_cast<std::uint64_t>(mysql_stmt_affected_rows(stmt.get()));
+  result.insert_id = static_cast<std::uint64_t>(mysql_stmt_insert_id(stmt.get()));
+  return result;
 }
 
 DbQueryResult DbConnection::query_prepared(const std::string& sql,
@@ -223,6 +271,72 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql,
 
     result.rows.push_back(std::move(row));
   }
+}
+
+bool DbConnection::begin_transaction() noexcept {
+  if (!_connected || _conn == nullptr || _transaction_active) {
+    return false;
+  }
+  if (mysql_query(_conn, "START TRANSACTION") != 0) {
+    // 服务端可能已经开启事务，但响应未到达客户端。
+    invalidate();
+    return false;
+  }
+  _transaction_active = true;
+  return true;
+}
+
+DbCommitStatus DbConnection::commit_transaction() noexcept {
+  if (!_transaction_active) {
+    return DbCommitStatus::k_not_active;
+  }
+  if (!_connected || _conn == nullptr ||
+      mysql_query(_conn, "COMMIT AND NO CHAIN NO RELEASE") != 0) {
+    // 没有收到提交确认，不能认定事务一定没有提交。
+    invalidate();
+    return DbCommitStatus::k_outcome_unknown;
+  }
+  _transaction_active = false;
+  return DbCommitStatus::k_committed;
+}
+
+bool DbConnection::rollback_transaction() noexcept {
+  if (!_transaction_active) {
+    return true;
+  }
+  if (!_connected || _conn == nullptr ||
+      mysql_query(_conn, "ROLLBACK AND NO CHAIN NO RELEASE") != 0) {
+    invalidate();
+    return false;
+  }
+  _transaction_active = false;
+  return true;
+}
+
+DbTransaction::DbTransaction(DbConnection& connection) noexcept
+    : connection_(connection)
+    , active_(connection_.begin_transaction()) {}
+
+DbTransaction::~DbTransaction() noexcept {
+  rollback();
+}
+
+DbCommitStatus DbTransaction::commit() noexcept {
+  if (!active_) {
+    return DbCommitStatus::k_not_active;
+  }
+  const auto result = connection_.commit_transaction();
+  active_ = false;
+  return result;
+}
+
+bool DbTransaction::rollback() noexcept {
+  if (!active_) {
+    return true;
+  }
+  const bool result = connection_.rollback_transaction();
+  active_ = false;
+  return result;
 }
 
 }  // namespace TLSS::BASE

@@ -1,3 +1,4 @@
+#include <openssl/asn1.h>
 #include <charconv>
 #include <cstring>
 #include <memory>
@@ -12,49 +13,6 @@
 namespace TLSS::FileStorage {
 StorageEngine::StorageEngine(BASE::DbConnectionPool& pool)
     : _db_conn_pool(pool) {}
-
-StorageContext<UserInfo> StorageEngine::find_user_by_name(const std::string& username) {
-  if (username.empty()) {
-    return {false, {}};
-  }
-
-  auto db_conn = _db_conn_pool.get_connection();
-  if (!db_conn) {
-    BASE::mysql_logger()->error("storage engine get connection failed");
-    return {false, {}};
-  }
-
-  auto result = db_conn->query_prepared(
-      "SELECT id, salt, password_hash FROM users "
-      "WHERE username = ? AND is_deleted = 0 LIMIT 1",
-      {username});
-
-  if (!result.success) {
-    BASE::mysql_logger()->error("storage engine query failed");
-    return {false, {}};
-  }
-  if (result.rows.empty()) {
-    return {false, {}};
-  }
-
-  const auto& row = result.rows.front();
-  if (row.size() != 3 || !row[0] || !row[1] || !row[2]) {
-    BASE::mysql_logger()->error("storage engine received invalid user data");
-    return {false, {}};
-  }
-
-  std::uint64_t id = 0;
-  const std::string& text = *row[0];
-  const char* end = text.data() + text.size();
-  const auto parsed = std::from_chars(text.data(), end, id);
-
-  if (parsed.ec != std::errc{} || parsed.ptr != end || id == 0) {
-    BASE::mysql_logger()->error("storage engine received invalid user id");
-    return {false, {}};
-  }
-
-  return {true, UserInfo{id, *row[1], *row[2]}};
-}
 
 StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir(
     const std::string& username, const std::string& current_directory) {
@@ -177,4 +135,47 @@ StorageContext<std::string> StorageEngine::move_dir_by_current_dir(
   return {true, *row[0]};
 }
 
+bool StorageEngine::create_dir(const std::string& username, const std::string& current_directory,
+                               const std::string& directory) {
+  if (username.empty() || current_directory.empty() || directory.empty()) {
+    return false;
+  }
+
+  auto db_conn = _db_conn_pool.get_connection();
+  if (!db_conn) {
+    BASE::mysql_logger()->error("storage engine get connection failed");
+    return false;
+  }
+
+  auto result = db_conn->query_prepared(
+      "SELECT id FROM virtual_files "
+      "WHERE path = ? AND username = ?;",
+      {current_directory, username});
+
+  if (!result.success) {
+    BASE::mysql_logger()->error("storage engine query failed");
+    return false;
+  }
+  if (result.rows.empty()) {
+    return false;
+  }
+
+  const auto& row = result.rows.front();
+  if (row.size() != 1 || !row[0]) {
+    BASE::mysql_logger()->error("storage engine received invalid user data");
+    return false;
+  }
+
+  std::string id = *row[0];
+  // 根目录本身已包含分隔符；嵌套目录才需要追加一个 '/'.
+  const std::string new_dir_path =
+      (current_directory == "/" ? current_directory : current_directory + "/") + directory;
+  bool res = db_conn->update_prepared(
+      "INSERT INTO virtual_files"
+      "(file_name, username, parent_id, path, file_type, object_hash)"
+      "VALUES(? , ? , ? , ? ,'directory','NULL');",
+      {directory, username, id, new_dir_path});
+
+  return res;
+}
 }  // namespace TLSS::FileStorage

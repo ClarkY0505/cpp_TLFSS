@@ -7,14 +7,16 @@
 namespace TLSS::FileStorage {
 class StorageEngine {
  public:
-  StorageEngine(BASE::DbConnectionPool& pool);
+  explicit StorageEngine(BASE::DbConnectionPool& pool);
 
-  StorageContext<UserInfo> find_user_by_name(const std::string& username);
   StorageContext<std::vector<FileInfo>> find_file_by_current_dir(
       const std::string& username, const std::string& current_directory);
+
   StorageContext<std::string> move_dir_by_current_dir(const std::string& username,
                                                       const std::string& current_directory,
                                                       const std::string& dir_name);
+  bool create_dir(const std::string& username, const std::string& current_directory,
+                  const std::string& directory);
 
  private:
   BASE::DbConnectionPool& _db_conn_pool;
