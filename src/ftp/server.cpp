@@ -14,9 +14,15 @@
 namespace TLSS::FileStorage {
 
 namespace {
-enum HandleCommand { cd, ls, pwd, mkdir, download, upload, unknown };
+enum HandleCommand { login, signup, cd, ls, pwd, mkdir, download, upload, unknown };
 
 std::optional<HandleCommand> string_to_command(std::string_view command) {
+  if (command == "login") {
+    return HandleCommand::login;
+  }
+  if (command == "signup") {
+    return HandleCommand::signup;
+  }
   if (command == "cd") {
     return HandleCommand::cd;
   }
@@ -145,7 +151,7 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
     return;
   }
 
-  // 连接背压
+  // 设置连接背压
   conn->set_high_water_mark(256ULL * 1024);
   conn->set_high_water_mark_cb([](const NET::TcpConnectionPtr& c, std::size_t) {
     c->stop_read();
@@ -290,11 +296,11 @@ void StorageService::handle_cd(const NET::TcpConnectionPtr& conn,
                                const std::shared_ptr<ConnectionSession>& session,
                                const std::string& directory) {
   if (session->login_state == LoginState::k_authenticated) {
-    auto query_session = std::make_shared<ConnectionSession>(*session);
     auto original = std::weak_ptr<ConnectionSession>(session);
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-    auto task = std::bind(&StorageService::move_file_by_cur_dir, this, query_session, original,
-                          connection, directory, conn->get_loop());
+    auto task =
+        std::bind(&StorageService::move_file_by_cur_dir, this, session->name,
+                  session->current_directory, original, connection, directory, conn->get_loop());
     session->directory_change_pending = true;
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
@@ -306,11 +312,12 @@ void StorageService::handle_cd(const NET::TcpConnectionPtr& conn,
   }
 }
 
-void StorageService::move_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
-                                          std::weak_ptr<ConnectionSession> original,
-                                          std::weak_ptr<NET::TcpConnection> connection,
+void StorageService::move_file_by_cur_dir(const std::string& username,
+                                          const std::string& current_directory,
+                                          const std::weak_ptr<ConnectionSession>& original,
+                                          const std::weak_ptr<NET::TcpConnection>& connection,
                                           const std::string& directory, NET::EventLoop* io_loop) {
-  auto cur_path = _storage_engine.move_dir_by_current_dir(query_session, directory);
+  auto cur_path = _storage_engine.move_dir_by_current_dir(username, current_directory, directory);
   io_loop->queue_in_loop([original, connection, cur_path = std::move(cur_path)] {
     auto session = original.lock();
     auto conn = connection.lock();
@@ -331,9 +338,9 @@ void StorageService::move_file_by_cur_dir(std::shared_ptr<ConnectionSession> que
 void StorageService::handle_ls(const NET::TcpConnectionPtr& conn,
                                const std::shared_ptr<ConnectionSession>& session) {
   if (session->login_state == LoginState::k_authenticated) {
-    auto query_session = std::make_shared<ConnectionSession>(*session);
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-    auto task = std::bind(&StorageService::lookup_file_by_cur_dir, this, query_session, connection);
+    auto task = std::bind(&StorageService::lookup_file_by_cur_dir, this, session->name,
+                          session->current_directory, connection);
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
       conn->send("Server busy. Please retry.\r\n");
@@ -342,16 +349,21 @@ void StorageService::handle_ls(const NET::TcpConnectionPtr& conn,
   }
 }
 
-void StorageService::lookup_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+void StorageService::lookup_file_by_cur_dir(const std::string& username,
+                                            const std::string& current_directory,
                                             std::weak_ptr<NET::TcpConnection>& connection) {
-  auto files_info = _storage_engine.find_file_by_current_dir(query_session);
+  auto files_info = _storage_engine.find_file_by_current_dir(username, current_directory);
   auto conn = connection.lock();
+  if (!conn || !conn->connected()) {
+    return;
+  }
   std::string msg;
 
   if (!files_info.success) {
     msg = "Query failed.\r\n";
   } else if (files_info.result.empty()) {
-    conn->send("\r\ntlss@" + query_session->name + ":" + query_session->current_directory + ">");
+    conn->send("\r\ntlss@" + username + ":" + current_directory + ">");
+    return;
   } else {
     std::ostringstream out;
     out << std::left;  // 左对齐
@@ -363,7 +375,7 @@ void StorageService::lookup_file_by_cur_dir(std::shared_ptr<ConnectionSession> q
 
     msg = out.str();
   }
-  conn->send(msg + "tlss@" + query_session->name + ":" + query_session->current_directory + ">");
+  conn->send(msg + "tlss@" + username + ":" + current_directory + ">");
 }
 
 void StorageService::handle_pwd(const NET::TcpConnectionPtr& conn,
@@ -385,7 +397,6 @@ bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
   if (session->login_state == LoginState::k_await_username) {
     session->name = command;
     session->login_state = LoginState::k_verifying;
-    auto query_session = std::make_shared<ConnectionSession>(*session);
 
     // 原生线程
     /* bool accepted = */
@@ -398,7 +409,7 @@ bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
     auto* io_loop = conn->get_loop();
 
-    auto task = std::bind(&StorageService::lookup_username, this, query_session, original,
+    auto task = std::bind(&StorageService::lookup_username, this, session->name, original,
                           connection, io_loop);
 
     // 超时回调由线程池的计时线程调用，因此把 session 操作投递回 IO 线程。
@@ -434,20 +445,19 @@ bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
   return false;  // 已认证，交给后续命令处理
 }
 
-void StorageService::lookup_username(std::shared_ptr<ConnectionSession> query_session,
+void StorageService::lookup_username(const std::string& username,
                                      std::weak_ptr<ConnectionSession> original,
                                      std::weak_ptr<NET::TcpConnection> connection,
                                      NET::EventLoop* io_loop) {
-  StorageContext<std::shared_ptr<ConnectionSession>> result;
-  result = _storage_engine.find_user_by_name(query_session);
+  auto result = _storage_engine.find_user_by_name(username);
 
   io_loop->queue_in_loop(std::bind(&StorageService::finish_username_lookup, this,
                                    std::move(original), std::move(connection), std::move(result)));
 }
 
-void StorageService::finish_username_lookup(
-    std::weak_ptr<ConnectionSession>& original, std::weak_ptr<NET::TcpConnection>& connection,
-    StorageContext<std::shared_ptr<ConnectionSession>>& result) {
+void StorageService::finish_username_lookup(std::weak_ptr<ConnectionSession>& original,
+                                            std::weak_ptr<NET::TcpConnection>& connection,
+                                            StorageContext<UserInfo>& result) {
   auto session = original.lock();
   auto conn = connection.lock();
   if (!session || !conn || !conn->connected()) {
@@ -465,10 +475,10 @@ void StorageService::finish_username_lookup(
     return;
   }
 
-  if (result.success && result.result) {
-    session->user_id = result.result->user_id;
-    session->salt = result.result->salt;
-    session->pass = result.result->pass;
+  if (result.success) {
+    session->user_id = result.result.user_id;
+    session->salt = result.result.salt;
+    session->pass = result.result.password_hash;
     session->login_state = LoginState::k_await_password;
     conn->send("Password:");
   } else {

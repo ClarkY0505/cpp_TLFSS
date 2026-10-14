@@ -30,12 +30,11 @@ class StorageService {
   bool dispatch_task(const NET::TcpConnectionPtr& conn,
                      const std::shared_ptr<ConnectionSession>& session, std::string_view command);
 
-  void lookup_username(std::shared_ptr<ConnectionSession> query_session,
-                       std::weak_ptr<ConnectionSession> original,
+  void lookup_username(const std::string& username, std::weak_ptr<ConnectionSession> original,
                        std::weak_ptr<NET::TcpConnection> connection, NET::EventLoop* io_loop);
   void finish_username_lookup(std::weak_ptr<ConnectionSession>& original,
                               std::weak_ptr<NET::TcpConnection>& connection,
-                              StorageContext<std::shared_ptr<ConnectionSession>>& result);
+                              StorageContext<UserInfo>& result);
 
   bool handle_login_command(const NET::TcpConnectionPtr& conn,
                             const std::shared_ptr<ConnectionSession>& session,
@@ -45,13 +44,13 @@ class StorageService {
   void handle_download();
   void handle_cd(const NET::TcpConnectionPtr& conn,
                  const std::shared_ptr<ConnectionSession>& session, const std::string& directory);
-  void move_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
-                            std::weak_ptr<ConnectionSession> original,
-                            std::weak_ptr<NET::TcpConnection> connection,
+  void move_file_by_cur_dir(const std::string &username, const std::string &current_directory,
+                            const std::weak_ptr<ConnectionSession> &original,
+                            const std::weak_ptr<NET::TcpConnection> &connection,
                             const std::string& directory, NET::EventLoop* io_loop);
   void handle_ls(const NET::TcpConnectionPtr& conn,
                  const std::shared_ptr<ConnectionSession>& session);
-  void lookup_file_by_cur_dir(std::shared_ptr<ConnectionSession> query_session,
+  void lookup_file_by_cur_dir(const std::string& username, const std::string& current_directory,
                               std::weak_ptr<NET::TcpConnection>& connection);
   void handle_pwd(const NET::TcpConnectionPtr& conn,
                   const std::shared_ptr<ConnectionSession>& session);

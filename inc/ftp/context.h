@@ -62,6 +62,13 @@ struct FileInfo {
   std::string create_at;
   std::string update_at;
 };
+
+struct UserInfo {
+    std::uint64_t user_id = 0;
+    std::string salt;
+    std::string password_hash;
+};
+
 }  // namespace TLSS::FileStorage
 
 #endif  // __INC_FTP_CONTEXT_H__
