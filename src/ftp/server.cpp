@@ -166,8 +166,8 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
     _sessions.emplace(conn.get(), session);
   }
   service_logger()->info("conn up : {}", conn->peer_addr().to_ip_port());
-  conn->send("Please enter your username.\r\n");
-  conn->send("Username:");
+  conn->send("Welcome to TLSS.\r\n");
+  conn->send("Please enter login or signup:\r\ntlss>");
 }
 
 void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buf,
@@ -217,23 +217,6 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
       session = it->second;
     }
 
-    if (command == "q" || command == "quit") {
-      conn->send("bye!\r\n");
-      conn->shutdow();
-      return;
-    }
-
-    if (handle_login_command(conn, session, command)) {
-      continue;
-    }
-    if (session->directory_change_pending) {
-      conn->send("Please wait.\r\n");
-      continue;
-    }
-    if (command.empty()) {
-      conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
-      continue;
-    }
     if (dispatch_task(conn, session, command)) {
       continue;
     }
@@ -247,6 +230,26 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
 bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
                                    const std::shared_ptr<ConnectionSession>& session,
                                    std::string_view command) {
+  if (handle_login_command(conn, session, std::string(command))) {
+    return true;
+  }
+
+  if (session->directory_change_pending) {
+    conn->send("Please wait.\r\n");
+    return true;
+  }
+
+  if (command.empty()) {
+    conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
+    return true;
+  }
+
+  if (command == "q" || command == "quit") {
+    conn->send("bye!\r\n");
+    conn->shutdow();
+    return true;
+  }
+
   std::istringstream input{std::string(command)};
   std::string cmd;
   std::string args;
@@ -389,6 +392,20 @@ void StorageService::handle_pwd(const NET::TcpConnectionPtr& conn,
 bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
                                           const std::shared_ptr<ConnectionSession>& session,
                                           const std::string& command) {
+  if (session->login_state == LoginState::k_await_choice) {
+    if (command == "login") {
+      session->login_state = LoginState::k_await_username;
+      conn->send("Username:");
+    } else if (command == "signup") {
+      // TODO
+      session->login_state = LoginState::k_await_signup;
+      conn->send("Username:");
+    } else {
+      conn->send("Please enter login or signup:\r\n>");
+    }
+
+    return true;
+  }
   if (session->login_state == LoginState::k_verifying) {
     conn->send("Please wait.\r\n");
     return true;
@@ -397,12 +414,6 @@ bool StorageService::handle_login_command(const NET::TcpConnectionPtr& conn,
   if (session->login_state == LoginState::k_await_username) {
     session->name = command;
     session->login_state = LoginState::k_verifying;
-
-    // 原生线程
-    /* bool accepted = */
-    /*     _th_pool.run(std::bind(&StorageService::lookup_username, this, query_session, */
-    /*                            std::weak_ptr<ConnectionSession>(session), */
-    /*                            std::weak_ptr<NET::TcpConnection>(conn), conn->get_loop())); */
 
     // 异步任务线程 225-240
     auto original = std::weak_ptr<ConnectionSession>(session);

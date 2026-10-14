@@ -39,6 +39,8 @@ struct UserLookupResult {
 };
 
 enum class LoginState {
+  k_await_choice,
+  k_await_signup,
   k_await_username,
   k_await_password,
   k_verifying,
@@ -47,7 +49,7 @@ enum class LoginState {
 
 struct ConnectionSession {
   // 这些字段只由该连接所属的 IO 线程读写。
-  LoginState login_state = LoginState::k_await_username;
+  LoginState login_state = LoginState::k_await_choice;
   std::string name;
   std::string salt;
   std::string pass;
