@@ -1,6 +1,9 @@
 <p align="right">潮水成诗，破碎生长</p>
 
 # TLSS
+**简体中文** | [English](README.es.md)
+
+本项目采用 Apache License 2.0，见 [LICENSE](LICENSE)。
 
 A C++17 file storage system built from scratch.
 
@@ -286,6 +289,3 @@ bye!
 - 将监控子系统接入主服务，采集连接、任务队列与数据库连接池等运行指标。
 - 完善 Protobuf 契约、gRPC 服务与网关。
 
-**简体中文** | [English](README.es.md)
-
-本项目采用 Apache License 2.0，见 [LICENSE](LICENSE)。
