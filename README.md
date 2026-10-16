@@ -65,6 +65,115 @@ flowchart TD
 
 停机时先停止接受连接并暂停读取，再排空业务任务，半关闭现有连接；连接等待超时后强制清理。随后回收 IO 线程和数据库连接池，退出主事件循环，最后关闭日志系统。
 
+## 网络服务生命周期与线程约束
+
+本节描述当前 `TcpServer` / `StorageService` 的使用契约。安全运行需要同时满足**调用顺序、线程归属和对象生命周期**；接口使用了原子变量或把任务放入队列，并不代表允许任意并发调用。以下流程适用于已成功启动的服务，直接使用 `TcpServer` 时也须由上层执行对应的停机步骤。
+
+### 完整启动与运行路径
+
+当前入口见 [main.cpp](src/main.cpp)，服务编排见 [StorageService](src/ftp/server.cpp)。
+
+1. **主线程**在创建工作线程前，通过 `pthread_sigmask` 阻塞 `SIGINT` / `SIGTERM`，然后初始化日志。退出信号由后续控制线程通过 `sigwait` 同步接收。
+2. **主线程**先构造 `EventLoop`，再构造引用它的 `StorageService`。服务构造期间创建 `TcpServer`、获取数据库连接池，并设置连接/消息回调、IO 线程数及业务队列容量。
+3. **主线程**调用 `StorageService::start()`：先启动业务线程池，再调用 `TcpServer::start()` 启动 IO 线程池并开放监听。配置必须先于启动完成；启动不能与停机或析构并发。
+4. 启动完成后创建**独立控制线程**，让它等待退出信号；主线程进入 `EventLoop::loop()`。控制线程可以提交停机请求并等待，但主 loop 必须继续运行以处理这些请求。
+5. 正常运行时，**主 loop**接受连接、分配 IO loop、维护 `_connections`；连接所属的 **IO loop**处理读写、连接状态和业务回调；**业务线程池**执行数据库等耗时操作，结果通过事件循环任务返回 IO loop。
+
+IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工作线程。业务回调不能假定自己一定在单独的 IO 线程中。
+
+### 完整停机与析构路径
+
+当前主程序的调用链是：
+
+```text
+控制线程 sigwait() 收到 SIGINT / SIGTERM
+  → StorageService::stop(grace_period)
+  → 标记业务停机，串行化停机请求
+  → TcpServer::stop_accepting(done)
+  → 等待 done：监听关闭、已有连接暂停读取
+  → 业务线程池 stop()，等待已进入执行队列的任务结束
+  → TcpServer::shutdown_connections(done)
+  → 等待连接关闭；超过宽限期则 force_close_connections()
+  → 继续等待同一个 done：连接表清空、相关 IO 清理已越过屏障
+  → TcpServer::stop_io_threads()，退出并 join IO 线程
+  → 数据库连接池 shutdown()
+  → 主 EventLoop::quit()
+  → 发布 StorageService 停机结果，控制线程结束
+
+主线程 EventLoop::loop() 返回
+  → join 控制线程
+  → 析构 StorageService / TcpServer
+  → 析构主 EventLoop
+  → Logger::shutdown()
+```
+
+每一步都必须满足完成条件，才能进入下一阶段：
+
+| 阶段 | 执行线程与实际操作 | 进入下一阶段的条件 |
+| --- | --- | --- |
+| 标记停机 | 控制线程设置 `StorageService::_stopping`；停止接受新的业务提交 | 上层不再产生新的业务任务；启动已经完成 |
+| 停止接收 | 控制线程调用 `stop_accepting()`；主 loop 释放 Acceptor，各 IO loop 执行 `pause_read_for_shutdown()` | `done` 在主 loop 被调用，控制线程通过 future 等机制收到通知 |
+| 结束业务任务 | 控制线程调用业务线程池 `stop()`；拒绝新提交、取消异步等待队列中尚未进入执行队列的任务，执行完已入队任务并 join 工作线程 | 业务线程池 `stop()` 返回；此时 IO loop 和数据库仍可用 |
+| 排空连接 | 控制线程调用 `shutdown_connections()`；各 IO loop 排空发送缓冲后半关闭写端，并继续读取以等待对端 FIN | 等待连接清理完成；若超过 `grace_period`，提交强制关闭请求 |
+| 强制关闭（按需） | 控制线程调用 `force_close_connections()`，各 IO loop 执行关闭 | 仍须等待此前 `shutdown_connections()` 的 `done`，不能因强制关闭接口返回就继续回收线程 |
+| 确认 IO 清理 | 主 loop 从连接表移除连接，IO loop 执行 `connect_destroyed()`，随后通过 `when_io_idle()` 屏障通知主 loop | 连接表已空，相关清理任务越过屏障；`done` 已通知控制线程 |
+| 回收资源 | 独立控制线程调用 `stop_io_threads()`，再关闭数据库池，最后 `quit()` 主 loop | IO 线程已 join；控制线程完成停机并发布结果 |
+| 析构 | 主线程退出 `loop()`，join 控制线程，依次销毁服务与主 loop，最后关闭日志 | 没有仍会访问服务对象或已销毁 loop 的任务、回调及外部调用 |
+
+`StorageService::stop()` 默认的连接宽限期为 5 秒，可传入非负时长。它只限制等待连接自然关闭的阶段，不是整个停机过程的超时：业务任务结束、强制关闭后的清理和其他阶段仍可能等待。返回值表示数据库连接池是否按其关闭策略成功结束，不应解释为整个停机过程一定在 `grace_period` 内完成。
+
+### 直接使用 TcpServer 时如何等待完成
+
+使用 `StorageService` 时，应由独立控制线程调用其 `stop()`，不要同时绕过它操作内部 `TcpServer`。若直接组合 `TcpServer`、业务线程池和数据库连接池，下面展示控制线程中的停机顺序；各对象已完成启动，主 loop 仍在运行，调用方在整个流程中保持它们存活。
+
+```cpp
+// 此代码运行在独立控制线程中；不能放进主 loop、IO 回调或业务线程池任务。
+// 先由上层关闭业务入口，停止产生新任务。
+auto paused = std::make_shared<std::promise<void>>();
+auto paused_future = paused->get_future();
+tcp_server.stop_accepting([paused] { paused->set_value(); });
+paused_future.wait();
+
+worker_pool.stop();  // IO loop 和数据库此时仍须存活，供已有任务完成。
+
+auto drained = std::make_shared<std::promise<void>>();
+auto drained_future = drained->get_future();
+tcp_server.shutdown_connections([drained] { drained->set_value(); });
+if (drained_future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
+    tcp_server.force_close_connections();
+}
+drained_future.wait();  // 强制关闭也只是提交请求，完成通知仍来自同一个 done。
+
+tcp_server.stop_io_threads();
+const bool db_stopped = db_pool.shutdown();  // 按实际持有方式调用，并记录停机结果。
+(void)db_stopped;
+base_loop.quit();
+// 主线程在 loop() 返回后 join 此控制线程，再析构服务和 base_loop。
+```
+
+示例中的 `worker_pool`、`db_pool` 和 `base_loop` 代表调用方持有的对应对象，需包含 `<future>`、`<memory>` 和 `<chrono>`。不要用 `sleep()` 猜测异步操作是否完成，也不要在控制线程等待之前先停止 EventLoop，否则完成回调无法执行。
+
+### 必须遵守的线程与生命周期约束
+
+| 对象或操作 | 当前实现要求 | 违反约束的风险 |
+| --- | --- | --- |
+| `TcpServer` 构造、配置、启动 | 按当前入口在主 loop 所属线程执行；所有 setter 在启动前配置完毕，启动后不再并发修改 | 回调 `std::function`、线程数或线程池容器发生并发读写 |
+| `start()` 与停机 | 启动完成后才允许发起停机；停机开始后不能再次启动 | `_stopping` 的检查与资源访问不是整体原子操作，Acceptor 可能已被释放 |
+| `_connections`、连接编号 | 由主 loop 维护；析构前先完成停机，避免其他线程与主 loop 同时访问连接表 | 容器数据竞争、迭代器失效 |
+| TcpConnection / Channel | 对读写状态、缓冲和 Channel 的直接操作归所属 IO loop；跨线程使用提供了调度的接口 | 与事件分发、Channel 注销产生竞态；`shared_ptr` 只保活，不自动同步成员访问 |
+| 停机回调 `done` | 在主 loop 执行；只做通知或轻量操作，不阻塞等待同一 loop 的任务 | 主 loop 无法推进，停机等待无法结束 |
+| `StorageService::stop()`、`stop_io_threads()` | 由主 loop、IO 线程池和业务线程池之外的独立控制线程执行 | 阻塞等待自身处理屏障，或 join 当前线程；当前代码的线程检查未覆盖所有误用 |
+| 捕获裸 `this` 的任务 | TcpServer、StorageService 以及用户回调引用的对象必须活到相关任务和回调执行完 | 关闭回调、屏障或其他排队任务访问已析构对象 |
+| loop 生命周期 | IO loop 清理完成后才能 join IO 线程；主 loop 活到停机通知完成及服务析构之后 | 停机任务无法执行，或连接/任务通过裸 loop 指针访问已销毁对象 |
+| 外部持有的连接和任务 | 停机前协调所有外部生产者；IO 线程回收后不能再通过旧连接提交任务或使用其 loop | 持有 `TcpConnectionPtr` 并不会延长它所引用的 EventLoop 生命周期 |
+| 多个停机调用者 | 使用 `StorageService::stop()` 的互斥与完成通知统一协调；直接使用 TcpServer 时由上层保证只有一个停机流程 | 重复 `shutdown_connections()` 可能覆盖完成回调；线程池回收可能与其他操作交错 |
+
+`when_io_idle()` 在各 IO loop 中排入屏障，再回主 loop 汇总结果。它保证相关先前任务已执行到屏障位置，**不保证其他线程今后不会继续提交任务，也不自动递归等待这些任务派生的所有后续任务**。因此必须先停止任务生产，再依次等待业务结束和连接清理；不能把这个函数当成任意时刻都能安全销毁服务器的证明。
+
+`TcpServer::~TcpServer()` 不会自动完成上述完整停机流程，也不会自动延长裸 `this` 回调引用的对象生命周期。已启动的 `StorageService` 必须显式完成 `stop()` 后再析构，否则其析构函数会终止进程。不要在业务回调里直接删除仍在运行的服务器，也不要把“已调用停止接口”等同于“已完成停止”。
+
+实现入口：[TcpServer](src/common/net/tcp_server.cpp)、[EventLoop](src/common/net/event_loop.cpp)、[EventLoopThread](src/common/net/event_loop_thread.cpp)、[业务线程池](src/common/base/tlss_thread_pool.cpp)。现有[停机回归测试](tests/test_tcp_server_shutdown.cpp)覆盖等待对端 FIN、零 IO 工作线程下的强制关闭等路径；它不代表已经验证任意启动/停机/析构交错都安全。
+
 ## 当前实现
 
 | 部分 | 当前状态 | 代码入口 |
