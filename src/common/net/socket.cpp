@@ -3,7 +3,6 @@
 #include "common/net/socket.h"
 #include "common/utile/utile.h"
 
-/* #include <asm-generic/socket.h> */
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>

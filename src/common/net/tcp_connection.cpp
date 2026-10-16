@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cassert>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,18 @@ TcpConnection::TcpConnection(EventLoop* loop, const std::string& name, int sockf
 TcpConnection::~TcpConnection() {
   net_logger()->info("TcpConnection::dtor[{}] at {} fd = {} state = {}", _name,
                      static_cast<const void*>(this), _channel->fd(), state_to_string());
+  // 客户端移交给外部的连接可能直接失去最后一个 owner，而没有收到 EOF。
+  // 正常 connect_destroyed 已注销时不重复操作；剩余 Channel 仍须在 loop 收尾。
+  if (_channel->index() != -1) {
+    assert(_loop->is_in_loop_thread());
+    if (!_channel->is_none_event()) {
+      _channel->disable_all();
+    }
+    _channel->remove();
+    // 本轮 active_channels 中可能还保留指针；tie 已失效，延迟释放可安全跳过事件。
+    std::shared_ptr<Channel> retired(std::move(_channel));
+    _loop->queue_in_loop([retired] {});
+  }
 }
 
 std::string TcpConnection::state_to_string() const {

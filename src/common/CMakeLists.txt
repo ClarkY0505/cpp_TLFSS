@@ -25,6 +25,8 @@ add_library(common_lib
     net/socket.cpp
     net/tcp_server.cpp
     net/tcp_connection.cpp
+    net/connector.cpp
+    net/tcp_client.cpp
 )
 
 target_include_directories(common_lib PUBLIC

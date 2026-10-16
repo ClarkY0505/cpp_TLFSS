@@ -22,6 +22,10 @@ class InetAddress {
     _addr = addr;
   }
 
+  sa_family_t family() const {
+    return _addr.sin_family;
+  }
+
  private:
   sockaddr_in _addr;
 };

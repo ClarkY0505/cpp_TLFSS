@@ -1,4 +1,5 @@
 #include "common/base/current_thread.h"
+#include "common/memory/tlss_memcpy.h"
 #include "common/net/buffer.h"
 #include "common/net/net_logger.h"
 #include "common/utile/utile.h"
@@ -67,6 +68,7 @@ void Buffer::make_space(size_t len) {
 void Buffer::append(const char* data, size_t len) {
   ensure_writeable_bytes(len);
   std::copy(data, data + len, begin_write());
+  /* TLSS::MEMORY::memcpy(begin_write(), data, len); */
   has_written(len);
 }
 
