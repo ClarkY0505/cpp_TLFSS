@@ -1,16 +1,28 @@
 <p align="right">潮水成诗，破碎生长</p>
 
-# TLSS
-
 [简体中文](README.md) | **English**
+# TLSS — C++17 Reactor-Based Storage Service
 
-This project is licensed under Apache License 2.0. See [LICENSE](LICENSE).
+**A learning-oriented C++17/Linux file storage service built around a custom epoll Reactor and asynchronous networking library.**
 
-A C++17 file storage system built from scratch.
+TLSS explores how networking, concurrency, authentication, database transactions, and virtual filesystem metadata work together in a single-node storage service.
 
-TLSS is a file storage service prototype built on a custom networking library. It currently supports signup, login, and MySQL-backed virtual directory operations, alongside an independent monitoring and alarm system and an optimized memory copy library. File uploads, downloads, object storage, gRPC business APIs, and Kafka event processing remain planned work.
+**Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), and graceful shutdown.
 
-`ftp/` is the existing business module directory name. The main service uses a custom TCP text line protocol; it does not implement standard FTP control and data connections. This document distinguishes implemented capabilities, standalone components, and planned designs. Linking a library does not mean its functionality is enabled at runtime.
+**Independent subsystems:** monitoring and reliable alarm delivery, optimized AVX2/REP MOVSB memory copy.
+
+**Under development:** file upload/download, content-addressed object storage, gRPC interfaces, and distributed storage.
+
+### Quick Start
+
+After building the project and starting MySQL and the TLSS server:
+
+```bash
+./bin/storage-service
+./bin/tlss-cli 127.0.0.1 9000
+```
+
+See the build instructions, architecture, and implementation notes below.
 
 ## Contents
 
