@@ -1,13 +1,31 @@
 <p align="right">潮水成诗，破碎生长</p>
 
 # TLSS
+
 **简体中文** | [English](README.es.md)
 
 本项目采用 Apache License 2.0，见 [LICENSE](LICENSE)。
 
 A C++17 file storage system built from scratch.
 
-## Features
+TLSS 是基于自研网络库的文件存储服务原型。当前已实现用户注册、登录和 MySQL 虚拟目录操作，同时提供独立的监控告警系统与内存拷贝优化库。文件上传、下载、对象存储、gRPC 业务接口和 Kafka 事件链路属于后续建设内容。
+
+`ftp/` 是现有业务模块的目录名；主服务使用自定义 TCP 文本行协议，未实现标准 FTP 的控制/数据连接协议。文档中的“已实现”“独立运行”和“规划”分别描述代码能力、集成状态和后续设计，不以库已链接代替功能已启用。
+
+## 导航
+
+- [功能与实现状态](#功能与实现状态)
+- [当前交互](#当前交互)
+- [架构与执行模型](#架构与执行模型)
+- [模块实现](#模块实现)
+- [网络服务生命周期与线程约束](#网络服务生命周期与线程约束)
+- [代码结构](#代码结构)
+- [构建与运行](#构建与运行)
+- [测试与开发入口](#测试与开发入口)
+- [当前限制与待收尾事项](#当前限制与待收尾事项)
+- [演进路线与接入时机](#演进路线与接入时机)
+
+## 功能与实现状态
 
 - **epoll Reactor networking** — 自行实现事件循环、连接管理与读写缓冲。
 - **one-loop-per-thread** — 每个 IO 线程运行独立的 EventLoop，连接按轮询分配。
@@ -17,39 +35,58 @@ A C++17 file storage system built from scratch.
 - **content-addressed object storage** — **planned**；以 SHA-256 标识文件内容，表结构已预留 `object_hash`。
 - **graceful shutdown** — 响应 `SIGINT / SIGTERM`，排空任务并回收连接与线程。
 - **monitoring subsystem** — 独立的指标存储、策略、CLI、UDP 指标与可靠 TCP 告警。
+- **interactive client** — `tlss-cli`，支持异步连接、终端输入和有序退出。
+- **memory copy library** — AVX2、REP MOVSB、非临时写入（NT）与运行时并行拷贝选择。
 
-## Demo
+| 部分 | 当前能力 | 主服务集成状态 |
+| --- | --- | --- |
+| 网络库 | epoll Reactor、连接缓冲、IO 线程池、异步 TCP 客户端 | 已使用 |
+| 业务线程池 | 有界执行队列、非阻塞提交、异步排队超时 | 已使用 |
+| MySQL | 连接池、预处理语句、RAII 事务 | 已使用 |
+| 认证 | 注册、密码校验、用户与根目录事务创建 | 已使用 |
+| 虚拟目录 | `mkdir / cd / ls / pwd` | 已使用 |
+| 客户端 | `tlss-cli <IPv4> <port>` | 独立可执行程序 |
+| 监控 | 指标、策略、CLI、UDP、可靠 TCP 告警 | 库已链接，通过独立 demo 运行；主入口未启动 |
+| 内存拷贝 | `TLSS::MEMORY::memcpy` 动态库 | 已链接；网络 `Buffer::append()` 仍使用 `std::copy` |
+| 文件内容 | `object_hash` 字段已预留 | 上传、下载与对象落盘未实现 |
+| RPC、网关 | 构建目标和代码骨架 | 无业务服务实现，四份 `.proto` 为空 |
+| Kafka | 事件与消费者方案 | 规划中，尚无生产者、消费者或部署配置 |
 
-**目标客户端交互：** `tlss-client`、文件上传与内容哈希对象落盘尚待实现；当前可运行的目录操作示例见[构建与运行](#构建与运行)。
+## 当前交互
+
+先按[构建与运行](#构建与运行)准备数据库并启动服务，再在另一个交互终端中执行 `./bin/tlss-cli 127.0.0.1 9000`。下面展示已注册用户的目录操作，省略连接提示；`documents` 假定尚不存在，`<password>` 代表实际密码。
 
 ```text
-$ tlss-client
-Username: alice
-Password: ****
-
-tlss@alice:/> mkdir documents
-tlss@alice:/> cd documents
-tlss@alice:/documents> upload hello.txt
-
-uploaded:
-SHA256 b94d27...
-
-tlss@alice:/documents> ls
-
-hello.txt   file   11 B
+$ ./bin/tlss-cli 127.0.0.1 9000
+Welcome to TLSS.
+Please enter login or signup:
+tlss>login
+Username:alice
+Password:<password>
+Login successful.
+tlss@alice:/>mkdir documents
+tlss@alice:/>cd documents
+tlss@alice:/documents>pwd
+/documents
+tlss@alice:/documents>cd ..
+tlss@alice:/>quit
 ```
 
-## Architecture
+首次使用时选择 `signup`，依次输入用户名、密码和确认密码；注册成功后重新选择 `login`。客户端当前没有密码输入隐藏功能，服务连接也尚未接入 TLS。上传、下载命令虽然能被服务端识别，但处理分支尚未实现，不属于可用交互。
+
+## 架构与执行模型
 
 ```mermaid
 flowchart TD
-    Client[Client] --> Connection[TcpConnection]
-    Connection --> Reactor[Reactor / epoll]
-    Reactor --> Service[StorageService]
+    Client[tlss-cli / nc] --> Acceptor[主 EventLoop / Acceptor]
+    Acceptor --> Connection[IO EventLoop / TcpConnection]
+    Connection --> Service[StorageService]
     Service --> Workers[ThreadPool]
     Service --> Session["Session (ConnectionSession)"]
     Workers --> Engine[StorageEngine]
+    Workers --> Auth[AuthService / UserRepository]
     Engine --> Pool[DbConnectionPool]
+    Auth --> Pool
     Pool --> MySQL[MySQL]
     Engine -.-> Metadata["MetadataStore (planned extraction)"]
     Engine -.-> Objects["ObjectStore (planned)"]
@@ -66,7 +103,153 @@ flowchart TD
 
 默认配置为 4 个 IO 线程、8 个业务线程、256 个执行队列槽位和 128 个异步等待队列槽位。目录操作通过 `try_run` 提交，队列已满时返回忙碌提示；登录与注册通过 `submit_async` 提交，排队等待期限为 2 秒。
 
+主线程之外还存在信号控制线程、业务池的超时管理线程，以及数据库连接生产与空闲扫描线程。2 秒只限制认证任务等待进入执行队列的时间，不中断已开始执行的 SQL 或密码计算。
+
 停机时先停止接受连接并暂停读取，再排空业务任务，半关闭现有连接；连接等待超时后强制清理。随后回收 IO 线程和数据库连接池，退出主事件循环，最后关闭日志系统。
+
+## 模块实现
+
+### 网络库与命令协议
+
+实现位于 [common/net](src/common/net/)，头文件位于 [inc/common/net](inc/common/net/)。
+
+| 类型 | 职责 |
+| --- | --- |
+| `EventLoop` | 等待 IO 事件、分发 Channel、执行待处理回调 |
+| `Poller / EPollPoller` | epoll 事件等待与注册管理 |
+| `Channel` | fd 关注事件、回调及生命周期关联 |
+| `Acceptor / TcpServer` | 接受连接、维护连接表、轮询分配 IO loop |
+| `TcpConnection` | 连接状态、输入输出缓冲、背压、半关闭和强制关闭 |
+| `EventLoopThreadPool` | one-loop-per-thread 的 IO 线程管理 |
+| `Connector / TcpClient` | 非阻塞建连、失败重试与客户端连接管理 |
+
+跨线程调用通过 `queue_in_loop()` 入队，并用 `eventfd` 唤醒目标 loop；`run_in_loop()` 在所属线程直接执行，否则排队。跨线程发送持有消息内容和连接引用，避免回调执行前数据失效；`Channel::tie()` 与延迟清理用于协调事件分发和对象销毁。
+
+`Buffer::read_fd()` 使用 `readv`，组合内部可写区和 64 KiB 栈缓冲。服务为连接设置 256 KiB 输出高水位，达到水位后暂停读取，写缓冲排空后恢复；连接待发送缓冲另有 1 MiB 上限。这些措施不能替代所有上游任务队列的容量控制。
+
+[StorageService::on_message()](src/ftp/server.cpp) 按 `\n` 拆行，兼容 `\r\n`，保留未收齐的命令并循环处理多条完整命令。单条命令最多 4096 字节，超过限制关闭连接。
+
+### 会话、注册与登录
+
+[ConnectionSession](inc/ftp/context.h) 保存登录状态、交互中的用户名和密码、认证尝试编号、已认证身份、当前目录及目录切换标志。会话内容只由所属 IO 线程读写；会话索引表另由互斥锁保护。
+
+```text
+登录：
+login → 用户名 → 密码 → verifying
+      → 业务线程查询有效用户并校验密码
+      → IO loop 检查连接、原会话、auth_attempt
+      → 写入身份，当前目录设为 /
+
+注册：
+signup → 用户名 → 密码 → 确认密码 → registering
+       → 业务线程先计算密码哈希
+       → 同一数据库事务插入用户和根目录
+       → 返回结果，要求重新登录
+```
+
+[AuthService](src/auth/auth_service.cpp) 负责输入校验、用户名规范化和结果映射，[MySqlUserRepository](src/auth/user_repository.cpp) 负责用户数据访问。注册用户名为 3–64 个 ASCII 字母、数字或下划线，存储前转换为小写；密码为 8–128 字节，不裁剪空格，拒绝控制字符。
+
+[PasswordHasher](src/auth/password_hasher.cpp) 使用 16 字节随机盐、600000 次 PBKDF2-HMAC-SHA256 迭代、32 字节派生结果，以及带版本和迭代次数的编码格式；校验通过 `CRYPTO_memcmp` 比较。哈希计算先于注册事务借用数据库连接，减少连接占用时间。
+
+并发注册由数据库用户名唯一索引裁决。提交确认丢失时返回“结果未知”，提示先尝试登录；不自动重试注册。认证完成回调使用弱引用、会话匹配和 `auth_attempt` 检查，避免过期结果覆盖当前状态。
+
+### 虚拟目录与存储边界
+
+[建表脚本](sql/init_tlss_db.sql) 定义 `users` 和 `virtual_files`。后者通过 `username` 区分用户，使用 `parent_id` 表示父子关系，并保存 `path`、`file_type`、`object_hash` 和时间戳。根目录为 `parent_id = -1`、`file_name = '/'`、`path = '/'`；唯一索引限制同一用户、同一父目录下的重名节点。
+
+| 命令 | 当前执行方式 |
+| --- | --- |
+| `pwd` | 直接读取会话中的当前目录 |
+| `ls` | 查询当前目录 ID，再列出子节点的名称、类型和创建/更新时间 |
+| `cd <子目录>` | 父子节点 JOIN，限定用户、父路径和目录类型 |
+| `cd ..` | 查询父目录；根目录保持 `/` |
+| `mkdir <名称>` | 查询父节点、拼接路径并插入目录记录 |
+| `upload / download` | 命令已识别，处理调用仍被注释 |
+
+[StorageEngine](src/ftp/service_engine.cpp) 当前直接执行预处理 SQL。`cd` 支持直接子目录与父目录，尚未实现通用绝对/相对路径解析。目录切换期间 `directory_change_pending` 阻止后续目录命令继续执行；其他异步命令没有完整的逐连接串行执行队列，不能假定所有响应严格按输入顺序返回。
+
+`object_hash` 是内容寻址存储的预留字段。文件字节传输、哈希校验、临时文件、原子发布、对象回收和元数据一致性仍需实现。后续计划将元数据访问抽取为 `MetadataStore`，将内容落盘封装为 `ObjectStore`。
+
+### 业务线程池与数据库资源
+
+[ThreadPool](inc/common/base/tlss_thread_pool.h) 提供三种任务提交方式：
+
+| 接口 | 队列满时 | 当前使用 |
+| --- | --- | --- |
+| `run()` | 外部调用者等待空位；池内嵌套提交满队列时拒绝以避免死锁 | 通用阻塞提交 |
+| `try_run()` | 立即失败 | 目录数据库操作 |
+| `submit_async()` | 进入有界等待队列，等待入执行队列或触发超时回调 | 登录、注册 |
+
+停止时拒绝新任务、取消等待队列、排空执行队列并 join 工作线程。线程池只能启动一次；零工作线程模式由调用者执行 `run / try_run` 任务，`submit_async` 不支持此模式。业务工作线程未捕获的任务异常会导致进程终止，目前没有逐任务异常隔离。
+
+[DbConnectionPool](src/common/base/mysql_connection_pool.cpp) 包含初始连接、容量上限、后台生产、空闲扫描、借用等待期限、借出前 `ping` 和停机协调。RAII 句柄归还连接；失效或事务未结束的连接不会重新进入空闲队列。借用期限约束条件变量等待，不能中断后续 MySQL 网络调用。
+
+[DbConnection / DbTransaction](inc/common/base/mysql_connection.h) 封装参数绑定、查询结果、事务提交与析构回滚。提交失败区分为结果未知，并使连接失效；注册通过同一事务创建用户和根目录。
+
+### 交互客户端与日志
+
+[client_main.cpp](src/client_main.cpp) 构建 `tlss-cli`，[Client](src/ftp/client.cpp) 将终端输入、`signalfd` 和退出超时的 `timerfd` 注册到 EventLoop。客户端直接显示服务端响应；输入 `exit / q / quit`、终端 EOF 或退出信号时发起关闭，连接关闭等待期限为 2 秒。
+
+底层 [Connector](inc/common/net/connector.h) 的重试间隔从 500 毫秒指数增加到最多 30 秒。CLI 初始建连可以重试；已建立会话后断线则退出，避免自动建立缺少原认证上下文的新会话。
+
+[Logger](src/logger/logger.cpp) 封装 spdlog 的控制台、文件、滚动文件和双 sink 输出。主程序初始化 `net`、`storage_service`、`mysql` 日志，在服务对象和后台线程清理后关闭日志系统。
+
+### 独立监控与可靠告警
+
+监控使用 `TLSSMON` 命名空间。其 [Engine](src/monitor/engine.cpp) 基于 **select + 唤醒管道**，独立于业务网络层的 epoll EventLoop；生命周期为 `CREATED → INITIALIZING → READY → RUNNING → STOPPING → STOPPED`，停止后不能重新运行。
+
+| 组件 | 当前实现 |
+| --- | --- |
+| `AioManager / TimerManager` | fd 就绪回调、延迟移除、按期限排序的单次/周期定时器 |
+| `CallbackRegistry` | 回调注册、异步 worker、调用次数及耗时统计 |
+| `MonitorModuleRegistry` | 模块与错误元数据，运行前完成注册 |
+| `MonitorStore` | 按完整主键保存当前记录，互斥保护，查询返回副本 |
+| `MonitorReporter` | 补齐元数据、按值变化发布、选择普通指标或可靠告警通道 |
+| `MonitorPolicy` | 连续超阈值、滚动窗口事件次数、滑动平均与异常样本过滤 |
+| `CliServer / CliRegistry` | 命令注册、会话上下文、模块选择与数据查询 |
+| `MonitorWire / UDP` | V1/V2 自定义二进制协议、指标发送和接收 |
+| `ReliableAlarmPublisher / Collector / AlarmSpool` | 本地持久化、TCP 发送、ACK、重试、去重和恢复 |
+
+指标主键为 `(mid, level, fid, eid)`，值为数值或字符串。Store 保存每个 key 的当前记录和变化时间，不是历史时序数据库。普通首次零值可被忽略，值不变时通常不发布；`report_count()` 提交调用方提供的值，不自动累加。V2 包含描述和生产端变化时间，V1 接收时使用 Collector 时间。
+
+```text
+普通指标：
+采样 → 策略 → Reporter → Store 更新 → UDP 发布
+     → Collector 解码 → 接收端 Engine / Store
+
+可靠告警：
+report_error → outbox 持久化 → 本地 Store 提交
+             → 后台 TCP 发送 / 重试
+             → Collector 校验 → inbox 持久化 → 接收端 Store 更新
+             → ACK → 发送端删除已确认文件
+```
+
+可靠通道持久化失败时不提交本地 Store 新值，允许后续相同值重试。普通发布回调在 Store 解锁后执行；可靠告警的提交前持久化在 Store 锁内执行，只允许有界的本地持久化操作，不能网络等待或重入 Store。
+
+告警实现包含 CRC 校验、流式解码、消息身份去重、短写处理、退避重试、损坏文件隔离、重启恢复，以及文件和目录同步。这是持久化重试与接收端去重机制，不代表任意外部业务副作用均具备端到端 exactly-once 保证。
+
+CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `db_dump` 查询监控 Store。`demo-m9-node` 与 `demo-m9-collector` 展示采样到查询的双进程链路，目前主服务没有自动启动或上报这些指标。
+
+### 内存拷贝库
+
+[公共 API](inc/common/memory/tlss_memcpy.h) 提供 `TLSS::MEMORY::memcpy`，支持 `Auto / Avx2 / RepMovsb / NonTemporal` 后端及 `Default / Streaming` 提示。共享库输出到 `lib/libtlss_memory.so`。
+
+自动选择流程为：CPU 能力检测 → 按大小与 Hint 生成 CopyPlan → 能力适配 → 执行或回退。[当前策略](src/common/memory/internal/copy_policy.cpp) 如下：
+
+| Hint | 大小 `n` | 初始策略 |
+| --- | --- | --- |
+| Default | `n ≤ 2 KiB` | AVX2 cached |
+| Default | `n > 2 KiB` | REP MOVSB |
+| Streaming | `n ≤ 2 KiB` | AVX2 cached |
+| Streaming | `2 KiB < n < 3 KiB` | libc memcpy |
+| Streaming | `3 KiB ≤ n < 8 KiB` | AVX2 cached |
+| Streaming | `8 KiB ≤ n < 64 KiB` | 单线程 NT |
+| Streaming | `64 KiB ≤ n < 128 KiB` | 请求 4 worker 并行 NT |
+| Streaming | `n ≥ 128 KiB` | 请求 8 worker 并行 NT |
+
+实际后端受 CPU 能力、可用拓扑与 worker 数影响。实现包含 CPU 亲和性、持久 worker 池、预计算 worker 选择、懒初始化、并行池忙碌时回退，以及不支持 AVX2 时的自动路径回退。强制指定不支持的后端会报错；该接口沿用 memcpy 的非重叠内存前提。
+
+当前网络 Buffer 的自定义 memcpy 调用被注释，因此该库的独立基准结果不能直接视为主服务吞吐收益。实现与测量说明见 [V1 设计与验证报告](doc/TLSS_Memory_Copy_Subsystem_V1_Design_Validation_Report_Final.md) 和 [内存拷贝导读](doc/tlss_memcpy_tutorial.md)。
 
 ## 网络服务生命周期与线程约束
 
@@ -177,31 +360,33 @@ base_loop.quit();
 
 实现入口：[TcpServer](src/common/net/tcp_server.cpp)、[EventLoop](src/common/net/event_loop.cpp)、[EventLoopThread](src/common/net/event_loop_thread.cpp)、[业务线程池](src/common/base/tlss_thread_pool.cpp)。现有[停机回归测试](tests/test_tcp_server_shutdown.cpp)覆盖等待对端 FIN、零 IO 工作线程下的强制关闭等路径；它不代表已经验证任意启动/停机/析构交错都安全。
 
-## 当前实现
-
-| 部分 | 当前状态 | 代码入口 |
-| --- | --- | --- |
-| 主服务 | 在 `9000` 端口监听 TCP 连接；接受 LF / CRLF 行命令，支持注册、登录与目录操作，`q / quit` 关闭会话 | [main.cpp](src/main.cpp)、[server.cpp](src/ftp/server.cpp) |
-| 用户认证 | 使用加盐 PBKDF2-HMAC-SHA256 验证密码；注册时在同一事务中创建用户与根目录，注册后需登录 | [auth/](src/auth/) |
-| 虚拟文件系统 | MySQL `virtual_files` 表保存用户、父目录与路径；已接入 `mkdir / cd / ls / pwd`，`ls` 当前显示名称、类型及创建/更新时间 | [service_engine.cpp](src/ftp/service_engine.cpp)、[建表脚本](sql/init_tlss_db.sql) |
-| 网络与基础设施 | epoll Reactor、IO 线程池、连接缓冲与输出高水位背压；业务线程池与 MySQL 连接池 | [net/](src/common/net/)、[base/](src/common/base/) |
-| 监控 | 独立的指标存储、模块注册、定时器、策略、CLI、UDP 指标传输与可靠 TCP 告警，提供演示程序和测试 | [monitor/](src/monitor/) |
-| 内存拷贝 | `TLSS::MEMORY::memcpy` 共享库，包含运行时后端选择与汇编实现 | [memory/](src/common/memory/) |
-| 文件内容存储 | 已预留哈希字段；`upload / download` 处理、独立客户端与 ObjectStore 尚待实现 | [server.cpp](src/ftp/server.cpp)、[建表脚本](sql/init_tlss_db.sql) |
-| 网关与 RPC | 保留网关、RPC 代码骨架及四份空的 `.proto` 文件；主程序尚未启动相关服务 | [gateway/](src/gateway/)、[rpc/](src/rpc/)、[proto/](proto/) |
-
-主服务使用自定义行命令协议。监控子系统有自己的 `TLSSMON::Engine` 生命周期，目前通过独立演示程序运行，尚未接入主服务。
+## 代码结构
 
 ```text
-src/monitor/demo/*
-  └─ Engine → Timer / AIO → MonitorReporter → MonitorStore
-                              ├─ UDP 指标发布
-                              └─ 可靠告警发布 → 本地 spool → TCP collector
+cpp_TLFSS/
+├── CMakeLists.txt / CMakePresets.json
+├── inc/                          公共头文件，与 src 按模块对应
+├── src/
+│   ├── main.cpp                  storage-service 入口
+│   ├── client_main.cpp           tlss-cli 入口
+│   ├── common/
+│   │   ├── base/                 线程、业务线程池、数据库封装
+│   │   ├── net/                  Reactor、TCP 服务端与客户端
+│   │   ├── memory/               内存拷贝运行时与汇编
+│   │   └── benchmark/            内存拷贝实验与基准
+│   ├── auth/                     认证服务、用户仓储、密码哈希
+│   ├── ftp/                      命令入口、目录引擎、交互客户端
+│   ├── logger/                   spdlog 封装
+│   ├── monitor/                  独立监控系统，含 demo/ 与 test/
+│   ├── rpc/                      RPC 占位
+│   └── gateway/                  网关占位
+├── tests/                        网络、线程池、认证及数据库等测试
+├── proto/                        空的协议占位
+├── config/ / sql/                配置与数据库脚本
+├── scripts/ / doc/               构建脚本与技术资料
+├── third/ / third_party/         第三方依赖
+└── build/、bin/、lib/             默认构建产物
 ```
-
-`demo-m9-node` 与 `demo-m9-collector` 组成独立的双进程示例，展示模块注册、采样、策略判定、上报、传输与 CLI 查询。
-
-## 代码结构
 
 | 路径 | 用途 |
 | --- | --- |
@@ -213,15 +398,19 @@ src/monitor/demo/*
 | `third/`、`third_party/` | 仓库内依赖与上游子模块；不要提交其构建产物 |
 | `doc/` | 网络和内存拷贝子系统的补充资料 |
 
+顶层 CMake 组织 `common_lib`、`auth_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
+
 ## 构建与运行
 
 ### 环境要求
 
-- Linux；C++17 编译器、CMake 3.21+、Make、NASM、pkg-config。
+- Linux x86-64；C++17 编译器、CMake 3.21+、Make、NASM、pkg-config。当前构建包含 x86 汇编，不是通用跨架构构建。
 - OpenSSL、Protobuf（含 `protoc`）、gRPC（含 `grpc_cpp_plugin`）、yaml-cpp、pthread；GoogleTest 用于部分可选测试。
 - CMake 构建使用 `third/mysql/inc` 和 `third/mysql/lib/libmysqlclient.so` 中的 MySQL 客户端文件。运行主服务还需要可连接的 MySQL 8.0 实例（建库脚本使用 MySQL 8.0 排序规则）。
 
 项目的 gRPC/Protobuf 上游仓库以 Git 子模块记录；按需使用 `git submodule update --init --recursive` 获取源码。CMake 当前优先查找已安装的 Protobuf 和 gRPC，而不是自动编译子模块。
+
+虽然 RPC 业务尚未实现，顶层 CMake 当前仍要求 gRPC、Protobuf 及其代码生成工具。Python 3 用于可选的目录 SQL 和客户端交互测试。Kafka 尚未接入，不是当前构建或运行依赖。
 
 ### 配置数据库
 
@@ -242,7 +431,13 @@ ctest --preset debug
 ./bin/storage-service
 ```
 
-建议从仓库根目录启动，日志会写到相对路径 `logs/`。主程序当前不解析命令行参数，监听端口固定为 `9000`。另开终端，通过 `nc` 连接即可体验当前已实现的交互。
+建议从仓库根目录启动，日志会写到相对路径 `logs/`。主程序当前不解析命令行参数，监听端口固定为 `9000`；不要传入尚未实现的 `--config` 参数。另开交互终端启动客户端：
+
+```bash
+./bin/tlss-cli 127.0.0.1 9000
+```
+
+也可以使用 `nc 127.0.0.1 9000` 手动检查行协议。`tlss-cli` 面向交互终端，不能把它视为已实现的批量命令或文件传输工具。
 
 首次使用时输入 `signup`，按提示创建用户名和密码；用户名为 3–64 个字母、数字或下划线，密码为 8–128 字节且不含控制字符。注册同时创建用户根目录，成功后再输入 `login` 登录。
 
@@ -270,9 +465,50 @@ bye!
 
 监控演示程序输出到 `bin/dome/`，例如 `./bin/dome/demo-m9-policy` 可单独演示三种监控策略。`demo-m9-collector` 和 `demo-m9-node` 是独立示例，前者默认监听本机 UDP `9300`（指标）、TCP `9400`（告警）和 TCP `9310`（CLI）；后者需要指定模块、源 ID、outbox 目录和 CLI 端口。详情见 `src/monitor/demo/`。
 
+分别在三个终端运行以下命令。示例数据目录位于 `/tmp`，可保留用于进程重启恢复实验；它不是长期持久化目录。不同发送节点应使用不同源 ID、outbox 和 CLI 端口。
+
+```bash
+# 终端 1：接收指标与告警。
+./bin/dome/demo-m9-collector /tmp/tlss-m9/collector-inbox
+
+# 终端 2：disk 模块的采样节点。
+./bin/dome/demo-m9-node disk 1 /tmp/tlss-m9/disk-outbox 9320
+
+# 终端 3：连接 Collector 的管理 CLI。
+nc 127.0.0.1 9310
+```
+
+在管理 CLI 中输入 `modules`、`db_dump`、`alarm_status` 查看结果；通过各 demo 的 CLI `stop` 命令请求停止。
+
+### 可选内存拷贝基准
+
+基准目标默认关闭，可单独启用和构建：
+
+```bash
+cmake --preset release -DTLSS_BUILD_MEMCPY_GLIBC_BENCHMARK=ON
+cmake --build --preset release --target memcpy_glibc_benchmark
+./bin/memcpy_glibc_benchmark streaming
+```
+
+该程序还支持 `hot / runtime` 模式；仅 `runtime` 接受可选的调用者 CPU 编号，未指定时默认 CPU 8，运行前应确认该 CPU 在允许的亲和性集合内。结果依赖 CPU、亲和性、内存布局、构建选项与负载；比较时应记录环境和测试方法。启用开关保存在共用的 CMake 缓存中，不再需要时可显式设为 `OFF`。
+
 ## 测试与开发入口
 
 `ctest --preset debug` 运行 CMake 注册的测试。`tests/` 包含 TCP 停机、线程池异步提交、MySQL 预处理语句、内存拷贝链接，以及依赖 GoogleTest 的认证、注册、事务等测试；`src/monitor/test/` 覆盖监控引擎、策略、协议、存储、CLI 与可靠告警。若未找到 GoogleTest，仅跳过依赖它的测试；其他测试仍会注册。
+
+| 范围 | 验证内容与边界 |
+| --- | --- |
+| 网络 | 服务端停机、客户端取消/重连、旧回调及连接生命周期 |
+| 业务线程池 | 异步等待、超时、容量与停机 |
+| 目录查询 | Python 从生产代码提取 SQL，在内存 SQLite 中检查父子目录和用户隔离；不是完整 MySQL/TCP 集成测试 |
+| 交互客户端 | Python 伪终端与测试服务端交互 |
+| 认证和数据库 | GoogleTest 测试；部分要求显式配置测试数据库 |
+| 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke |
+| 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
+
+可使用 `ctest --preset debug -N` 查看当前构建目录登记的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake，不在文档中固定为某个通过数量。
+
+MySQL 集成测试使用 `TLSS_TEST_MYSQL_HOST`、`TLSS_TEST_MYSQL_USER`、`TLSS_TEST_MYSQL_PASSWORD`、`TLSS_TEST_MYSQL_DATABASE`，以及可选的 `TLSS_TEST_MYSQL_PORT`。注册端到端测试另需 `TLSS_TEST_FTP_SIGNUP=1`，并使用服务连接池配置。请使用专门的测试数据库；未配置环境时部分用例会跳过，跳过不等于验证成功。当前仍有旧测试接口失配，见[待收尾事项](#当前限制与待收尾事项)。
 
 建议按以下顺序阅读源码：
 
@@ -281,11 +517,107 @@ bye!
 3. `src/common/base/tlss_thread_pool.cpp`、`src/common/base/mysql_connection_pool.cpp`：查看任务与数据库资源的生命周期。
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`：追踪注册、登录与虚拟目录的数据库操作。
 5. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`：追踪独立监控示例。
+6. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
+7. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
 
-## 后续方向
+## 当前限制与待收尾事项
 
-- 实现 `tlss-client`、`upload / download` 与基于 SHA-256 的本地 ObjectStore。
-- 将虚拟文件元数据访问抽取为 MetadataStore，明确命名空间与文件内容的存储边界。
-- 将监控子系统接入主服务，采集连接、任务队列与数据库连接池等运行指标。
-- 完善 Protobuf 契约、gRPC 服务与网关。
+- 文件上传、下载、内容校验和对象存储未完成；目录操作已形成元数据闭环，但不是完整文件存储闭环。
+- 监控库未在主服务中初始化；连接数、业务队列、数据库池等指标尚未自动接入。
+- RPC/网关为占位，`.proto` 和 YAML 配置示例为空；端口、线程数量等尚无统一配置入口。
+- TCP 业务连接未启用 TLS；密码哈希保护的是存储凭据，不能替代传输保护。客户端尚未关闭密码输入回显。
+- `mkdir` 将目录 `object_hash` 写为字符串 `'NULL'`，注册根目录则写入 SQL `NULL`，需要统一语义。
+- [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) 仍引用旧的 `StorageEngine::ConnectionProvider`、`find_user_by_name()` 和旧会话字段，与当前接口失配；启用 GoogleTest 后需要先同步这些用例。[test_ftp_server.cpp](tests/test_ftp_server.cpp) 仍包含占位断言。
+- 监控中部分异常已被隔离，但错误记录仍为 TODO；业务线程池未捕获的异常则可能终止进程，两者的异常策略不同。
+- `scripts/build.sh` 末尾的运行提示仍含未实现的 `--config` 参数；实际启动方式以本文的 `./bin/storage-service` 为准。
+
+## 演进路线与接入时机
+
+以下是面向当前代码的建议路线，均不表示相关功能已经交付。推荐顺序为：**整理业务边界 → 接入小范围 gRPC → 完成文件存储闭环 → 接入 Kafka 异步事件 → 按实际需求拆分部署。**
+
+| 阶段 | 建设内容 | 可验证的完成条件 |
+| --- | --- | --- |
+| 1. 稳定现有业务边界 | 提取协议无关业务接口、统一错误类型、修复旧测试和目录字段语义 | 业务用例不依赖 `TcpConnection` 即可测试；现有命令行为有回归验证 |
+| 2. gRPC 入口 | 认证、列目录、创建目录；与 TCP 共享业务实现 | 两种入口的权限与结果一致；验证 deadline、取消、重复写请求和有序退出 |
+| 3. 文件存储闭环 | MetadataStore、ObjectStore、上传下载、哈希、临时文件与恢复 | 上传内容可下载校验；中断、重试、对象与元数据不一致有明确处理 |
+| 4. Kafka 事件链路 | 事务 Outbox、发布器、一个审计或索引消费者 | broker 不可用时事件保留；恢复后可补发；重复消费不会重复产生业务效果 |
+| 5. 运行与部署演进 | 接入主服务监控，根据独立扩容和故障隔离需求拆服务 | 积压、失败和资源占用可观测；部署和恢复流程可验证 |
+
+监控接入可以随各阶段推进，尤其应覆盖 RPC 延迟、任务拒绝、数据库借用失败、outbox 积压和消费失败。阶段以能力和验证结果划分，不以固定开发天数划分。
+
+### gRPC：业务接口稳定后即可接入
+
+现有 `AuthService` 和 `StorageEngine` 已有可复用基础。下一步让协议解析、会话提示符和连接对象留在入口层，让业务接口接收身份上下文、目录 ID/路径及结构化请求，并返回结构化结果。
+
+```text
+TCP 命令入口 ─┐
+             ├→ 统一业务接口 → 用户仓储 / MetadataStore / ObjectStore
+gRPC 入口 ───┘
+```
+
+第一版可在同一进程、不同端口提供 TCP 与 gRPC：保留自研 Reactor 供现有客户端使用，gRPC 使用自身运行时。无需为接入 RPC 同时拆分认证、目录、存储等微服务，也不必将 gRPC 的 socket 纳入现有 epoll 管理。
+
+优先定义 `Register`、`Login`、`ListDirectory`、`CreateDirectory`；`GetFileInfo` 在业务实现后加入。用普通 RPC 先验证接口，再根据文件业务设计客户端流上传和服务端流下载。gRPC 提供普通请求、客户端流、服务端流和双向流等形态，见 [gRPC 核心概念](https://grpc.io/docs/what-is-grpc/core-concepts/)。
+
+| 设计点 | 建议契约 |
+| --- | --- |
+| 身份 | 每次调用携带可验证凭据，服务端生成身份上下文并检查资源权限；不能把客户端自报的 user ID 当作认证 |
+| 当前目录 | 由客户端维护，RPC 显式携带目录 ID 或路径；`cd` 可作为客户端解析和更新上下文的行为 |
+| 错误 | 统一业务错误，由 TCP 和 gRPC 分别映射；不得把 SQL 或凭据等内部信息直接返回 |
+| deadline / 取消 | 客户端显式设置 deadline；服务端协作停止可取消工作，已提交的数据库写入不能据此认定失败 |
+| 写入幂等 | 注册、建目录、上传完成等操作定义请求 ID、去重范围和结果查询，避免超时重试重复执行 |
+| 执行与停机 | 明确 gRPC 处理线程和业务线程池的分工；使用异步 API 时不在回调中阻塞执行长 SQL/哈希；停机先停止请求再等待业务和运行时清理 |
+
+gRPC 默认不设置 deadline；超时或取消也不意味着业务副作用已经回滚。实现应延续现有“提交结果未知”的表达，并验证重试行为，参考 [Deadlines](https://grpc.io/docs/guides/deadlines/) 与 [Cancellation](https://grpc.io/docs/guides/cancellation/)。
+
+不必等上传下载完成才引入 gRPC。先接稳定的认证与目录接口，再围绕相同业务边界设计文件传输，可以减少后续协议返工。
+
+### Kafka：有可靠业务事件和实际消费者时接入
+
+Kafka 适合上传后异步处理、多个消费者订阅、积压恢复和历史事件重放。当前以目录请求/响应为主，优先完成存储闭环，再以 `FileUploaded → 审计或索引` 作为第一条链路。
+
+候选事件包括 `FileUploaded`、`FileDeleted`、`DirectoryCreated`、`UserRegistered`；它们是后续协议设计，不是已有 topic。首版建议只选一个事件和一个消费者，验证可靠性后再扩展缩略图、扫描等处理。
+
+```text
+文件可靠落盘，元数据可发布
+            ↓
+MySQL 同一事务：更新业务元数据 + 插入 outbox_events
+            ↓
+后台发布器读取 outbox → Kafka → 审计 / 索引消费者
+            ↓
+发送确认后标记已发送；消费者按 event_id 幂等处理
+```
+
+只在 SQL 提交后调用一次 `send()` 会留下“数据库提交、消息未发送”的窗口；应将业务记录和事件记录写入同一数据库事务。后台发布器首版可以轮询数据库，后续再按需求引入 CDC。Outbox 的事件 ID 可用于去重，业务实体 ID 可作为消息 key，参考 [Debezium Outbox Event Router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html)。
+
+需要先确定以下语义：
+
+| 问题 | 建议处理 |
+| --- | --- |
+| 消息内容 | 传递事件 ID、版本、文件/用户 ID、对象哈希、大小等元数据；文件内容走存储和传输接口 |
+| 文件与数据库一致性 | 先完成临时文件、校验与可靠对象发布，再提交可用元数据和事件；处理失败后可能遗留的孤儿对象 |
+| 发布失败 | outbox 保留待发送记录，后台退避重试；broker 不可用时观察容量和积压 |
+| 重复发布 | 发送成功后、更新 outbox 状态前可能退出，因此必须允许重复事件 |
+| 消费幂等 | 处理成功后提交消费位置；数据库消费者将 event_id 去重记录与业务修改放入同一事务，外部副作用另设幂等机制 |
+| 顺序 | 选择合适的分区 key，例如文件 ID，并控制发布顺序；Kafka 分区有序不等于 topic 全局有序 |
+| 失败隔离 | 定义重试上限、失败事件保留与人工重放方式，避免坏事件无限阻塞正常消费 |
+
+Kafka 事务不能自动把 MySQL 和本地文件系统纳入一个原子事务。其 exactly-once 能力有明确适用范围，写外部系统仍需协调，参考 [Kafka 消息交付语义](https://kafka.apache.org/43/design/design/)。
+
+现有告警文件 spool 可以提供持久化、重试和恢复的实现经验，但不能直接保证 MySQL 业务修改与事件原子提交；业务事件宜采用数据库事务 Outbox。
+
+### 可选的提前试验：监控事件进入 Kafka
+
+如果近期目标是学习消息系统，可以先把独立监控 Collector 作为试验入口：
+
+```text
+已有可靠告警 Collector
+→ 持久化的待转发记录
+→ Kafka
+→ 告警归档消费者
+```
+
+转发器需从持久化告警恢复待发送工作，并维护可恢复的发送进度。不能在 Collector 返回 ACK 后仅发起一次内存发送，否则进程退出会留下丢事件窗口。先保留已有可靠通道，通过桥接验证 Kafka；之后再决定是否调整节点上报架构。
+
+当业务确有独立部署或扩容需求时，再引入网关和跨进程 RPC。gRPC 承担需要立即响应的业务调用，Kafka 承担已发生业务事实的异步传播，各阶段都应先证明具体场景的收益。
 
