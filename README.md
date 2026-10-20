@@ -3,7 +3,7 @@
 
 # TLSS — 基于 C++17 Reactor 模式的存储服务
 
-**简体中文** | [English](README.es.md)
+**简体中文** | [English](README.en.md)
 
 **这是一个以学习为导向的 C++17/Linux 文件存储服务，基于自定义的 epoll Reactor 模式及异步网络库构建。**
 
