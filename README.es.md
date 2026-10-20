@@ -1,13 +1,31 @@
 <p align="right">潮水成诗，破碎生长</p>
 
 # TLSS
+
 [简体中文](README.md) | **English**
 
 This project is licensed under Apache License 2.0. See [LICENSE](LICENSE).
 
 A C++17 file storage system built from scratch.
 
-## Features
+TLSS is a file storage service prototype built on a custom networking library. It currently supports signup, login, and MySQL-backed virtual directory operations, alongside an independent monitoring and alarm system and an optimized memory copy library. File uploads, downloads, object storage, gRPC business APIs, and Kafka event processing remain planned work.
+
+`ftp/` is the existing business module directory name. The main service uses a custom TCP text line protocol; it does not implement standard FTP control and data connections. This document distinguishes implemented capabilities, standalone components, and planned designs. Linking a library does not mean its functionality is enabled at runtime.
+
+## Contents
+
+- [Features and implementation status](#features-and-implementation-status)
+- [Current interaction](#current-interaction)
+- [Architecture and execution model](#architecture-and-execution-model)
+- [Module implementation](#module-implementation)
+- [Network service lifecycle and threading requirements](#network-service-lifecycle-and-threading-requirements)
+- [Code layout](#code-layout)
+- [Build and run](#build-and-run)
+- [Tests and where to start reading](#tests-and-where-to-start-reading)
+- [Current limitations and remaining work](#current-limitations-and-remaining-work)
+- [Evolution roadmap and integration timing](#evolution-roadmap-and-integration-timing)
+
+## Features and implementation status
 
 - **epoll Reactor networking** — Custom event loop, connection management, and read/write buffers.
 - **one-loop-per-thread** — Each IO thread runs its own EventLoop; connections are assigned in round-robin order.
@@ -17,39 +35,58 @@ A C++17 file storage system built from scratch.
 - **content-addressed object storage** — **planned**; SHA-256 will identify file contents, with an `object_hash` field already reserved in the schema.
 - **graceful shutdown** — Handles `SIGINT / SIGTERM`, drains tasks, and releases connections and threads.
 - **monitoring subsystem** — Independent metric storage, policies, CLI, UDP metrics, and reliable TCP alarms.
+- **interactive client** — `tlss-cli`, with asynchronous connections, terminal input, and orderly shutdown.
+- **memory copy library** — AVX2, REP MOVSB, non-temporal stores (NT), and runtime selection of parallel copying.
 
-## Demo
+| Component | Current capability | Main service integration |
+| --- | --- | --- |
+| Networking | epoll Reactor, connection buffers, IO thread pool, asynchronous TCP client | In use |
+| Worker pool | Bounded execution queue, nonblocking submission, asynchronous queue wait timeouts | In use |
+| MySQL | Connection pool, prepared statements, RAII transactions | In use |
+| Authentication | Signup, password verification, transactional user and root directory creation | In use |
+| Virtual directories | `mkdir / cd / ls / pwd` | In use |
+| Client | `tlss-cli <IPv4> <port>` | Standalone executable |
+| Monitoring | Metrics, policies, CLI, UDP, reliable TCP alarms | Library linked; runs through standalone demos, not started by the main entry point |
+| Memory copy | `TLSS::MEMORY::memcpy` shared library | Linked; networking `Buffer::append()` still uses `std::copy` |
+| File contents | `object_hash` field reserved | Uploads, downloads, and object persistence not implemented |
+| RPC and gateway | Build targets and code skeletons | No business services; all four `.proto` files are empty |
+| Kafka | Event and consumer design | Planned; no producer, consumer, or deployment configuration yet |
 
-**Target client interaction:** `tlss-client`, file uploads, and persistent object storage by content hash are still planned. For directory operations available today, see [Build and run](#build-and-run).
+## Current interaction
+
+Prepare the database and start the service as described in [Build and run](#build-and-run), then run `./bin/tlss-cli 127.0.0.1 9000` in another interactive terminal. The following shows directory operations for a registered user, omitting connection notices. It assumes `documents` does not yet exist; `<password>` represents the actual password.
 
 ```text
-$ tlss-client
-Username: alice
-Password: ****
-
-tlss@alice:/> mkdir documents
-tlss@alice:/> cd documents
-tlss@alice:/documents> upload hello.txt
-
-uploaded:
-SHA256 b94d27...
-
-tlss@alice:/documents> ls
-
-hello.txt   file   11 B
+$ ./bin/tlss-cli 127.0.0.1 9000
+Welcome to TLSS.
+Please enter login or signup:
+tlss>login
+Username:alice
+Password:<password>
+Login successful.
+tlss@alice:/>mkdir documents
+tlss@alice:/>cd documents
+tlss@alice:/documents>pwd
+/documents
+tlss@alice:/documents>cd ..
+tlss@alice:/>quit
 ```
 
-## Architecture
+On first use, choose `signup` and enter a username, password, and password confirmation. After registration succeeds, choose `login` again. The client does not currently hide password input, and the service connection does not use TLS. Although the server recognizes upload and download commands, their handlers are not implemented and they are not available operations.
+
+## Architecture and execution model
 
 ```mermaid
 flowchart TD
-    Client[Client] --> Connection[TcpConnection]
-    Connection --> Reactor[Reactor / epoll]
-    Reactor --> Service[StorageService]
+    Client[tlss-cli / nc] --> Acceptor[Main EventLoop / Acceptor]
+    Acceptor --> Connection[IO EventLoop / TcpConnection]
+    Connection --> Service[StorageService]
     Service --> Workers[ThreadPool]
     Service --> Session["Session (ConnectionSession)"]
     Workers --> Engine[StorageEngine]
+    Workers --> Auth[AuthService / UserRepository]
     Engine --> Pool[DbConnectionPool]
+    Auth --> Pool
     Pool --> MySQL[MySQL]
     Engine -.-> Metadata["MetadataStore (planned extraction)"]
     Engine -.-> Objects["ObjectStore (planned)"]
@@ -66,7 +103,153 @@ The networking layer handles connections and message callbacks. `StorageService`
 
 The defaults are 4 IO threads, 8 worker threads, 256 execution queue slots, and 128 asynchronous wait queue slots. Directory operations use `try_run` and report a busy server when the queue is full. Login and signup use `submit_async` with a 2-second queue wait deadline.
 
+Additional threads include the signal control thread, the worker pool's deadline management thread, and the database connection producer and idle scanner. The 2-second deadline only limits how long authentication tasks wait to enter the execution queue; it does not interrupt SQL or password computation that has already started.
+
 Shutdown first stops accepting connections and pauses reads, then drains worker tasks and shuts down the write side of existing connections. Connections are forcibly closed if the connection grace period expires. The service then joins IO threads, shuts down the database pool, and exits the main event loop. Logging shuts down last.
+
+## Module implementation
+
+### Networking library and command protocol
+
+Implementations are in [common/net](src/common/net/), with headers in [inc/common/net](inc/common/net/).
+
+| Type | Responsibility |
+| --- | --- |
+| `EventLoop` | Wait for IO events, dispatch Channels, and execute pending callbacks |
+| `Poller / EPollPoller` | epoll event waiting and registration management |
+| `Channel` | File descriptor event interests, callbacks, and lifetime association |
+| `Acceptor / TcpServer` | Accept connections, maintain the connection map, and assign IO loops in round-robin order |
+| `TcpConnection` | Connection state, input/output buffers, backpressure, half-close, and forced closure |
+| `EventLoopThreadPool` | Manage IO threads using one loop per thread |
+| `Connector / TcpClient` | Nonblocking connection setup, retries, and client connection management |
+
+Cross-thread calls use `queue_in_loop()` and wake the target loop through `eventfd`. `run_in_loop()` executes immediately on the owning thread and queues work otherwise. Cross-thread sends retain the message contents and a connection reference until execution. `Channel::tie()` and deferred cleanup coordinate object destruction with event dispatch.
+
+`Buffer::read_fd()` uses `readv` with its internal writable region and a 64 KiB stack buffer. The service configures a 256 KiB output high-water mark: reaching it pauses reads, which resume after the output buffer drains. Connections also have a 1 MiB pending output buffer limit. These mechanisms do not replace capacity limits on all upstream task queues.
+
+[StorageService::on_message()](src/ftp/server.cpp) splits input on `\n`, accepts `\r\n`, retains incomplete commands, and processes multiple complete commands in a loop. A command may contain at most 4096 bytes; exceeding the limit closes the connection.
+
+### Sessions, signup, and login
+
+[ConnectionSession](inc/ftp/context.h) stores login state, temporary username and password input, an authentication attempt number, authenticated identity, the current directory, and a directory change flag. Only the owning IO thread accesses session contents; a separate mutex protects the session index.
+
+```text
+Login:
+login → username → password → verifying
+      → worker queries the active user and verifies the password
+      → IO loop checks the connection, original session, and auth_attempt
+      → publish identity and set the current directory to /
+
+Signup:
+signup → username → password → confirmation → registering
+       → worker computes the password hash first
+       → insert the user and root directory in one database transaction
+       → return the result and require a separate login
+```
+
+[AuthService](src/auth/auth_service.cpp) handles validation, username normalization, and result mapping. [MySqlUserRepository](src/auth/user_repository.cpp) handles user data access. Signup usernames contain 3–64 ASCII letters, digits, or underscores and are converted to lowercase before storage. Passwords contain 8–128 bytes; spaces are preserved and control characters are rejected.
+
+[PasswordHasher](src/auth/password_hasher.cpp) uses a 16-byte random salt, 600000 PBKDF2-HMAC-SHA256 iterations, a 32-byte derived key, and an encoding that includes the version and iteration count. Verification compares results using `CRYPTO_memcmp`. Signup computes the hash before borrowing a database connection for the transaction, reducing connection occupancy.
+
+The database username unique index resolves concurrent signup attempts. If commit confirmation is lost, the service returns an unknown outcome and suggests trying login first; it does not automatically retry signup. Authentication completion callbacks check weak references, session identity, and `auth_attempt` so stale results cannot overwrite current state.
+
+### Virtual directories and storage boundaries
+
+The [schema script](sql/init_tlss_db.sql) defines `users` and `virtual_files`. The latter separates users by `username`, represents parent-child relationships with `parent_id`, and stores `path`, `file_type`, `object_hash`, and timestamps. A root directory uses `parent_id = -1`, `file_name = '/'`, and `path = '/'`. A unique index prevents duplicate names under the same parent for the same user.
+
+| Command | Current execution |
+| --- | --- |
+| `pwd` | Read the current directory directly from the session |
+| `ls` | Look up the current directory ID, then list child names, types, and creation/update timestamps |
+| `cd <child>` | Join parent and child nodes, filtering by user, parent path, and directory type |
+| `cd ..` | Look up the parent; remain at `/` when already at the root |
+| `mkdir <name>` | Look up the parent, construct the path, and insert a directory record |
+| `upload / download` | Commands recognized; handler calls remain commented out |
+
+[StorageEngine](src/ftp/service_engine.cpp) currently executes prepared SQL directly. `cd` supports direct children and the parent directory, without a general absolute/relative path parser. While a directory change is pending, `directory_change_pending` blocks subsequent directory commands. Other asynchronous commands do not have a complete per-connection serial execution queue, so responses must not be assumed to follow input order strictly.
+
+`object_hash` is reserved for content-addressed storage. Byte transfer, hash verification, temporary files, atomic publication, object reclamation, and metadata consistency still need implementation. Metadata access is planned to move into `MetadataStore`, with content persistence encapsulated in `ObjectStore`.
+
+### Worker pool and database resources
+
+[ThreadPool](inc/common/base/tlss_thread_pool.h) provides three submission methods:
+
+| API | When the queue is full | Current use |
+| --- | --- | --- |
+| `run()` | External callers wait for capacity; nested submissions from the pool are rejected when full to avoid deadlock | General blocking submission |
+| `try_run()` | Fail immediately | Directory database operations |
+| `submit_async()` | Enter a bounded wait queue until admitted to the execution queue or a timeout callback fires | Login and signup |
+
+Shutdown rejects new work, cancels the wait queue, drains the execution queue, and joins workers. A pool can only start once. With zero workers, `run / try_run` execute on the caller's thread; `submit_async` does not support this mode. Uncaught exceptions from worker tasks terminate the process; individual tasks do not currently have exception isolation.
+
+[DbConnectionPool](src/common/base/mysql_connection_pool.cpp) manages initial connections, a capacity limit, background production, idle scanning, acquisition wait deadlines, `ping` before borrowing, and shutdown coordination. RAII handles return connections. Invalid connections and connections with unfinished transactions do not return to the idle queue. The acquisition deadline limits condition-variable waiting; it cannot interrupt subsequent MySQL network calls.
+
+[DbConnection / DbTransaction](inc/common/base/mysql_connection.h) wrap parameter binding, query results, transaction commits, and rollback on destruction. A failed commit is reported as an unknown outcome and invalidates the connection. Signup creates the user and root directory in the same transaction.
+
+### Interactive client and logging
+
+[client_main.cpp](src/client_main.cpp) builds `tlss-cli`. [Client](src/ftp/client.cpp) registers terminal input, `signalfd`, and an exit-timeout `timerfd` with EventLoop. It displays server responses directly. `exit / q / quit`, terminal EOF, or a shutdown signal initiates closure, with a 2-second connection shutdown wait.
+
+The underlying [Connector](inc/common/net/connector.h) increases retry delays exponentially from 500 milliseconds to at most 30 seconds. The CLI retries initial connection attempts, but exits if an established session disconnects, avoiding an automatic new session without the original authentication context.
+
+[Logger](src/logger/logger.cpp) wraps spdlog console, file, rotating file, and dual-sink output. The main program initializes `net`, `storage_service`, and `mysql` loggers, and shuts logging down after service objects and background threads are cleaned up.
+
+### Independent monitoring and reliable alarms
+
+Monitoring uses the `TLSSMON` namespace. Its [Engine](src/monitor/engine.cpp) runs on **select and a wakeup pipe**, independently of the business networking layer's epoll EventLoop. Its lifecycle is `CREATED → INITIALIZING → READY → RUNNING → STOPPING → STOPPED`; it cannot restart after stopping.
+
+| Component | Current implementation |
+| --- | --- |
+| `AioManager / TimerManager` | Descriptor readiness callbacks, deferred removal, deadline-ordered one-shot and periodic timers |
+| `CallbackRegistry` | Callback registration, asynchronous workers, invocation counts, and timing statistics |
+| `MonitorModuleRegistry` | Module and error metadata, registered before the engine runs |
+| `MonitorStore` | Current records indexed by the full key, protected by a mutex; queries return copies |
+| `MonitorReporter` | Metadata enrichment, publishing on value changes, and ordinary metric/reliable alarm routing |
+| `MonitorPolicy` | Sustained threshold violations, event counts in rolling windows, moving averages, and outlier filtering |
+| `CliServer / CliRegistry` | Command registration, session context, module selection, and data queries |
+| `MonitorWire / UDP` | Custom V1/V2 binary protocols and metric transmission/reception |
+| `ReliableAlarmPublisher / Collector / AlarmSpool` | Local persistence, TCP delivery, ACKs, retries, deduplication, and recovery |
+
+Metric keys are `(mid, level, fid, eid)`, and values are numeric or strings. Store keeps each key's current record and change timestamp; it is not a historical time-series database. An ordinary initial zero may be ignored, and unchanged values usually do not publish. `report_count()` submits the caller's value rather than incrementing automatically. V2 carries descriptions and producer change timestamps; V1 uses the Collector's time on receipt.
+
+```text
+Ordinary metrics:
+Sampling → policy → Reporter → Store update → UDP publish
+         → Collector decode → receiving Engine / Store
+
+Reliable alarms:
+report_error → persist outbox → commit local Store
+             → background TCP send / retry
+             → Collector validation → persist inbox → update receiving Store
+             → ACK → sender removes the acknowledged file
+```
+
+If reliable-channel persistence fails, the new local Store value is not committed, allowing the same value to be retried. Ordinary publishing callbacks run after releasing the Store lock. Reliable alarms perform pre-commit persistence under the Store lock; only bounded local persistence is allowed, with no network waiting or Store reentry.
+
+Alarm handling includes CRC verification, stream decoding, deduplication by message identity, partial writes, retry backoff, corrupt-file quarantine, restart recovery, and file/directory synchronization. This provides persistent retries and receiver deduplication, not end-to-end exactly-once guarantees for arbitrary external business effects.
+
+The CLI supports `help`, `modules`, `use`, `db_dump`, and `alarm_status`; `db_dump` queries the monitoring Store. `demo-m9-node` and `demo-m9-collector` demonstrate sampling through queries across two processes. The main service does not currently start these components or report metrics automatically.
+
+### Memory copy library
+
+The [public API](inc/common/memory/tlss_memcpy.h) exposes `TLSS::MEMORY::memcpy`, with `Auto / Avx2 / RepMovsb / NonTemporal` backends and `Default / Streaming` hints. The shared library is emitted as `lib/libtlss_memory.so`.
+
+Automatic selection follows CPU capability detection → CopyPlan selection by size and hint → capability adaptation → execution or fallback. The [current policy](src/common/memory/internal/copy_policy.cpp) is:
+
+| Hint | Size `n` | Initial strategy |
+| --- | --- | --- |
+| Default | `n ≤ 2 KiB` | AVX2 cached |
+| Default | `n > 2 KiB` | REP MOVSB |
+| Streaming | `n ≤ 2 KiB` | AVX2 cached |
+| Streaming | `2 KiB < n < 3 KiB` | libc memcpy |
+| Streaming | `3 KiB ≤ n < 8 KiB` | AVX2 cached |
+| Streaming | `8 KiB ≤ n < 64 KiB` | Single-thread NT |
+| Streaming | `64 KiB ≤ n < 128 KiB` | Request 4-worker parallel NT |
+| Streaming | `n ≥ 128 KiB` | Request 8-worker parallel NT |
+
+Actual execution depends on CPU capabilities, available topology, and worker count. The implementation includes CPU affinity, persistent workers, precomputed worker selection, lazy initialization, fallback when the parallel pool is busy, and automatic fallback without AVX2 support. Explicitly requesting an unsupported backend raises an error. The API retains memcpy's non-overlapping-memory requirement.
+
+The custom memcpy call in the networking Buffer remains commented out, so independent library benchmarks are not evidence of main-service throughput gains. See the [V1 design and validation report](doc/TLSS_Memory_Copy_Subsystem_V1_Design_Validation_Report_Final.md) and [memory copy guide](doc/tlss_memcpy_tutorial.md) for implementation and measurement details.
 
 ## Network service lifecycle and threading requirements
 
@@ -177,31 +360,33 @@ Here, `worker_pool`, `db_pool`, and `base_loop` represent the corresponding obje
 
 Implementation entry points: [TcpServer](src/common/net/tcp_server.cpp), [EventLoop](src/common/net/event_loop.cpp), [EventLoopThread](src/common/net/event_loop_thread.cpp), and [worker pool](src/common/base/tlss_thread_pool.cpp). Existing [shutdown regression tests](tests/test_tcp_server_shutdown.cpp) cover waiting for peer FIN and forced closure with zero IO worker threads, among other paths. They do not establish safety for arbitrary interleavings of startup, shutdown, and destruction.
 
-## Current implementation
-
-| Component | Current state | Entry points |
-| --- | --- | --- |
-| Main service | Listens for TCP connections on port `9000`; accepts LF / CRLF line commands for signup, login, and directory operations; `q / quit` closes the session | [main.cpp](src/main.cpp), [server.cpp](src/ftp/server.cpp) |
-| Authentication | Verifies passwords with salted PBKDF2-HMAC-SHA256; signup creates the user and root directory in one transaction, then requires login | [auth/](src/auth/) |
-| Virtual filesystem | The MySQL `virtual_files` table stores users, parent directories, and paths; `mkdir / cd / ls / pwd` are connected, and `ls` currently shows names, types, and creation/update timestamps | [service_engine.cpp](src/ftp/service_engine.cpp), [schema script](sql/init_tlss_db.sql) |
-| Networking and infrastructure | epoll Reactor, IO thread pool, connection buffers, and output high-water-mark backpressure; worker pool and MySQL connection pool | [net/](src/common/net/), [base/](src/common/base/) |
-| Monitoring | Independent metric store, module registry, timers, policies, CLI, UDP metric transport, and reliable TCP alarms; includes demos and tests | [monitor/](src/monitor/) |
-| Memory copy | Shared library exposing `TLSS::MEMORY::memcpy`, with runtime backend selection and assembly implementations | [memory/](src/common/memory/) |
-| File content storage | Hash field reserved in the schema; `upload / download` handling, the standalone client, and ObjectStore remain to be implemented | [server.cpp](src/ftp/server.cpp), [schema script](sql/init_tlss_db.sql) |
-| Gateway and RPC | Gateway and RPC skeletons plus four empty `.proto` files; the main program does not yet start these services | [gateway/](src/gateway/), [rpc/](src/rpc/), [proto/](proto/) |
-
-The main service uses a custom line command protocol. The monitoring subsystem has its own `TLSSMON::Engine` lifecycle and currently runs through standalone demos; it has not yet been integrated into the main service.
+## Code layout
 
 ```text
-src/monitor/demo/*
-  └─ Engine → Timer / AIO → MonitorReporter → MonitorStore
-                              ├─ UDP metric publishing
-                              └─ reliable alarm publishing → local spool → TCP collector
+cpp_TLFSS/
+├── CMakeLists.txt / CMakePresets.json
+├── inc/                          Public headers, matching src modules
+├── src/
+│   ├── main.cpp                  storage-service entry point
+│   ├── client_main.cpp           tlss-cli entry point
+│   ├── common/
+│   │   ├── base/                 Threads, worker pool, database wrappers
+│   │   ├── net/                  Reactor, TCP server and client
+│   │   ├── memory/               Copy runtime and assembly
+│   │   └── benchmark/            Memory copy experiments and benchmarks
+│   ├── auth/                     Authentication, user repository, password hashing
+│   ├── ftp/                      Command entry point, directory engine, client
+│   ├── logger/                   spdlog wrapper
+│   ├── monitor/                  Independent monitoring, including demo/ and test/
+│   ├── rpc/                      RPC placeholders
+│   └── gateway/                  Gateway placeholders
+├── tests/                        Networking, worker pool, auth, and database tests
+├── proto/                        Empty protocol placeholders
+├── config/ / sql/                Configuration and database scripts
+├── scripts/ / doc/               Build scripts and technical documentation
+├── third/ / third_party/         Third-party dependencies
+└── build/, bin/, lib/            Default build output
 ```
-
-`demo-m9-node` and `demo-m9-collector` form an independent example with two processes, covering module registration, sampling, policy evaluation, reporting, transport, and CLI queries.
-
-## Code layout
 
 | Path | Purpose |
 | --- | --- |
@@ -213,15 +398,19 @@ src/monitor/demo/*
 | `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
 | `doc/` | Supplementary material for the networking and memory copy subsystems |
 
+The top-level CMake configuration organizes `common_lib`, `auth_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
+
 ## Build and run
 
 ### Requirements
 
-- Linux, a C++17 compiler, CMake 3.21+, Make, NASM, and pkg-config.
+- Linux x86-64, a C++17 compiler, CMake 3.21+, Make, NASM, and pkg-config. The build includes x86 assembly and is not a general cross-architecture build.
 - OpenSSL, Protobuf (including `protoc`), gRPC (including `grpc_cpp_plugin`), yaml-cpp, and pthreads. GoogleTest is needed for some optional tests.
 - The CMake build uses the MySQL client files at `third/mysql/inc` and `third/mysql/lib/libmysqlclient.so`. Running the main service also requires a reachable MySQL 8.0 instance; the schema script uses a MySQL 8.0 collation.
 
 The upstream gRPC and Protobuf repositories are recorded as Git submodules. Run `git submodule update --init --recursive` if you need their source. CMake currently looks for installed Protobuf and gRPC packages instead of building the submodules automatically.
+
+Although RPC business services are not implemented, the top-level build still requires gRPC, Protobuf, and their code generation tools. Python 3 is used for optional directory SQL and client interaction tests. Kafka is not integrated and is not a current build or runtime dependency.
 
 ### Configure the database
 
@@ -242,7 +431,13 @@ ctest --preset debug
 ./bin/storage-service
 ```
 
-Start the program from the repository root so relative log files are written under `logs/`. The main program does not currently parse command line options; its listening port is fixed at `9000`. Open another terminal and connect with `nc` to try the implemented commands.
+Start the program from the repository root so relative log files are written under `logs/`. The main program does not currently parse command line options; its listening port is fixed at `9000`. Do not pass the unimplemented `--config` option. Start the client in another interactive terminal:
+
+```bash
+./bin/tlss-cli 127.0.0.1 9000
+```
+
+Alternatively, use `nc 127.0.0.1 9000` to inspect the line protocol manually. `tlss-cli` targets interactive terminals; batch commands and file transfer are not implemented client capabilities.
 
 On your first connection, enter `signup` and follow the prompts to create a username and password. Usernames accept 3–64 letters, digits, or underscores; passwords accept 8–128 bytes without control characters. Signup also creates the user's root directory. Enter `login` after registration succeeds.
 
@@ -270,9 +465,50 @@ The service attempts an orderly shutdown on `SIGINT` or `SIGTERM`. `scripts/buil
 
 Monitoring demos are placed in `bin/dome/`. For example, `./bin/dome/demo-m9-policy` demonstrates three monitoring policies. `demo-m9-collector` and `demo-m9-node` run separately: by default, the collector listens on local UDP `9300` for metrics, TCP `9400` for alarms, and TCP `9310` for its CLI. The node requires a module, source ID, outbox directory, and CLI port. See `src/monitor/demo/` for details.
 
+Run the following in three separate terminals. The sample data directories under `/tmp` can be retained for process restart recovery experiments, but are not intended for long-term persistence. Use distinct source IDs, outbox directories, and CLI ports for different sending nodes.
+
+```bash
+# Terminal 1: receive metrics and alarms.
+./bin/dome/demo-m9-collector /tmp/tlss-m9/collector-inbox
+
+# Terminal 2: sample the disk module.
+./bin/dome/demo-m9-node disk 1 /tmp/tlss-m9/disk-outbox 9320
+
+# Terminal 3: connect to the Collector management CLI.
+nc 127.0.0.1 9310
+```
+
+Enter `modules`, `db_dump`, or `alarm_status` in the management CLI to inspect results. Use each demo's CLI `stop` command to request shutdown.
+
+### Optional memory copy benchmark
+
+The benchmark target is disabled by default. Enable and build it separately:
+
+```bash
+cmake --preset release -DTLSS_BUILD_MEMCPY_GLIBC_BENCHMARK=ON
+cmake --build --preset release --target memcpy_glibc_benchmark
+./bin/memcpy_glibc_benchmark streaming
+```
+
+The program also supports `hot / runtime` modes. Only `runtime` accepts an optional caller CPU ID, defaulting to CPU 8; check that this CPU is in the allowed affinity set before running it. Results depend on the CPU, affinity, memory layout, build options, and workload, so record the environment and methodology when comparing results. The option persists in the shared CMake cache; explicitly set it to `OFF` when no longer needed.
+
 ## Tests and where to start reading
 
 `ctest --preset debug` runs the tests registered with CMake. `tests/` covers TCP shutdown, asynchronous worker pool submission, MySQL prepared statements, memory copy linking, and GoogleTest cases for authentication, signup, and transactions. `src/monitor/test/` covers the monitoring engine, policies, wire protocols, storage, CLI, and reliable alarms. If GoogleTest is unavailable, only tests that require it are skipped; the other tests are still registered.
+
+| Area | Coverage and boundaries |
+| --- | --- |
+| Networking | Server shutdown, client cancellation/reconnection, stale callbacks, and connection lifetimes |
+| Worker pool | Asynchronous waiting, timeouts, capacity, and shutdown |
+| Directory queries | Python extracts production SQL and checks parent/child queries and user isolation in in-memory SQLite; not a complete MySQL/TCP integration test |
+| Interactive client | Python pseudoterminal interaction with a test server |
+| Authentication and database | GoogleTest cases; some require an explicitly configured test database |
+| Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests |
+| Memory copy | Linking/basic correctness in CTest; deeper checks and benchmarks are spread across benchmark code and dedicated scripts |
+
+Use `ctest --preset debug -N` to list tests registered in the current build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun; this document does not claim a fixed passing test count.
+
+MySQL integration tests use `TLSS_TEST_MYSQL_HOST`, `TLSS_TEST_MYSQL_USER`, `TLSS_TEST_MYSQL_PASSWORD`, and `TLSS_TEST_MYSQL_DATABASE`, with optional `TLSS_TEST_MYSQL_PORT`. The signup end-to-end test additionally requires `TLSS_TEST_FTP_SIGNUP=1` and uses the service connection pool configuration. Use a dedicated test database. Some cases skip when their environment is not configured; a skip is not successful validation. Some old tests still reference obsolete interfaces; see [remaining work](#current-limitations-and-remaining-work).
 
 Suggested source reading order:
 
@@ -281,11 +517,107 @@ Suggested source reading order:
 3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`: database operations for signup, login, and virtual directories.
 5. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
+6. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
+7. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
 
-## Roadmap
+## Current limitations and remaining work
 
-- Implement `tlss-client`, `upload / download`, and a local ObjectStore using SHA-256 content hashes.
-- Extract virtual file metadata access into MetadataStore, with clear boundaries between the namespace and file content storage.
-- Integrate monitoring into the main service to collect connection, task queue, and database pool metrics.
-- Define the Protobuf contracts and implement gRPC services and the gateway.
+- File uploads, downloads, content verification, and object storage are incomplete. Directory operations provide a working metadata flow, but not a complete file storage flow.
+- The main service does not initialize monitoring. Connection counts, worker queues, and database pool metrics are not automatically reported.
+- RPC and gateway code are placeholders; `.proto` files and the YAML example are empty. Ports, thread counts, and other settings do not yet share a unified configuration entry point.
+- Business TCP connections do not use TLS. Password hashing protects stored credentials, not transport. The client still echoes password input.
+- `mkdir` writes the string `'NULL'` to directory `object_hash`, while signup writes SQL `NULL` for the root directory; these semantics need to be unified.
+- [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) still references the old `StorageEngine::ConnectionProvider`, `find_user_by_name()`, and session fields. These cases need updating when GoogleTest is enabled. [test_ftp_server.cpp](tests/test_ftp_server.cpp) still contains a placeholder assertion.
+- Monitoring isolates some exceptions but leaves error reporting as TODO work. Uncaught worker pool exceptions can terminate the process, so the two components have different exception policies.
+- The final run hint in `scripts/build.sh` still includes the unimplemented `--config` option. Use `./bin/storage-service` as documented here.
+
+## Evolution roadmap and integration timing
+
+The following is a proposed roadmap for the current code, not a list of delivered features. The recommended order is **clarify business boundaries → introduce a small gRPC API → complete file storage → add Kafka events → split deployments when needed**.
+
+| Stage | Work | Verifiable completion criteria |
+| --- | --- | --- |
+| 1. Stabilize business boundaries | Extract protocol-independent interfaces, unify error types, repair obsolete tests and directory field semantics | Business cases can be tested without `TcpConnection`; existing commands have regression checks |
+| 2. gRPC entry point | Authentication, directory listing, and directory creation sharing TCP business logic | Both entry points enforce the same permissions and results; validate deadlines, cancellation, duplicate writes, and orderly shutdown |
+| 3. Complete file storage | MetadataStore, ObjectStore, uploads/downloads, hashes, temporary files, and recovery | Uploaded contents can be downloaded and verified; interruptions, retries, and object/metadata inconsistencies have defined handling |
+| 4. Kafka events | Transactional Outbox, publisher, and one audit or indexing consumer | Events survive broker outages and publish after recovery; duplicate consumption does not duplicate business effects |
+| 5. Operations and deployment | Integrate service monitoring and split services when independent scaling or failure isolation requires it | Backlogs, failures, and resource usage are observable; deployment and recovery procedures can be validated |
+
+Monitoring can progress alongside these stages, particularly for RPC latency, rejected tasks, database acquisition failures, outbox backlog, and consumer failures. Stages are defined by capabilities and verification, not fixed development dates.
+
+### gRPC: integrate once business interfaces are stable
+
+`AuthService` and `StorageEngine` already provide reusable foundations. Keep protocol parsing, session prompts, and connection objects in the entry layer. Business interfaces should accept identity context, directory IDs/paths, and structured requests, and return structured results.
+
+```text
+TCP command entry ─┐
+                  ├→ Shared business APIs → User repository / MetadataStore / ObjectStore
+gRPC entry ────────┘
+```
+
+The first version can serve TCP and gRPC on different ports in the same process. Keep the custom Reactor for existing clients and let gRPC use its own runtime. RPC integration does not require splitting authentication, directories, and storage into microservices at the same time, or managing gRPC sockets in the existing epoll loop.
+
+Start with `Register`, `Login`, `ListDirectory`, and `CreateDirectory`; add `GetFileInfo` after implementing its business behavior. Validate the APIs with unary RPCs, then design client-streaming uploads and server-streaming downloads around the file workflow. gRPC supports unary, client-streaming, server-streaming, and bidirectional-streaming calls; see [gRPC core concepts](https://grpc.io/docs/what-is-grpc/core-concepts/).
+
+| Design point | Recommended contract |
+| --- | --- |
+| Identity | Carry verifiable credentials on each call; derive identity and enforce resource permissions on the server. A caller-supplied user ID is not authentication |
+| Current directory | Maintain it on the client and pass a directory ID or path explicitly. `cd` can resolve and update client context |
+| Errors | Define shared business errors and map them separately for TCP and gRPC; do not return internal SQL or credentials |
+| Deadlines and cancellation | Set client deadlines explicitly; stop cancellable work cooperatively. Cancellation does not establish that a committed database write failed |
+| Idempotent writes | Define request IDs, deduplication scope, and result queries for signup, directory creation, and upload completion to prevent duplicate effects after timeout retries |
+| Execution and shutdown | Separate gRPC processing responsibilities from worker pool work. With asynchronous APIs, avoid long SQL/hash operations blocking callbacks. Stop new requests before draining work and cleaning up the runtime |
+
+gRPC has no default deadline. A timeout or cancellation also does not imply that side effects were rolled back. Preserve the existing unknown-commit-outcome distinction and validate retry behavior; see [Deadlines](https://grpc.io/docs/guides/deadlines/) and [Cancellation](https://grpc.io/docs/guides/cancellation/).
+
+gRPC need not wait until uploads and downloads are complete. Introducing stable authentication and directory APIs first lets file transfer use the same business boundaries and reduces later protocol rework.
+
+### Kafka: integrate when durable business events have real consumers
+
+Kafka fits asynchronous post-upload processing, multiple subscribers, backlog recovery, and historical event replay. The current service mainly handles directory requests and responses, so prioritize the complete storage workflow and use `FileUploaded → audit or indexing` as the first event pipeline.
+
+Candidate events include `FileUploaded`, `FileDeleted`, `DirectoryCreated`, and `UserRegistered`. These are proposed contracts, not existing topics. Start with one event and one consumer; validate reliability before adding thumbnail generation, scanning, or other processing.
+
+```text
+File durably stored; metadata ready to publish
+            ↓
+One MySQL transaction: update business metadata + insert outbox_events
+            ↓
+Background publisher reads outbox → Kafka → audit / indexing consumer
+            ↓
+Mark sent after delivery confirmation; consumer handles event_id idempotently
+```
+
+Calling `send()` once after an SQL commit leaves a window where the database is committed but the event is not sent. Write business records and event records in the same database transaction. The first publisher can poll the database; introduce CDC later if needed. Outbox event IDs support deduplication, and business entity IDs can serve as message keys; see [Debezium Outbox Event Router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html).
+
+Define the following semantics first:
+
+| Concern | Recommended handling |
+| --- | --- |
+| Message contents | Carry event ID, version, file/user IDs, object hash, size, and other metadata; transfer file contents through storage and transfer APIs |
+| File/database consistency | Complete temporary-file handling, verification, and durable object publication before committing available metadata and its event; handle orphaned objects left by failures |
+| Publishing failures | Retain pending outbox records and retry with backoff; monitor capacity and backlog during broker outages |
+| Duplicate publication | A process can exit after sending but before updating outbox state, so duplicate events must be expected |
+| Idempotent consumption | Commit consumer positions after successful processing. Database consumers should record event_id deduplication and business changes in one transaction; external effects need their own idempotency mechanism |
+| Ordering | Choose an appropriate partition key, such as file ID, and control publication order. Kafka partition ordering is not global topic ordering |
+| Failure isolation | Define retry limits, failed-event retention, and manual replay so a bad event cannot indefinitely block normal processing |
+
+Kafka transactions do not automatically include MySQL and the local filesystem in an atomic transaction. Exactly-once guarantees have a defined scope, and external writes still require coordination; see [Kafka delivery semantics](https://kafka.apache.org/43/design/design/).
+
+The existing alarm file spool provides useful persistence, retry, and recovery experience, but cannot directly make MySQL business updates and event publication atomic. Business events should use a database transactional Outbox.
+
+### Optional early experiment: monitoring events in Kafka
+
+If the immediate goal is learning messaging, the independent monitoring Collector offers an earlier integration point:
+
+```text
+Existing reliable alarm Collector
+→ Durable pending-forward records
+→ Kafka
+→ Alarm archive consumer
+```
+
+The forwarder must recover pending work from durable alarms and maintain recoverable publishing progress. A single in-memory send after the Collector returns ACK leaves an event-loss window if the process exits. Preserve the existing reliable channel while validating Kafka through a bridge, then decide whether to change node reporting.
+
+Introduce a gateway and cross-process RPC when independent deployment or scaling requires them. gRPC handles business calls that need an immediate response; Kafka distributes facts about completed business operations asynchronously. Each stage should demonstrate a benefit for a concrete use case.
 
