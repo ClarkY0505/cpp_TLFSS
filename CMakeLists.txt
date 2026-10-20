@@ -215,6 +215,10 @@ add_subdirectory(src/rpc)
 add_executable(storage-service src/main.cpp)
 add_dependencies(storage-service prepare_runtime_directories)
 
+add_executable(tlss-cli src/client_main.cpp)
+add_dependencies(tlss-cli prepare_runtime_directories)
+target_link_libraries(tlss-cli PRIVATE ftp_lib)
+
 target_link_libraries(storage-service
     common_lib
     ftp_lib

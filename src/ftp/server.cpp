@@ -255,6 +255,12 @@ bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
     return true;
   }
 
+  if (command == "help" || command == "h") {
+    conn->send("Commands : ls pwd cd mkdir update or download\r\ntlss@" + session->name + ":" +
+               session->current_directory + ">");
+    return true;
+  }
+
   std::istringstream input{std::string(command)};
   std::string cmd;
   std::string args;
@@ -447,6 +453,8 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
         session->user_id = 0;
         session->login_state = LoginState::k_signup_username;
         conn->send("New username (3-64 letters, digits or underscore):");
+      } else if (command == "help" || command == "h") {
+        conn->send("Commands : login or signup\r\ntlss>");
       } else {
         conn->send("Please enter login or signup:\r\ntlss>");
       }
