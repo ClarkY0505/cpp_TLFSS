@@ -20,6 +20,7 @@ TLSS 旨在探索网络通信、并发处理、身份验证、数据库事务以
 在完成项目构建并启动 MySQL 及 TLSS 服务器后，执行以下命令：
 
 ```bash
+./bin/storage-service
 ./bin/tlss-cli 127.0.0.1 9000
 ```
 
