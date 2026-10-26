@@ -1,6 +1,8 @@
 #ifndef __INC_FTP_CONTEXT_H__
 #define __INC_FTP_CONTEXT_H__
 
+#include "ftp/file_transfer.h"
+
 #include <cstdint>
 #include <string>
 
@@ -24,6 +26,26 @@ enum class LoginState {
   k_authenticated,
 };
 
+enum class TransferPhase {
+  idle,
+  preparing_upload,
+  receiving_upload,
+  finalizing_upload,
+  preparing_download,
+  sending_download,
+  waiting_download_ack
+};
+
+struct SessionTransfer {
+  TransferPhase phase = TransferPhase::idle;
+
+  std::string file_name;
+  std::string directory;
+  std::string parent_id;
+
+  std::shared_ptr<Transfer::Receiver> receiver;
+};
+
 struct ConnectionSession {
   // 只允许连接所属的 IO 线程读写。
   LoginState login_state = LoginState::k_await_choice;
@@ -43,6 +65,9 @@ struct ConnectionSession {
 
   std::string current_directory = "/";
   bool directory_change_pending = false;
+
+  std::uint64_t transfer_generation = 0;
+  SessionTransfer transfer;
 };
 
 struct FileInfo {

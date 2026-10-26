@@ -8,6 +8,7 @@
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
 #include "ftp/context.h"
+#include "ftp/file_transfer.h"
 #include "ftp/service_engine.h"
 
 namespace TLSS::FileStorage {
@@ -177,5 +178,110 @@ bool StorageEngine::create_dir(const std::string& username, const std::string& c
       {directory, username, id, new_dir_path});
 
   return res;
+}
+
+StorageContext<std::string> StorageEngine::prepare_upload(const std::string& username,
+                                                          const std::string& directory,
+                                                          const std::string& file_name) {
+  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
+    return {false, {}};
+  }
+
+  const std::string path = directory == "/" ? directory + file_name : directory + "/" + file_name;
+  if (path.size() > 1024) {
+    return {false, {}};
+  }
+
+  auto db = _db_conn_pool.get_connection();
+  if (!db) {
+    return {false, {}};
+  }
+
+  //
+  // 找到指定用户的指定父目录
+  // 并且确认该目录下还没有同名的文件或目录
+  // 满足条件时，返回父目录的 id
+  auto result = db->query_prepared(
+      "SELECT p.id FROM virtual_files p "
+      "WHERE p.username = ? AND p.path = ? "
+      "AND p.file_type = 'directory' "
+      "AND NOT EXISTS ("
+      " SELECT 1 FROM virtual_files f "
+      " WHERE f.username = p.username "
+      " AND f.parent_id = p.id AND f.file_name = ?"
+      ") LIMIT 1",
+      {username, directory, file_name});
+
+  if (!result.success || result.rows.size() != 1 || result.rows[0].size() != 1 ||
+      !result.rows[0][0]) {
+    return {false, {}};
+  }
+  return {true, *result.rows[0][0]};
+}
+
+bool StorageEngine::commit_upload(const std::string& username, const std::string& parent_id,
+                                  const std::string& directory, const std::string& file_name,
+                                  const std::string& hash) {
+  if (!Transfer::valid_name(file_name) || !Transfer::valid_hash(hash)) {
+    return false;
+  }
+
+  const std::string path = directory == "/" ? directory + file_name : directory + "/" + file_name;
+  if (path.size() > 1024) {
+    return false;
+  }
+
+  auto db = _db_conn_pool.get_connection();
+  if (!db) {
+    return false;
+  }
+
+  // 再次验证父目录属于当前用户
+  // 唯一索引负责拦截并发同名上传
+  // 先查询父目录，再利用查询结果插入一条文件记录
+  // 父目录满足条件才会插入
+  const auto result = db->execute_prepared(
+      "INSERT INTO virtual_files "
+      "(file_name, username, parent_id, path, "
+      " file_type, object_hash) "
+      "SELECT ?, p.username, p.id, ?, 'file', ? "
+      "FROM virtual_files p "
+      "WHERE p.id = ? AND p.username = ? "
+      "AND p.path = ? AND p.file_type = 'directory'",
+      {file_name, path, hash, parent_id, username, directory});
+
+  return result.success && result.affected_rows == 1;
+}
+
+StorageContext<std::string> StorageEngine::find_download_hash(const std::string& username,
+                                                              const std::string& directory,
+                                                              const std::string& file_name) {
+  if (!Transfer::valid_name(file_name)) {
+    return {false, {}};
+  }
+
+  auto db = _db_conn_pool.get_connection();
+  if (!db) {
+    return {false, {}};
+  }
+
+  auto result = db->query_prepared(
+      "SELECT f.object_hash "
+      "FROM virtual_files f "
+      "JOIN virtual_files p "
+      "ON p.id = f.parent_id "
+      "AND p.username = f.username "
+      "WHERE f.username = ? AND p.path = ? "
+      "AND p.file_type = 'directory' "
+      "AND f.file_name = ? AND f.file_type = 'file' "
+      "LIMIT 1",
+      {username, directory, file_name});
+
+  if (!result.success || result.rows.size() != 1 || result.rows[0].size() != 1 ||
+      !result.rows[0][0] || !Transfer::valid_hash(*result.rows[0][0])) {
+    return {false, {}};
+  }
+
+  return {true, *result.rows[0][0]};
 }
 }  // namespace TLSS::FileStorage

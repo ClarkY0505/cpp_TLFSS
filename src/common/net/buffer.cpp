@@ -67,8 +67,8 @@ void Buffer::make_space(size_t len) {
 
 void Buffer::append(const char* data, size_t len) {
   ensure_writeable_bytes(len);
-  std::copy(data, data + len, begin_write());
-  /* TLSS::MEMORY::memcpy(begin_write(), data, len); */
+  /* std::copy(data, data + len, begin_write()); */
+  TLSS::MEMORY::memcpy(begin_write(), data, len);
   has_written(len);
 }
 

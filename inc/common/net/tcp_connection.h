@@ -6,11 +6,17 @@
 #include "common/net/callbacks.h"
 #include "common/net/inet_address.h"
 #include "common/net/timestamp.h"
+#include "monitor/monitor_wire.h"
 
 #include <netinet/in.h>
+#include <sys/types.h>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <system_error>
 namespace TLSS::NET {
 class Channel;
 class EventLoop;
@@ -22,6 +28,7 @@ class Socket;
  * */
 class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection> {
  public:
+  using FileSendCallback = std::function<void(std::error_code error, uint64_t bytes_sent)>;
   TcpConnection(EventLoop* loop, const std::string& name, int sockfd, const InetAddress& local_addr,
                 const InetAddress& peer_addr);
   ~TcpConnection();
@@ -51,6 +58,15 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   // 可能存在buf.c_str()在执行回调前失效
   /* void send(const std::string& buf); */
   void send(std::string message);
+
+  //
+  // fd 必须对应可读的普通文件
+  //
+  // 内部同步复制 fd，函数返回后，调用方即可关闭原
+  // 使用显式 offset，不改变原 fd 的当前文件偏移量
+  //
+  // 本函数返回不代表发送完成，以 callback 为准
+  void send_file(int fd, off_t offset, uint64_t count, FileSendCallback cb = {});
   void shutdow();
 
   void set_connection_cb(const ConnectionCb& cb) {
@@ -85,8 +101,38 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
  private:
   enum StateE { k_disconnected, k_connecting, k_connected, k_disconnecting };
+  struct FileHandle {
+    explicit FileHandle(int value = -1)
+        : fd(value) {}
+    ~FileHandle();
+
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+
+    int fd;
+  };
+  struct PendingWrite{
+      enum class Kind{
+          memory,
+          file
+      };
+
+      Kind kind = Kind::memory;
+
+      // 普通数据任务
+      std::string data;
+      std::size_t data_offset = 0;
+
+      // 文件任务。
+    // shared_ptr 使任务可被 std::function 捕获。
+    std::shared_ptr<FileHandle> file;
+    off_t file_offset = 0;
+    uint64_t remaining = 0;
+    uint64_t file_sent = 0;
+    FileSendCallback cb;
+  };
   void set_state(StateE s) {
-    _state = s;
+    _state.store(s);
   }
 
   void handle_read(TIME::Timestamp receive_time);
@@ -96,6 +142,15 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   std::string state_to_string() const;
 
   void send_in_loop(const void* data, size_t len);
+  void send_file_in_loop(PendingWrite task, int prepare_error);
+
+  void enable_write_event();
+  void complete_front();
+  void cancel_pending(int error);
+  void fail_writes(int error);
+
+  void notify_file(PendingWrite task, int error);
+
   void shutdown_in_loop();
   // 这里的loop不是 baseloop
   // TcpConnection在subloop中管理
@@ -120,7 +175,13 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   size_t _high_water_mark;
 
   Buffer _input_buffer;
-  Buffer _output_buffer;
+  std::deque<PendingWrite> _writes;
+  /* Buffer _output_buffer; */
+
+  // 统计仍由内存任务持有的数据，包括已发送但尚未释放的前缀。
+  // 文件内容不计入该值。
+  std::size_t _pending_memory_bytes = 0;
+  std::size_t _pending_files = 0;
 };
 }  // namespace TLSS::NET
 

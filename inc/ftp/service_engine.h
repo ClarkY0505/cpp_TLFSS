@@ -18,6 +18,18 @@ class StorageEngine {
   bool create_dir(const std::string& username, const std::string& current_directory,
                   const std::string& directory);
 
+  StorageContext<std::string> prepare_upload(const std::string& username,
+                                             const std::string& directory,
+                                             const std::string& file_name);
+
+  bool commit_upload(const std::string& username, const std::string& parent_id,
+                     const std::string& directory, const std::string& file_name,
+                     const std::string& hash);
+
+  StorageContext<std::string> find_download_hash(const std::string& username,
+                                                 const std::string& directory,
+                                                 const std::string& file_name);
+
  private:
   BASE::DbConnectionPool& _db_conn_pool;
 };

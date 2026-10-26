@@ -48,8 +48,19 @@ class StorageService {
                      AUTH::SignupResult result);
 
   void handle_file_query();
-  void handle_upload();
-  void handle_download();
+  void handle_upload(const NET::TcpConnectionPtr& conn,
+                     const std::shared_ptr<ConnectionSession>& session, const std::string& args);
+
+  void handle_download(const NET::TcpConnectionPtr& conn,
+                       const std::shared_ptr<ConnectionSession>& session, const std::string& args);
+  void finish_upload(const NET::TcpConnectionPtr& conn,
+                     const std::shared_ptr<ConnectionSession>& session);
+  void handle_transfer_control(const NET::TcpConnectionPtr& conn,
+                               const std::shared_ptr<ConnectionSession>& session,
+                               const std::string& line);
+  void transfer_failed(const NET::TcpConnectionPtr& conn,
+                       const std::shared_ptr<ConnectionSession>& session, const std::string& error);
+
   void handle_cd(const NET::TcpConnectionPtr& conn,
                  const std::shared_ptr<ConnectionSession>& session, const std::string& directory);
   void move_file_by_cur_dir(const std::string& username, const std::string& current_directory,

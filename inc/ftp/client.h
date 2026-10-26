@@ -3,6 +3,7 @@
 
 #include "common/net/channel.h"
 #include "common/net/tcp_client.h"
+#include "ftp/file_transfer.h"
 
 #include <signal.h>
 #include <memory>
@@ -20,14 +21,28 @@ class Client {
   void start();
 
  private:
+  enum class FileTransferState {
+    idle,
+    waiting_upload_ready,
+    waiting_upload_result,
+    waiting_download_header,
+    receiving_download,
+    waiting_download_done,
+    waiting_download_ok
+  };
+
   void on_connection(const NET::TcpConnectionPtr& conn);
-  void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer, TIME::Timestamp);
+  void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer, TIME::Timestamp timestamp);
   void on_input();
   void on_signal();
   void on_timeout();
   void handle_command(std::string command);
   void request_exit();
   void finish_exit();
+  void upload(const std::string& args);
+  void download(const std::string& args);
+  void handle_transfer_response(const NET::TcpConnectionPtr& conn, const std::string& line);
+  void reset_transfer();
 
   NET::EventLoop* _loop;
   NET::TcpClient _client;
@@ -44,6 +59,16 @@ class Client {
   bool _finishing{false};
   bool _drop_line{false};
   std::string _input;
+
+  bool _authenticated = false;
+
+  FileTransferState _transfer_state = FileTransferState::idle;
+
+  std::shared_ptr<Transfer::SourceFile> _upload_source;
+  std::shared_ptr<Transfer::Receiver> _download_receiver;
+
+  std::filesystem::path _download_destination;
+  std::string _download_hash;
 };
 
 }  // namespace TLSS::FileStorage
