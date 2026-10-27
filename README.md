@@ -1,74 +1,89 @@
 <p align="right">潮水成诗，破碎生长</p>
 
 
-# TLSS — 基于 C++17 Reactor 模式的存储服务
+# TLSS — Toy-Level File Storage Service
 
-**简体中文** | [English](README.en.md)
+[简体中文](README.cn.md) | **English**
 
-**这是一个以学习为导向的 C++17/Linux 文件存储服务，基于自定义的 epoll Reactor 模式及异步网络库构建。**
+**A toy-level file storage service built from the ground up with C++17 on Linux.**
 
-TLSS 旨在探索网络通信、并发处理、身份验证、数据库事务以及虚拟文件系统元数据如何在单节点存储服务中协同工作。
+TLSS (Toy-Level File Storage Service) is my long-term personal open-source project for exploring Linux systems programming, networking, concurrency models, and storage system design.
 
-**已实现功能：** epoll Reactor、异步 TCP 客户端 (`tlss-cli`)、有界线程池、MySQL 连接池、基于 PBKDF2 的密码哈希、用户注册/登录、虚拟目录操作（`mkdir`、`cd`、`ls`、`pwd`）以及优雅停机（graceful shutdown）。
+Built on a custom epoll Reactor networking framework, the project has gradually grown to include a thread pool, a MySQL connection pool, user authentication, a virtual filesystem, SHA-256 content-addressed storage, and asynchronous file uploads and downloads.
 
-**独立子系统：** 监控与可靠告警机制、基于 AVX2/REP MOVSB 指令优化的内存拷贝功能。
+By building foundational components rather than simply assembling established frameworks, TLSS explores how a storage service is built, runs, handles errors, and becomes more reliable through continued iteration.
 
-**开发中功能：** 文件上传/下载、基于内容寻址的对象存储、gRPC 接口以及分布式存储。
+TLSS now provides basic single-node file storage. Ongoing work focuses on asynchronous disk IO, backpressure, resource lifecycles, testing and validation, and failure recovery.
 
-### 快速入门
+**Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), file upload/download, SHA-256 content-addressed object storage, asynchronous disk IO, and graceful shutdown.
 
-在完成项目构建并启动 MySQL 及 TLSS 服务器后，执行以下命令：
+**Independent subsystems:** monitoring and reliable alarm delivery, optimized AVX2/REP MOVSB memory copy.
+
+**Next steps:** object/metadata consistency recovery, object reclamation, main-service monitoring, gRPC interfaces, and distributed storage.
+
+### Quick Start
+
+After installing dependencies, initializing the database, and building the project as described below, start the server and client in separate terminals:
 
 ```bash
 ./bin/storage-service
 ./bin/tlss-cli 127.0.0.1 9000
 ```
 
-请参阅下方的构建说明、架构设计及实现笔记。
+### Project scope
 
-## 导航
+TLSS is an actively developed single-node storage system prototype intended for technical learning, architectural exploration, and open-source discussion.
 
-- [功能与实现状态](#功能与实现状态)
-- [当前交互](#当前交互)
-- [架构与执行模型](#架构与执行模型)
-- [模块实现](#模块实现)
-- [网络服务生命周期与线程约束](#网络服务生命周期与线程约束)
-- [代码结构](#代码结构)
-- [构建与运行](#构建与运行)
-- [测试与开发入口](#测试与开发入口)
-- [当前限制与待收尾事项](#当前限制与待收尾事项)
-- [演进路线与接入时机](#演进路线与接入时机)
+It is not yet suitable for production use or for storing important data. Work continues on reliability, testability, and file lifecycle management.
 
-## 功能与实现状态
+See the build instructions, architecture, and implementation notes below.
 
-- **epoll Reactor networking** — 自行实现事件循环、连接管理与读写缓冲。
-- **one-loop-per-thread** — 每个 IO 线程运行独立的 EventLoop，连接按轮询分配。
-- **bounded worker pool** — 有界任务队列、非阻塞提交与异步排队超时。
-- **MySQL connection pool** — 连接复用、预处理语句与 RAII 事务。
-- **virtual filesystem namespace** — 用户根目录与 `mkdir / cd / ls / pwd` 命令。
-- **content-addressed object storage** — **planned**；以 SHA-256 标识文件内容，表结构已预留 `object_hash`。
-- **graceful shutdown** — 响应 `SIGINT / SIGTERM`，排空任务并回收连接与线程。
-- **monitoring subsystem** — 独立的指标存储、策略、CLI、UDP 指标与可靠 TCP 告警。
-- **interactive client** — `tlss-cli`，支持异步连接、终端输入和有序退出。
-- **memory copy library** — AVX2、REP MOVSB、非临时写入（NT）与运行时并行拷贝选择。
+## Contents
 
-| 部分 | 当前能力 | 主服务集成状态 |
+- [Features and implementation status](#features-and-implementation-status)
+- [Current interaction](#current-interaction)
+- [Architecture and execution model](#architecture-and-execution-model)
+- [Module implementation](#module-implementation)
+- [File transfer and asynchronous disk work](#file-transfer-and-asynchronous-disk-work)
+- [Network service lifecycle and threading requirements](#network-service-lifecycle-and-threading-requirements)
+- [Code layout](#code-layout)
+- [Build and run](#build-and-run)
+- [Tests and where to start reading](#tests-and-where-to-start-reading)
+- [Current limitations and remaining work](#current-limitations-and-remaining-work)
+- [Evolution roadmap and integration timing](#evolution-roadmap-and-integration-timing)
+- [Why "Toy-Level"?](#about-tlss)
+
+## Features and implementation status
+
+- **epoll Reactor networking** — Custom event loop, connection management, and read/write buffers.
+- **one-loop-per-thread** — Each IO thread runs its own EventLoop; connections are assigned in round-robin order.
+- **bounded worker pool** — Bounded task queues, nonblocking submission, and asynchronous queue wait timeouts.
+- **MySQL connection pool** — Connection reuse, prepared statements, and RAII transactions.
+- **virtual filesystem namespace** — Per-user root directories and `mkdir / cd / ls / pwd` commands.
+- **content-addressed object storage** — Local objects identified by SHA-256 and referenced by virtual files through `object_hash`; identical contents reuse an object.
+- **asynchronous file transfer** — Uploads/downloads use a dedicated disk pool, chunked IO, temporary files, persistence, and transfer acknowledgments.
+- **graceful shutdown** — Handles `SIGINT / SIGTERM`, drains tasks, and releases connections and threads.
+- **monitoring subsystem** — Independent metric storage, policies, CLI, UDP metrics, and reliable TCP alarms.
+- **interactive client** — `tlss-cli`, with asynchronous connections, terminal input, and orderly shutdown.
+- **memory copy library** — AVX2, REP MOVSB, non-temporal stores (NT), and runtime selection of parallel copying.
+
+| Component | Current capability | Main service integration |
 | --- | --- | --- |
-| 网络库 | epoll Reactor、连接缓冲、IO 线程池、异步 TCP 客户端 | 已使用 |
-| 业务线程池 | 有界执行队列、非阻塞提交、异步排队超时 | 已使用 |
-| MySQL | 连接池、预处理语句、RAII 事务 | 已使用 |
-| 认证 | 注册、密码校验、用户与根目录事务创建 | 已使用 |
-| 虚拟目录 | `mkdir / cd / ls / pwd` | 已使用 |
-| 客户端 | `tlss-cli <IPv4> <port>` | 独立可执行程序 |
-| 监控 | 指标、策略、CLI、UDP、可靠 TCP 告警 | 库已链接，通过独立 demo 运行；主入口未启动 |
-| 内存拷贝 | `TLSS::MEMORY::memcpy` 动态库 | 已链接；网络 `Buffer::append()` 仍使用 `std::copy` |
-| 文件内容 | `object_hash` 字段已预留 | 上传、下载与对象落盘未实现 |
-| RPC、网关 | 构建目标和代码骨架 | 无业务服务实现，四份 `.proto` 为空 |
-| Kafka | 事件与消费者方案 | 规划中，尚无生产者、消费者或部署配置 |
+| Networking | epoll Reactor, connection buffers, IO thread pool, asynchronous TCP client | In use |
+| Worker pool | Bounded execution queue, nonblocking submission, asynchronous queue wait timeouts | In use |
+| MySQL | Connection pool, prepared statements, RAII transactions | In use |
+| Authentication | Signup, password verification, transactional user and root directory creation | In use |
+| Virtual directories | `mkdir / cd / ls / pwd` | In use |
+| Client | `tlss-cli <IPv4> <port>` with interactive commands and file upload/download | Standalone executable |
+| Monitoring | Metrics, policies, CLI, UDP, reliable TCP alarms | Library linked; runs through standalone demos, not started by the main entry point |
+| Memory copy | `TLSS::MEMORY::memcpy` shared library | Called by networking `Buffer::append()` with the Default hint |
+| File contents | SHA-256 objects, upload/download, temporary file publication, asynchronous disk IO | In use; object reclamation and crash consistency repair remain unimplemented |
+| RPC and gateway | Build targets and code skeletons | No business services; all four `.proto` files are empty |
+| Kafka | Event and consumer design | Planned; no producer, consumer, or deployment configuration yet |
 
-## 当前交互
+## Current interaction
 
-先按[构建与运行](#构建与运行)准备数据库并启动服务，再在另一个交互终端中执行 `./bin/tlss-cli 127.0.0.1 9000`。下面展示已注册用户的目录操作，省略连接提示；`documents` 假定尚不存在，`<password>` 代表实际密码。
+Prepare the database and start the service as described in [Build and run](#build-and-run), then run `./bin/tlss-cli 127.0.0.1 9000` in another interactive terminal. The following shows directory operations for a registered user, omitting connection notices. It assumes `documents` does not yet exist; `<password>` represents the actual password.
 
 ```text
 $ ./bin/tlss-cli 127.0.0.1 9000
@@ -86,255 +101,296 @@ tlss@alice:/documents>cd ..
 tlss@alice:/>quit
 ```
 
-首次使用时选择 `signup`，依次输入用户名、密码和确认密码；注册成功后重新选择 `login`。客户端当前没有密码输入隐藏功能，服务连接也尚未接入 TLS。上传、下载命令虽然能被服务端识别，但处理分支尚未实现，不属于可用交互。
+On first use, choose `signup` and enter a username, password, and password confirmation. After registration succeeds, choose `login` again. The client does not currently hide password input, and the service connection does not use TLS.
 
-## 架构与执行模型
+After login, transfer files using the following commands inside `tlss-cli`, not in the shell:
+
+```text
+upload <local-file-path> [remote-filename]
+download <remote-filename> [local-destination-path]
+```
+
+For example, start the client from the repository root, enter the remote `documents` directory, and issue these commands one at a time, waiting for each operation to finish:
+
+```text
+upload "./README.md" "readme-copy.md"
+download "readme-copy.md" "./readme-downloaded.md"
+```
+
+An upload defaults to the local basename if the remote name is omitted. A download defaults to the client working directory if the destination is omitted. Use double quotes for arguments containing spaces. A remote filename is a single name in the current virtual directory. Uploads do not replace existing nodes, downloads do not overwrite local files, and the local parent directory must exist. Each connection allows one transfer at a time; `exit / q / quit` during a transfer cancels it and disconnects.
+
+## Architecture and execution model
 
 ```mermaid
 flowchart TD
-    Client[tlss-cli / nc] --> Acceptor[主 EventLoop / Acceptor]
+    Client[tlss-cli / nc] --> Acceptor[Main EventLoop / Acceptor]
     Acceptor --> Connection[IO EventLoop / TcpConnection]
     Connection --> Service[StorageService]
     Service --> Workers[ThreadPool]
     Service --> Session["Session (ConnectionSession)"]
     Workers --> Engine[StorageEngine]
     Workers --> Auth[AuthService / UserRepository]
+    Service --> Disk[DiskExecutor / disk pool]
+    Disk --> Transfer[AsyncReceiver / AsyncFileSource]
+    Transfer --> Filesystem[Local SHA-256 object files]
+    Transfer --> Engine
     Engine --> Pool[DbConnectionPool]
     Auth --> Pool
     Pool --> MySQL[MySQL]
-    Engine -.-> Metadata["MetadataStore (planned extraction)"]
-    Engine -.-> Objects["ObjectStore (planned)"]
-    Metadata -.-> MySQL
-    Objects -.-> Filesystem[local filesystem]
-
-    classDef planned fill:#f5f5f5,stroke:#888,stroke-dasharray:5 5
-    class Metadata,Objects,Filesystem planned
 ```
 
-图中实线表示当前实现，虚线表示规划中的存储边界。当前 `StorageEngine` 通过 `DbConnectionPool` 直接读写 MySQL 中的虚拟目录元数据；后续将元数据访问抽取为 `MetadataStore`，由 `ObjectStore` 管理本地文件内容。
+The diagram shows the current implementation. `StorageEngine` reads and writes directory and file metadata in MySQL through `DbConnectionPool`. `AsyncReceiver / AsyncFileSource` handle local files through `DiskExecutor`. `MetadataStore / ObjectStore` remain possible future abstractions, not implemented classes.
 
-网络层负责连接与消息回调，`StorageService` 解析命令并维护会话。每个连接的 `ConnectionSession` 保存认证状态、用户身份与当前目录，由所属 IO 线程读写。数据库操作和密码计算派发到业务线程池；认证结果与目录切换结果通过 `queue_in_loop` 返回连接所属的 EventLoop。
+The networking layer handles connections and message callbacks. `StorageService` parses commands and maintains sessions. Each connection's `ConnectionSession` stores its authentication state, user identity, current directory, and transfer state, and is accessed by its owning IO thread. Authentication, directory operations, and upload preflight checks run in the business pool. File IO, download lookups, and final upload metadata insertion run in disk tasks. Authentication, directory change, and transfer results return to the connection's EventLoop through `queue_in_loop`.
 
-默认配置为 4 个 IO 线程、8 个业务线程、256 个执行队列槽位和 128 个异步等待队列槽位。目录操作通过 `try_run` 提交，队列已满时返回忙碌提示；登录与注册通过 `submit_async` 提交，排队等待期限为 2 秒。
+Server defaults are 4 IO threads, 8 business worker threads, 256 business execution queue slots, and 128 asynchronous wait queue slots. A separate disk pool uses 2 threads by default. Directory operations use `try_run` and report a busy server when the queue is full. Login and signup use `submit_async` with a 2-second queue wait deadline.
 
-主线程之外还存在信号控制线程、业务池的超时管理线程，以及数据库连接生产与空闲扫描线程。2 秒只限制认证任务等待进入执行队列的时间，不中断已开始执行的 SQL 或密码计算。
+Additional threads include the signal control thread, the worker pool's deadline management thread, and the database connection producer and idle scanner. The 2-second deadline only limits how long authentication tasks wait to enter the execution queue; it does not interrupt SQL or password computation that has already started.
 
-停机时先停止接受连接并暂停读取，再排空业务任务，半关闭现有连接；连接等待超时后强制清理。随后回收 IO 线程和数据库连接池，退出主事件循环，最后关闭日志系统。
+Shutdown first stops accepting connections and pauses reads, then drains business tasks, cancels and waits for disk work to finish, and shuts down the write side of existing connections. Connections are forcibly closed if the connection grace period expires. The service then joins IO threads, shuts down the database pool, and exits the main event loop. Logging shuts down last.
 
-## 模块实现
+## Module implementation
 
-### 网络库与命令协议
+### Networking library and command protocol
 
-实现位于 [common/net](src/common/net/)，头文件位于 [inc/common/net](inc/common/net/)。
+Implementations are in [common/net](src/common/net/), with headers in [inc/common/net](inc/common/net/).
 
-| 类型 | 职责 |
+| Type | Responsibility |
 | --- | --- |
-| `EventLoop` | 等待 IO 事件、分发 Channel、执行待处理回调 |
-| `Poller / EPollPoller` | epoll 事件等待与注册管理 |
-| `Channel` | fd 关注事件、回调及生命周期关联 |
-| `Acceptor / TcpServer` | 接受连接、维护连接表、轮询分配 IO loop |
-| `TcpConnection` | 连接状态、输入输出缓冲、背压、半关闭和强制关闭 |
-| `EventLoopThreadPool` | one-loop-per-thread 的 IO 线程管理 |
-| `Connector / TcpClient` | 非阻塞建连、失败重试与客户端连接管理 |
+| `EventLoop` | Wait for IO events, dispatch Channels, and execute pending callbacks |
+| `Poller / EPollPoller` | epoll event waiting and registration management |
+| `Channel` | File descriptor event interests, callbacks, and lifetime association |
+| `Acceptor / TcpServer` | Accept connections, maintain the connection map, and assign IO loops in round-robin order |
+| `TcpConnection` | Connection state, input/output buffers, backpressure, half-close, and forced closure |
+| `EventLoopThreadPool` | Manage IO threads using one loop per thread |
+| `Connector / TcpClient` | Nonblocking connection setup, retries, and client connection management |
 
-跨线程调用通过 `queue_in_loop()` 入队，并用 `eventfd` 唤醒目标 loop；`run_in_loop()` 在所属线程直接执行，否则排队。跨线程发送持有消息内容和连接引用，避免回调执行前数据失效；`Channel::tie()` 与延迟清理用于协调事件分发和对象销毁。
+Cross-thread calls use `queue_in_loop()` and wake the target loop through `eventfd`. `run_in_loop()` executes immediately on the owning thread and queues work otherwise. Cross-thread sends retain the message contents and a connection reference until execution. `Channel::tie()` and deferred cleanup coordinate object destruction with event dispatch.
 
-`Buffer::read_fd()` 使用 `readv`，组合内部可写区和 64 KiB 栈缓冲。服务为连接设置 256 KiB 输出高水位，达到水位后暂停读取，写缓冲排空后恢复；连接待发送缓冲另有 1 MiB 上限。这些措施不能替代所有上游任务队列的容量控制。
+`Buffer::read_fd()` uses `readv` with its internal writable region and a 64 KiB stack buffer. The service configures a 256 KiB output high-water mark: reaching it pauses reads, which resume after the output buffer drains. Connections also have a 1 MiB pending memory limit, including reservations for asynchronous file chunks, rather than buffering entire files. These mechanisms do not replace capacity limits on all upstream task queues.
 
-[StorageService::on_message()](src/ftp/server.cpp) 按 `\n` 拆行，兼容 `\r\n`，保留未收齐的命令并循环处理多条完整命令。单条命令最多 4096 字节，超过限制关闭连接。
+[StorageService::on_message()](src/ftp/server.cpp) splits control input on `\n`, accepts `\r\n`, retains incomplete commands, and processes complete commands in a loop. A control command may contain at most 4096 bytes; exceeding the limit closes the connection. Upload bodies are consumed by their declared length, not split on newlines. The `ftp/` module implements a custom TCP storage protocol, not standard FTP.
 
-### 会话、注册与登录
+### Sessions, signup, and login
 
-[ConnectionSession](inc/ftp/context.h) 保存登录状态、交互中的用户名和密码、认证尝试编号、已认证身份、当前目录及目录切换标志。会话内容只由所属 IO 线程读写；会话索引表另由互斥锁保护。
+[ConnectionSession](inc/ftp/context.h) stores login state, temporary username and password input, an authentication attempt number, authenticated identity, the current directory, a directory change flag, a transfer phase, and a transfer generation. Only the owning IO thread accesses session contents; a separate mutex protects the session index.
 
 ```text
-登录：
-login → 用户名 → 密码 → verifying
-      → 业务线程查询有效用户并校验密码
-      → IO loop 检查连接、原会话、auth_attempt
-      → 写入身份，当前目录设为 /
+Login:
+login → username → password → verifying
+      → worker queries the active user and verifies the password
+      → IO loop checks the connection, original session, and auth_attempt
+      → publish identity and set the current directory to /
 
-注册：
-signup → 用户名 → 密码 → 确认密码 → registering
-       → 业务线程先计算密码哈希
-       → 同一数据库事务插入用户和根目录
-       → 返回结果，要求重新登录
+Signup:
+signup → username → password → confirmation → registering
+       → worker computes the password hash first
+       → insert the user and root directory in one database transaction
+       → return the result and require a separate login
 ```
 
-[AuthService](src/auth/auth_service.cpp) 负责输入校验、用户名规范化和结果映射，[MySqlUserRepository](src/auth/user_repository.cpp) 负责用户数据访问。注册用户名为 3–64 个 ASCII 字母、数字或下划线，存储前转换为小写；密码为 8–128 字节，不裁剪空格，拒绝控制字符。
+[AuthService](src/auth/auth_service.cpp) handles validation, username normalization, and result mapping. [MySqlUserRepository](src/auth/user_repository.cpp) handles user data access. Signup usernames contain 3–64 ASCII letters, digits, or underscores and are converted to lowercase before storage. Passwords contain 8–128 bytes; spaces are preserved and control characters are rejected.
 
-[PasswordHasher](src/auth/password_hasher.cpp) 使用 16 字节随机盐、600000 次 PBKDF2-HMAC-SHA256 迭代、32 字节派生结果，以及带版本和迭代次数的编码格式；校验通过 `CRYPTO_memcmp` 比较。哈希计算先于注册事务借用数据库连接，减少连接占用时间。
+[PasswordHasher](src/auth/password_hasher.cpp) uses a 16-byte random salt, 600000 PBKDF2-HMAC-SHA256 iterations, a 32-byte derived key, and an encoding that includes the version and iteration count. Verification compares results using `CRYPTO_memcmp`. Signup computes the hash before borrowing a database connection for the transaction, reducing connection occupancy.
 
-并发注册由数据库用户名唯一索引裁决。提交确认丢失时返回“结果未知”，提示先尝试登录；不自动重试注册。认证完成回调使用弱引用、会话匹配和 `auth_attempt` 检查，避免过期结果覆盖当前状态。
+The database username unique index resolves concurrent signup attempts. If commit confirmation is lost, the service returns an unknown outcome and suggests trying login first; it does not automatically retry signup. Authentication completion callbacks check weak references, session identity, and `auth_attempt` so stale results cannot overwrite current state.
 
-### 虚拟目录与存储边界
+### Virtual directories and storage boundaries
 
-[建表脚本](sql/init_tlss_db.sql) 定义 `users` 和 `virtual_files`。后者通过 `username` 区分用户，使用 `parent_id` 表示父子关系，并保存 `path`、`file_type`、`object_hash` 和时间戳。根目录为 `parent_id = -1`、`file_name = '/'`、`path = '/'`；唯一索引限制同一用户、同一父目录下的重名节点。
+The [schema script](sql/init_tlss_db.sql) defines `users` and `virtual_files`. The latter separates users by `username`, represents parent-child relationships with `parent_id`, and stores `path`, `file_type`, `object_hash`, and timestamps. A root directory uses `parent_id = -1`, `file_name = '/'`, and `path = '/'`. A unique index prevents duplicate names under the same parent for the same user.
 
-| 命令 | 当前执行方式 |
+| Command | Current execution |
 | --- | --- |
-| `pwd` | 直接读取会话中的当前目录 |
-| `ls` | 查询当前目录 ID，再列出子节点的名称、类型和创建/更新时间 |
-| `cd <子目录>` | 父子节点 JOIN，限定用户、父路径和目录类型 |
-| `cd ..` | 查询父目录；根目录保持 `/` |
-| `mkdir <名称>` | 查询父节点、拼接路径并插入目录记录 |
-| `upload / download` | 命令已识别，处理调用仍被注释 |
+| `pwd` | Read the current directory directly from the session |
+| `ls` | Look up the current directory ID, then list child names, types, and creation/update timestamps |
+| `cd <child>` | Join parent and child nodes, filtering by user, parent path, and directory type |
+| `cd ..` | Look up the parent; remain at `/` when already at the root |
+| `mkdir <name>` | Look up the parent, construct the path, and insert a directory record |
+| `upload / download` | Check the directory and duplicate names before uploading; insert file metadata after object publication; look up download hashes by user, current directory, and filename |
 
-[StorageEngine](src/ftp/service_engine.cpp) 当前直接执行预处理 SQL。`cd` 支持直接子目录与父目录，尚未实现通用绝对/相对路径解析。目录切换期间 `directory_change_pending` 阻止后续目录命令继续执行；其他异步命令没有完整的逐连接串行执行队列，不能假定所有响应严格按输入顺序返回。
+[StorageEngine](src/ftp/service_engine.cpp) currently executes prepared SQL directly. `cd` supports direct children and the parent directory, without a general absolute/relative path parser. While a directory change is pending, `directory_change_pending` blocks subsequent directory commands. Other asynchronous commands do not have a complete per-connection serial execution queue, so responses must not be assumed to follow input order strictly.
 
-`object_hash` 是内容寻址存储的预留字段。文件字节传输、哈希校验、临时文件、原子发布、对象回收和元数据一致性仍需实现。后续计划将元数据访问抽取为 `MetadataStore`，将内容落盘封装为 `ObjectStore`。
+Directory records use SQL `NULL` for `object_hash`; file records store a SHA-256 hash. Object files are independent of the user directory tree, and multiple virtual file records can reference identical contents. Metadata access and content persistence may later be extracted into `MetadataStore` and `ObjectStore`.
 
-### 业务线程池与数据库资源
+### File transfer and asynchronous disk work
 
-[ThreadPool](inc/common/base/tlss_thread_pool.h) 提供三种任务提交方式：
+[Transfer utilities](inc/ftp/file_transfer.h) provide file handles, temporary files, and SHA-256. [AsyncReceiver](src/ftp/async_file_receiver.cpp) handles asynchronous reception and publication; [AsyncFileSource](src/ftp/async_file_source.cpp) handles asynchronous opening and reading. The server and client each own a separate `DiskExecutor`, with 2 threads by default and at most 64 attached active file sources/receivers per executor.
 
-| 接口 | 队列满时 | 当前使用 |
+```text
+Upload:
+Client → @TLSS UPLOAD <size> "<name>"
+Server → check directory and duplicate names → initialize temporary file → UREADY
+Client → exactly size bytes of body
+Server → write and compute SHA-256 → sync and publish object → insert metadata → UOK <hash>
+
+Download:
+Client → @TLSS DOWNLOAD "<name>"
+Server → look up and open object → DATA <size> <hash> → body → DONE
+Client → write temporary file → verify SHA-256 → sync and publish local file → @TLSS ACK
+Server → OK
+```
+
+Server control responses use the `\n@TLSS ` prefix. The client parses them and displays transfer results. `UOK` confirms upload completion. For downloads, the client sends `ACK` only after the local file has been fully written, verified, synchronized, and published, then displays completion on `OK`. A low-level send callback only reports bytes submitted to the socket, not peer persistence.
+
+Receivers hand off at most 64 KiB at a time and pause reads with an independent token until disk results return to the owning IO loop. Senders use `send_file_async()` with asynchronous `pread` chunks of at most 64 KiB, sharing a FIFO output queue with control text. `EPOLLOUT` is disabled while waiting for disk data to avoid spinning. File opening, IO, verification, synchronization, and closure run on disk workers; results return through `queue_in_loop()`. The low-level direct `sendfile` API remains available, but current business file transfers use asynchronous chunks.
+
+Uploads first write a `.tlss-part-*` temporary file, synchronize it, publish a hash-named object through a hard link on the same filesystem, remove the temporary path, and synchronize the directory. An existing object is reused only if its size and hash match. MySQL metadata is inserted after publication, followed by `UOK`. If metadata insertion fails, the object is retained because other files may share it. The filesystem and MySQL therefore do not form one atomic transaction; orphan reclamation and repair after process crashes remain unimplemented.
+
+Disconnection cancels file work and leaves cleanup to disk workers. Weak references, transfer generations, and asynchronous read sequence numbers reject stale results. Body IO failures can close the connection directly; a failed transfer does not always leave a reusable session.
+
+### Worker pool and database resources
+
+[ThreadPool](inc/common/base/tlss_thread_pool.h) provides three submission methods:
+
+| API | When the queue is full | Current use |
 | --- | --- | --- |
-| `run()` | 外部调用者等待空位；池内嵌套提交满队列时拒绝以避免死锁 | 通用阻塞提交 |
-| `try_run()` | 立即失败 | 目录数据库操作 |
-| `submit_async()` | 进入有界等待队列，等待入执行队列或触发超时回调 | 登录、注册 |
+| `run()` | External callers wait for capacity; nested submissions from the pool are rejected when full to avoid deadlock | General blocking submission |
+| `try_run()` | Fail immediately | Directory operations, upload preparation, and disk executor tasks |
+| `submit_async()` | Enter a bounded wait queue until admitted to the execution queue or a timeout callback fires | Login and signup |
 
-停止时拒绝新任务、取消等待队列、排空执行队列并 join 工作线程。线程池只能启动一次；零工作线程模式由调用者执行 `run / try_run` 任务，`submit_async` 不支持此模式。业务工作线程未捕获的任务异常会导致进程终止，目前没有逐任务异常隔离。
+Shutdown rejects new work, cancels the wait queue, drains the execution queue, and joins workers. A pool can only start once. With zero workers, `run / try_run` execute on the caller's thread; `submit_async` does not support this mode. Uncaught exceptions from worker tasks terminate the process; individual tasks do not currently have exception isolation.
 
-[DbConnectionPool](src/common/base/mysql_connection_pool.cpp) 包含初始连接、容量上限、后台生产、空闲扫描、借用等待期限、借出前 `ping` 和停机协调。RAII 句柄归还连接；失效或事务未结束的连接不会重新进入空闲队列。借用期限约束条件变量等待，不能中断后续 MySQL 网络调用。
+[DbConnectionPool](src/common/base/mysql_connection_pool.cpp) manages initial connections, a capacity limit, background production, idle scanning, acquisition wait deadlines, `ping` before borrowing, and shutdown coordination. RAII handles return connections. Invalid connections and connections with unfinished transactions do not return to the idle queue. The acquisition deadline limits condition-variable waiting; it cannot interrupt subsequent MySQL network calls.
 
-[DbConnection / DbTransaction](inc/common/base/mysql_connection.h) 封装参数绑定、查询结果、事务提交与析构回滚。提交失败区分为结果未知，并使连接失效；注册通过同一事务创建用户和根目录。
+[DbConnection / DbTransaction](inc/common/base/mysql_connection.h) wrap parameter binding, query results, transaction commits, and rollback on destruction. A failed commit is reported as an unknown outcome and invalidates the connection. Signup creates the user and root directory in the same transaction.
 
-### 交互客户端与日志
+### Interactive client and logging
 
-[client_main.cpp](src/client_main.cpp) 构建 `tlss-cli`，[Client](src/ftp/client.cpp) 将终端输入、`signalfd` 和退出超时的 `timerfd` 注册到 EventLoop。客户端直接显示服务端响应；输入 `exit / q / quit`、终端 EOF 或退出信号时发起关闭，连接关闭等待期限为 2 秒。
+[client_main.cpp](src/client_main.cpp) builds `tlss-cli`. [Client](src/ftp/client.cpp) registers terminal input, `signalfd`, and an exit-timeout `timerfd` with EventLoop. It displays interactive responses, parses transfer control frames, and supports local file upload/download. `exit / q / quit`, terminal EOF, or a shutdown signal initiates closure, with a 2-second connection shutdown wait.
 
-底层 [Connector](inc/common/net/connector.h) 的重试间隔从 500 毫秒指数增加到最多 30 秒。CLI 初始建连可以重试；已建立会话后断线则退出，避免自动建立缺少原认证上下文的新会话。
+The underlying [Connector](inc/common/net/connector.h) increases retry delays exponentially from 500 milliseconds to at most 30 seconds. The CLI retries initial connection attempts, but exits if an established session disconnects, avoiding an automatic new session without the original authentication context.
 
-[Logger](src/logger/logger.cpp) 封装 spdlog 的控制台、文件、滚动文件和双 sink 输出。主程序初始化 `net`、`storage_service`、`mysql` 日志，在服务对象和后台线程清理后关闭日志系统。
+[Logger](src/logger/logger.cpp) wraps spdlog console, file, rotating file, and dual-sink output. The main program initializes `net`, `storage_service`, and `mysql` loggers, and shuts logging down after service objects and background threads are cleaned up.
 
-### 独立监控与可靠告警
+### Independent monitoring and reliable alarms
 
-监控使用 `TLSSMON` 命名空间。其 [Engine](src/monitor/engine.cpp) 基于 **select + 唤醒管道**，独立于业务网络层的 epoll EventLoop；生命周期为 `CREATED → INITIALIZING → READY → RUNNING → STOPPING → STOPPED`，停止后不能重新运行。
+Monitoring uses the `TLSSMON` namespace. Its [Engine](src/monitor/engine.cpp) runs on **select and a wakeup pipe**, independently of the business networking layer's epoll EventLoop. Its lifecycle is `CREATED → INITIALIZING → READY → RUNNING → STOPPING → STOPPED`; it cannot restart after stopping.
 
-| 组件 | 当前实现 |
+| Component | Current implementation |
 | --- | --- |
-| `AioManager / TimerManager` | fd 就绪回调、延迟移除、按期限排序的单次/周期定时器 |
-| `CallbackRegistry` | 回调注册、异步 worker、调用次数及耗时统计 |
-| `MonitorModuleRegistry` | 模块与错误元数据，运行前完成注册 |
-| `MonitorStore` | 按完整主键保存当前记录，互斥保护，查询返回副本 |
-| `MonitorReporter` | 补齐元数据、按值变化发布、选择普通指标或可靠告警通道 |
-| `MonitorPolicy` | 连续超阈值、滚动窗口事件次数、滑动平均与异常样本过滤 |
-| `CliServer / CliRegistry` | 命令注册、会话上下文、模块选择与数据查询 |
-| `MonitorWire / UDP` | V1/V2 自定义二进制协议、指标发送和接收 |
-| `ReliableAlarmPublisher / Collector / AlarmSpool` | 本地持久化、TCP 发送、ACK、重试、去重和恢复 |
+| `AioManager / TimerManager` | Descriptor readiness callbacks, deferred removal, deadline-ordered one-shot and periodic timers |
+| `CallbackRegistry` | Callback registration, asynchronous workers, invocation counts, and timing statistics |
+| `MonitorModuleRegistry` | Module and error metadata, registered before the engine runs |
+| `MonitorStore` | Current records indexed by the full key, protected by a mutex; queries return copies |
+| `MonitorReporter` | Metadata enrichment, publishing on value changes, and ordinary metric/reliable alarm routing |
+| `MonitorPolicy` | Sustained threshold violations, event counts in rolling windows, moving averages, and outlier filtering |
+| `CliServer / CliRegistry` | Command registration, session context, module selection, and data queries |
+| `MonitorWire / UDP` | Custom V1/V2 binary protocols and metric transmission/reception |
+| `ReliableAlarmPublisher / Collector / AlarmSpool` | Local persistence, TCP delivery, ACKs, retries, deduplication, and recovery |
 
-指标主键为 `(mid, level, fid, eid)`，值为数值或字符串。Store 保存每个 key 的当前记录和变化时间，不是历史时序数据库。普通首次零值可被忽略，值不变时通常不发布；`report_count()` 提交调用方提供的值，不自动累加。V2 包含描述和生产端变化时间，V1 接收时使用 Collector 时间。
+Metric keys are `(mid, level, fid, eid)`, and values are numeric or strings. Store keeps each key's current record and change timestamp; it is not a historical time-series database. An ordinary initial zero may be ignored, and unchanged values usually do not publish. `report_count()` submits the caller's value rather than incrementing automatically. V2 carries descriptions and producer change timestamps; V1 uses the Collector's time on receipt.
 
 ```text
-普通指标：
-采样 → 策略 → Reporter → Store 更新 → UDP 发布
-     → Collector 解码 → 接收端 Engine / Store
+Ordinary metrics:
+Sampling → policy → Reporter → Store update → UDP publish
+         → Collector decode → receiving Engine / Store
 
-可靠告警：
-report_error → outbox 持久化 → 本地 Store 提交
-             → 后台 TCP 发送 / 重试
-             → Collector 校验 → inbox 持久化 → 接收端 Store 更新
-             → ACK → 发送端删除已确认文件
+Reliable alarms:
+report_error → persist outbox → commit local Store
+             → background TCP send / retry
+             → Collector validation → persist inbox → update receiving Store
+             → ACK → sender removes the acknowledged file
 ```
 
-可靠通道持久化失败时不提交本地 Store 新值，允许后续相同值重试。普通发布回调在 Store 解锁后执行；可靠告警的提交前持久化在 Store 锁内执行，只允许有界的本地持久化操作，不能网络等待或重入 Store。
+If reliable-channel persistence fails, the new local Store value is not committed, allowing the same value to be retried. Ordinary publishing callbacks run after releasing the Store lock. Reliable alarms perform pre-commit persistence under the Store lock; only bounded local persistence is allowed, with no network waiting or Store reentry.
 
-告警实现包含 CRC 校验、流式解码、消息身份去重、短写处理、退避重试、损坏文件隔离、重启恢复，以及文件和目录同步。这是持久化重试与接收端去重机制，不代表任意外部业务副作用均具备端到端 exactly-once 保证。
+Alarm handling includes CRC verification, stream decoding, deduplication by message identity, partial writes, retry backoff, corrupt-file quarantine, restart recovery, and file/directory synchronization. This provides persistent retries and receiver deduplication, not end-to-end exactly-once guarantees for arbitrary external business effects.
 
-CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `db_dump` 查询监控 Store。`demo-m9-node` 与 `demo-m9-collector` 展示采样到查询的双进程链路，目前主服务没有自动启动或上报这些指标。
+The CLI supports `help`, `modules`, `use`, `db_dump`, and `alarm_status`; `db_dump` queries the monitoring Store. `demo-m9-node` and `demo-m9-collector` demonstrate sampling through queries across two processes. The main service does not currently start these components or report metrics automatically.
 
-### 内存拷贝库
+### Memory copy library
 
-[公共 API](inc/common/memory/tlss_memcpy.h) 提供 `TLSS::MEMORY::memcpy`，支持 `Auto / Avx2 / RepMovsb / NonTemporal` 后端及 `Default / Streaming` 提示。共享库输出到 `lib/libtlss_memory.so`。
+The [public API](inc/common/memory/tlss_memcpy.h) exposes `TLSS::MEMORY::memcpy`, with `Auto / Avx2 / RepMovsb / NonTemporal` backends and `Default / Streaming` hints. The shared library is emitted as `lib/libtlss_memory.so`.
 
-自动选择流程为：CPU 能力检测 → 按大小与 Hint 生成 CopyPlan → 能力适配 → 执行或回退。[当前策略](src/common/memory/internal/copy_policy.cpp) 如下：
+Automatic selection follows CPU capability detection → CopyPlan selection by size and hint → capability adaptation → execution or fallback. The [current policy](src/common/memory/internal/copy_policy.cpp) is:
 
-| Hint | 大小 `n` | 初始策略 |
+| Hint | Size `n` | Initial strategy |
 | --- | --- | --- |
 | Default | `n ≤ 2 KiB` | AVX2 cached |
 | Default | `n > 2 KiB` | REP MOVSB |
 | Streaming | `n ≤ 2 KiB` | AVX2 cached |
 | Streaming | `2 KiB < n < 3 KiB` | libc memcpy |
 | Streaming | `3 KiB ≤ n < 8 KiB` | AVX2 cached |
-| Streaming | `8 KiB ≤ n < 64 KiB` | 单线程 NT |
-| Streaming | `64 KiB ≤ n < 128 KiB` | 请求 4 worker 并行 NT |
-| Streaming | `n ≥ 128 KiB` | 请求 8 worker 并行 NT |
+| Streaming | `8 KiB ≤ n < 64 KiB` | Single-thread NT |
+| Streaming | `64 KiB ≤ n < 128 KiB` | Request 4-worker parallel NT |
+| Streaming | `n ≥ 128 KiB` | Request 8-worker parallel NT |
 
-实际后端受 CPU 能力、可用拓扑与 worker 数影响。实现包含 CPU 亲和性、持久 worker 池、预计算 worker 选择、懒初始化、并行池忙碌时回退，以及不支持 AVX2 时的自动路径回退。强制指定不支持的后端会报错；该接口沿用 memcpy 的非重叠内存前提。
+Actual execution depends on CPU capabilities, available topology, and worker count. The implementation includes CPU affinity, persistent workers, precomputed worker selection, lazy initialization, fallback when the parallel pool is busy, and automatic fallback without AVX2 support. Explicitly requesting an unsupported backend raises an error. The API retains memcpy's non-overlapping-memory requirement.
 
-当前网络 Buffer 的自定义 memcpy 调用被注释，因此该库的独立基准结果不能直接视为主服务吞吐收益。实现与测量说明见 [V1 设计与验证报告](doc/TLSS_Memory_Copy_Subsystem_V1_Design_Validation_Report_Final.md) 和 [内存拷贝导读](doc/tlss_memcpy_tutorial.md)。
+Networking `Buffer::append()` now calls `TLSS::MEMORY::memcpy` with `Auto / Default`, which does not enable the Streaming parallel NT policy. Independent library benchmarks still do not establish main-service throughput gains. See the [V1 design and validation report](doc/TLSS_Memory_Copy_Subsystem_V1_Design_Validation_Report_Final.md) and [memory copy guide](doc/tlss_memcpy_tutorial.md) for implementation and measurement details.
 
-## 网络服务生命周期与线程约束
+## Network service lifecycle and threading requirements
 
-本节描述当前 `TcpServer` / `StorageService` 的使用契约。安全运行需要同时满足**调用顺序、线程归属和对象生命周期**；接口使用了原子变量或把任务放入队列，并不代表允许任意并发调用。以下流程适用于已成功启动的服务，直接使用 `TcpServer` 时也须由上层执行对应的停机步骤。
+This section documents the current usage contract for `TcpServer` and `StorageService`. Safe operation requires **correct call ordering, thread ownership, and object lifetimes** together. Atomic variables and queued tasks do not make arbitrary concurrent calls safe. The following flow applies to a successfully started service; applications using `TcpServer` directly must coordinate the corresponding shutdown steps themselves.
 
-### 完整启动与运行路径
+### Complete startup and runtime flow
 
-当前入口见 [main.cpp](src/main.cpp)，服务编排见 [StorageService](src/ftp/server.cpp)。
+See [main.cpp](src/main.cpp) for the entry point and [StorageService](src/ftp/server.cpp) for service coordination.
 
-1. **主线程**在创建工作线程前，通过 `pthread_sigmask` 阻塞 `SIGINT` / `SIGTERM`，然后初始化日志。退出信号由后续控制线程通过 `sigwait` 同步接收。
-2. **主线程**先构造 `EventLoop`，再构造引用它的 `StorageService`。服务构造期间创建 `TcpServer`、获取数据库连接池，并设置连接/消息回调、IO 线程数及业务队列容量。
-3. **主线程**调用 `StorageService::start()`：先启动业务线程池，再调用 `TcpServer::start()` 启动 IO 线程池并开放监听。配置必须先于启动完成；启动不能与停机或析构并发。
-4. 启动完成后创建**独立控制线程**，让它等待退出信号；主线程进入 `EventLoop::loop()`。控制线程可以提交停机请求并等待，但主 loop 必须继续运行以处理这些请求。
-5. 正常运行时，**主 loop**接受连接、分配 IO loop、维护 `_connections`；连接所属的 **IO loop**处理读写、连接状态和业务回调；**业务线程池**执行数据库等耗时操作，结果通过事件循环任务返回 IO loop。
+1. Before creating any worker threads, the **main thread** blocks `SIGINT` and `SIGTERM` through `pthread_sigmask`, then initializes logging. A control thread created later receives shutdown signals synchronously through `sigwait`.
+2. The **main thread** constructs `EventLoop` before constructing the `StorageService` that references it. Service construction creates `TcpServer`, obtains the database connection pool, and configures connection/message callbacks, the IO thread count, and worker queue capacity.
+3. The **main thread** calls `StorageService::start()`: it starts the business worker pool and disk executor first, then calls `TcpServer::start()` to start the IO thread pool and begin listening. Configuration must finish before startup; startup must not run concurrently with shutdown or destruction.
+4. After startup completes, a **dedicated control thread** starts waiting for shutdown signals, while the main thread enters `EventLoop::loop()`. The control thread may request shutdown and wait for completion, but the main loop must keep running to process those requests.
+5. During normal operation, the **main loop** accepts connections, assigns IO loops, and maintains `_connections`. Each connection's **owning IO loop** handles reads, writes, connection state, and application callbacks. The **business worker pool** performs authentication and directory operations. The **disk pool** handles file operations and associated metadata callbacks. Results return to IO loops through queued tasks.
 
-IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工作线程。业务回调不能假定自己一定在单独的 IO 线程中。
+With `0` IO threads, the main loop also manages connections; there are no separate IO worker threads. Application callbacks must not assume they always run on a separate IO thread.
 
-### 完整停机与析构路径
+### Complete shutdown and destruction flow
 
-当前主程序的调用链是：
+The current main program follows this call chain:
 
 ```text
-控制线程 sigwait() 收到 SIGINT / SIGTERM
+Control thread receives SIGINT / SIGTERM through sigwait()
   → StorageService::stop(grace_period)
-  → 标记业务停机，串行化停机请求
+  → Mark the service as stopping and serialize shutdown requests
   → TcpServer::stop_accepting(done)
-  → 等待 done：监听关闭、已有连接暂停读取
-  → 业务线程池 stop()，等待已进入执行队列的任务结束
+  → Wait for done: listener closed and existing connections' reads paused
+  → Stop the worker pool and wait for tasks in its execution queue to finish
+  → DiskExecutor::stop(): cancel transfers and wait for disk tasks and file cleanup
   → TcpServer::shutdown_connections(done)
-  → 等待连接关闭；超过宽限期则 force_close_connections()
-  → 继续等待同一个 done：连接表清空、相关 IO 清理已越过屏障
-  → TcpServer::stop_io_threads()，退出并 join IO 线程
-  → 数据库连接池 shutdown()
-  → 主 EventLoop::quit()
-  → 发布 StorageService 停机结果，控制线程结束
+  → Wait for connections to close; call force_close_connections() on timeout
+  → Keep waiting for the same done: connection map empty and IO cleanup past barriers
+  → TcpServer::stop_io_threads(): exit and join IO threads
+  → Shut down the database connection pool
+  → Quit the main EventLoop
+  → Publish the StorageService shutdown result and finish the control thread
 
-主线程 EventLoop::loop() 返回
-  → join 控制线程
-  → 析构 StorageService / TcpServer
-  → 析构主 EventLoop
+Main thread returns from EventLoop::loop()
+  → Join the control thread
+  → Destroy StorageService / TcpServer
+  → Destroy the main EventLoop
   → Logger::shutdown()
 ```
 
-每一步都必须满足完成条件，才能进入下一阶段：
+Each stage must meet its completion condition before the next stage begins:
 
-| 阶段 | 执行线程与实际操作 | 进入下一阶段的条件 |
+| Stage | Thread and operation | Condition for proceeding |
 | --- | --- | --- |
-| 标记停机 | 控制线程设置 `StorageService::_stopping`；停止接受新的业务提交 | 上层不再产生新的业务任务；启动已经完成 |
-| 停止接收 | 控制线程调用 `stop_accepting()`；主 loop 释放 Acceptor，各 IO loop 执行 `pause_read_for_shutdown()` | `done` 在主 loop 被调用，控制线程通过 future 等机制收到通知 |
-| 结束业务任务 | 控制线程调用业务线程池 `stop()`；拒绝新提交、取消异步等待队列中尚未进入执行队列的任务，执行完已入队任务并 join 工作线程 | 业务线程池 `stop()` 返回；此时 IO loop 和数据库仍可用 |
-| 排空连接 | 控制线程调用 `shutdown_connections()`；各 IO loop 排空发送缓冲后半关闭写端，并继续读取以等待对端 FIN | 等待连接清理完成；若超过 `grace_period`，提交强制关闭请求 |
-| 强制关闭（按需） | 控制线程调用 `force_close_connections()`，各 IO loop 执行关闭 | 仍须等待此前 `shutdown_connections()` 的 `done`，不能因强制关闭接口返回就继续回收线程 |
-| 确认 IO 清理 | 主 loop 从连接表移除连接，IO loop 执行 `connect_destroyed()`，随后通过 `when_io_idle()` 屏障通知主 loop | 连接表已空，相关清理任务越过屏障；`done` 已通知控制线程 |
-| 回收资源 | 独立控制线程调用 `stop_io_threads()`，再关闭数据库池，最后 `quit()` 主 loop | IO 线程已 join；控制线程完成停机并发布结果 |
-| 析构 | 主线程退出 `loop()`，join 控制线程，依次销毁服务与主 loop，最后关闭日志 | 没有仍会访问服务对象或已销毁 loop 的任务、回调及外部调用 |
+| Mark shutdown | The control thread sets `StorageService::_stopping`; stop accepting new application work | Startup has finished, and the application no longer produces new tasks |
+| Stop accepting | The control thread calls `stop_accepting()`; the main loop releases Acceptor, and each IO loop executes `pause_read_for_shutdown()` | `done` runs on the main loop and notifies the control thread through a future or equivalent synchronization |
+| Finish worker tasks | The control thread calls the worker pool's `stop()`; reject new submissions, cancel tasks still in the asynchronous wait queue, finish tasks already in the execution queue, and join workers | Worker pool `stop()` returns; IO loops and the database are still available at this stage |
+| Finish disk work | The control thread calls `DiskExecutor::stop()`, cancels active sources/receivers, waits for file cleanup, and joins disk workers | Disk executor shutdown has completed; IO loops and the database must remain alive throughout this stage |
+| Drain connections | The control thread calls `shutdown_connections()`; IO loops drain output buffers, shut down the write side, and continue reading to wait for peer FIN | Wait for connection cleanup; request forced closure if `grace_period` expires |
+| Force close, if needed | The control thread calls `force_close_connections()`; owning IO loops execute closure | Still wait for the earlier `shutdown_connections()` callback; returning from the force-close API does not permit immediate thread teardown |
+| Confirm IO cleanup | The main loop removes connections from its map; IO loops execute `connect_destroyed()`, then notify the main loop through `when_io_idle()` barriers | The map is empty, relevant cleanup has passed the barriers, and `done` has notified the control thread |
+| Release resources | The dedicated control thread calls `stop_io_threads()`, shuts down the database pool, and finally calls `quit()` on the main loop | IO threads have been joined; the control thread completes shutdown and publishes its result |
+| Destroy objects | The main thread returns from `loop()`, joins the control thread, destroys the service and main loop, then shuts down logging | No remaining tasks, callbacks, or external calls can access the service or a destroyed loop |
 
-`StorageService::stop()` 默认的连接宽限期为 5 秒，可传入非负时长。它只限制等待连接自然关闭的阶段，不是整个停机过程的超时：业务任务结束、强制关闭后的清理和其他阶段仍可能等待。返回值表示数据库连接池是否按其关闭策略成功结束，不应解释为整个停机过程一定在 `grace_period` 内完成。
+`StorageService::stop()` defaults to a 5-second connection grace period and accepts a nonnegative duration. This limits only the wait for connections to close naturally, not the entire shutdown: business and disk task completion, cleanup after forced closure, and other stages may still wait. The return value reports whether the database connection pool shut down successfully under its shutdown policy; it does not mean the entire process completed within `grace_period`.
 
-### 直接使用 TcpServer 时如何等待完成
+### Waiting for completion when using TcpServer directly
 
-使用 `StorageService` 时，应由独立控制线程调用其 `stop()`，不要同时绕过它操作内部 `TcpServer`。若直接组合 `TcpServer`、业务线程池和数据库连接池，下面展示控制线程中的停机顺序；各对象已完成启动，主 loop 仍在运行，调用方在整个流程中保持它们存活。
+When using `StorageService`, call its `stop()` from a dedicated control thread instead of also manipulating its internal `TcpServer`. If you compose `TcpServer`, a worker pool, and a database connection pool directly, the following illustrates shutdown on the control thread. Startup has already completed, the main loop remains running, and the caller keeps all participating objects alive throughout the flow.
 
 ```cpp
-// 此代码运行在独立控制线程中；不能放进主 loop、IO 回调或业务线程池任务。
-// 先由上层关闭业务入口，停止产生新任务。
+// Run on a dedicated control thread, never in the main loop, an IO callback, or a worker task.
+// First close application entry points so no new tasks are produced.
 auto paused = std::make_shared<std::promise<void>>();
 auto paused_future = paused->get_future();
 tcp_server.stop_accepting([paused] { paused->set_value(); });
 paused_future.wait();
 
-worker_pool.stop();  // IO loop 和数据库此时仍须存活，供已有任务完成。
+worker_pool.stop();  // IO loops and the database must remain alive for existing tasks.
 
 auto drained = std::make_shared<std::promise<void>>();
 auto drained_future = drained->get_future();
@@ -342,101 +398,103 @@ tcp_server.shutdown_connections([drained] { drained->set_value(); });
 if (drained_future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
     tcp_server.force_close_connections();
 }
-drained_future.wait();  // 强制关闭也只是提交请求，完成通知仍来自同一个 done。
+drained_future.wait();  // Forced closure is also asynchronous; wait for the same done.
 
 tcp_server.stop_io_threads();
-const bool db_stopped = db_pool.shutdown();  // 按实际持有方式调用，并记录停机结果。
+const bool db_stopped = db_pool.shutdown();  // Adapt to your ownership model and record the result.
 (void)db_stopped;
 base_loop.quit();
-// 主线程在 loop() 返回后 join 此控制线程，再析构服务和 base_loop。
+// The main thread joins this control thread after loop() returns, then destroys the service and loop.
 ```
 
-示例中的 `worker_pool`、`db_pool` 和 `base_loop` 代表调用方持有的对应对象，需包含 `<future>`、`<memory>` 和 `<chrono>`。不要用 `sleep()` 猜测异步操作是否完成，也不要在控制线程等待之前先停止 EventLoop，否则完成回调无法执行。
+If the application also owns a disk executor, cancel and wait for it after `worker_pool.stop()` and before `shutdown_connections()`, as in `StorageService::stop()`. Here, `worker_pool`, `db_pool`, and `base_loop` represent the corresponding objects owned by the caller. Include `<future>`, `<memory>`, and `<chrono>`. Do not use `sleep()` to guess whether asynchronous work has finished, and do not stop EventLoop before waiting on the control thread: completion callbacks need the loop to execute.
 
-### 必须遵守的线程与生命周期约束
+### Required threading and lifetime constraints
 
-| 对象或操作 | 当前实现要求 | 违反约束的风险 |
+| Object or operation | Current implementation requirement | Risk if violated |
 | --- | --- | --- |
-| `TcpServer` 构造、配置、启动 | 按当前入口在主 loop 所属线程执行；所有 setter 在启动前配置完毕，启动后不再并发修改 | 回调 `std::function`、线程数或线程池容器发生并发读写 |
-| `start()` 与停机 | 启动完成后才允许发起停机；停机开始后不能再次启动 | `_stopping` 的检查与资源访问不是整体原子操作，Acceptor 可能已被释放 |
-| `_connections`、连接编号 | 由主 loop 维护；析构前先完成停机，避免其他线程与主 loop 同时访问连接表 | 容器数据竞争、迭代器失效 |
-| TcpConnection / Channel | 对读写状态、缓冲和 Channel 的直接操作归所属 IO loop；跨线程使用提供了调度的接口 | 与事件分发、Channel 注销产生竞态；`shared_ptr` 只保活，不自动同步成员访问 |
-| 停机回调 `done` | 在主 loop 执行；只做通知或轻量操作，不阻塞等待同一 loop 的任务 | 主 loop 无法推进，停机等待无法结束 |
-| `StorageService::stop()`、`stop_io_threads()` | 由主 loop、IO 线程池和业务线程池之外的独立控制线程执行 | 阻塞等待自身处理屏障，或 join 当前线程；当前代码的线程检查未覆盖所有误用 |
-| 捕获裸 `this` 的任务 | TcpServer、StorageService 以及用户回调引用的对象必须活到相关任务和回调执行完 | 关闭回调、屏障或其他排队任务访问已析构对象 |
-| loop 生命周期 | IO loop 清理完成后才能 join IO 线程；主 loop 活到停机通知完成及服务析构之后 | 停机任务无法执行，或连接/任务通过裸 loop 指针访问已销毁对象 |
-| 外部持有的连接和任务 | 停机前协调所有外部生产者；IO 线程回收后不能再通过旧连接提交任务或使用其 loop | 持有 `TcpConnectionPtr` 并不会延长它所引用的 EventLoop 生命周期 |
-| 多个停机调用者 | 使用 `StorageService::stop()` 的互斥与完成通知统一协调；直接使用 TcpServer 时由上层保证只有一个停机流程 | 重复 `shutdown_connections()` 可能覆盖完成回调；线程池回收可能与其他操作交错 |
+| `TcpServer` construction, configuration, and startup | Follow the current entry point and perform these on the main loop's owning thread; finish all setter calls before startup and do not modify configuration concurrently afterward | Concurrent reads and writes of callback `std::function` objects, thread counts, or thread pool containers |
+| `start()` and shutdown | Finish startup before requesting shutdown; never restart after shutdown begins | Checking `_stopping` and accessing resources are not one atomic operation; Acceptor may already have been released |
+| `_connections` and connection IDs | Maintain them on the main loop; complete shutdown before destruction so another thread cannot access the map concurrently | Container data races and invalidated iterators |
+| TcpConnection / Channel | Direct operations on IO state, buffers, and Channels belong to the owning IO loop; cross-thread callers must use interfaces that provide dispatch | Races with event dispatch and Channel removal; `shared_ptr` preserves lifetime but does not synchronize member access |
+| Shutdown callback `done` | Runs on the main loop; notify waiters or perform lightweight work without blocking on that same loop | The main loop cannot advance, so shutdown cannot complete |
+| `StorageService::stop()` and `stop_io_threads()` | Run on a dedicated control thread outside the main loop, IO pool, business worker pool, and disk pool | Waiting for the current thread to process a barrier, or joining the current thread; existing thread checks do not catch every misuse |
+| Asynchronous file work | Keep the disk executor, owning IO loop, and database alive until cancellation and worker cleanup finish; access session and receiver interfaces on the IO loop | Disk tasks or result callbacks access destroyed resources |
+| Tasks capturing raw `this` | Keep TcpServer, StorageService, and objects referenced by application callbacks alive until the relevant tasks and callbacks finish | Close callbacks, barriers, or other queued tasks access destroyed objects |
+| Loop lifetimes | Finish IO cleanup before joining IO threads; keep the main loop alive through shutdown notification and service destruction | Shutdown tasks cannot execute, or connections/tasks access a destroyed loop through a raw pointer |
+| Externally held connections and tasks | Coordinate all external producers before shutdown; after IO thread teardown, do not submit work through old connections or use their loops | Holding a `TcpConnectionPtr` does not extend the lifetime of its referenced EventLoop |
+| Multiple shutdown callers | Coordinate through the mutex and completion notification in `StorageService::stop()`; direct TcpServer users must arrange a single shutdown flow | Repeated `shutdown_connections()` calls may overwrite the completion callback; thread pool teardown may interleave with other operations |
 
-`when_io_idle()` 在各 IO loop 中排入屏障，再回主 loop 汇总结果。它保证相关先前任务已执行到屏障位置，**不保证其他线程今后不会继续提交任务，也不自动递归等待这些任务派生的所有后续任务**。因此必须先停止任务生产，再依次等待业务结束和连接清理；不能把这个函数当成任意时刻都能安全销毁服务器的证明。
+`when_io_idle()` queues a barrier on each IO loop and collects their notifications on the main loop. It confirms that relevant earlier tasks have reached the barrier, but **does not prevent future submissions from other threads or recursively wait for all follow-up tasks spawned by earlier work**. Stop task producers first, then wait for worker completion and connection cleanup. This barrier alone is not proof that the server can be destroyed safely at an arbitrary point.
 
-`TcpServer::~TcpServer()` 不会自动完成上述完整停机流程，也不会自动延长裸 `this` 回调引用的对象生命周期。已启动的 `StorageService` 必须显式完成 `stop()` 后再析构，否则其析构函数会终止进程。不要在业务回调里直接删除仍在运行的服务器，也不要把“已调用停止接口”等同于“已完成停止”。
+`TcpServer::~TcpServer()` does not automatically perform the complete shutdown flow above or extend the lifetimes of objects referenced by raw `this` callbacks. A started `StorageService` must explicitly complete `stop()` before destruction; otherwise its destructor terminates the process. Do not directly delete a running server inside an application callback, and do not equate requesting shutdown with completing it.
 
-实现入口：[TcpServer](src/common/net/tcp_server.cpp)、[EventLoop](src/common/net/event_loop.cpp)、[EventLoopThread](src/common/net/event_loop_thread.cpp)、[业务线程池](src/common/base/tlss_thread_pool.cpp)。现有[停机回归测试](tests/test_tcp_server_shutdown.cpp)覆盖等待对端 FIN、零 IO 工作线程下的强制关闭等路径；它不代表已经验证任意启动/停机/析构交错都安全。
+Implementation entry points: [TcpServer](src/common/net/tcp_server.cpp), [EventLoop](src/common/net/event_loop.cpp), [EventLoopThread](src/common/net/event_loop_thread.cpp), and [worker pool](src/common/base/tlss_thread_pool.cpp). Existing [shutdown regression tests](tests/test_tcp_server_shutdown.cpp) cover waiting for peer FIN and forced closure with zero IO worker threads, among other paths. They do not establish safety for arbitrary interleavings of startup, shutdown, and destruction.
 
-## 代码结构
+## Code layout
 
 ```text
 cpp_TLFSS/
 ├── CMakeLists.txt / CMakePresets.json
-├── inc/                          公共头文件，与 src 按模块对应
+├── inc/                          Public headers, matching src modules
 ├── src/
-│   ├── main.cpp                  storage-service 入口
-│   ├── client_main.cpp           tlss-cli 入口
+│   ├── main.cpp                  storage-service entry point
+│   ├── client_main.cpp           tlss-cli entry point
 │   ├── common/
-│   │   ├── base/                 线程、业务线程池、数据库封装
-│   │   ├── net/                  Reactor、TCP 服务端与客户端
-│   │   ├── memory/               内存拷贝运行时与汇编
-│   │   └── benchmark/            内存拷贝实验与基准
-│   ├── auth/                     认证服务、用户仓储、密码哈希
-│   ├── ftp/                      命令入口、目录引擎、交互客户端
-│   ├── logger/                   spdlog 封装
-│   ├── monitor/                  独立监控系统，含 demo/ 与 test/
-│   ├── rpc/                      RPC 占位
-│   └── gateway/                  网关占位
-├── tests/                        网络、线程池、认证及数据库等测试
-├── proto/                        空的协议占位
-├── config/ / sql/                配置与数据库脚本
-├── scripts/ / doc/               构建脚本与技术资料
-├── third/ / third_party/         第三方依赖
-└── build/、bin/、lib/             默认构建产物
+│   │   ├── base/                 Threads, worker pool, database wrappers
+│   │   ├── net/                  Reactor, TCP server and client
+│   │   ├── memory/               Copy runtime and assembly
+│   │   └── benchmark/            Memory copy experiments and benchmarks
+│   ├── auth/                     Authentication, user repository, password hashing
+│   ├── ftp/                      Sessions, directories, file transfer, disk executor, client
+│   ├── logger/                   spdlog wrapper
+│   ├── monitor/                  Independent monitoring, including demo/ and test/
+│   ├── rpc/                      RPC placeholders
+│   └── gateway/                  Gateway placeholders
+├── tests/                        Networking, worker pool, transfer, auth, and database tests
+├── proto/                        Empty protocol placeholders
+├── config/ / sql/                Configuration and database scripts
+├── scripts/ / doc/               Build scripts and technical documentation
+├── docs/superpowers/             Local designs and plans (currently Git-ignored)
+├── third/ / third_party/         Third-party dependencies
+└── build/, bin/, lib/            Default build output
 ```
 
-| 路径 | 用途 |
+| Path | Purpose |
 | --- | --- |
-| `inc/`、`src/` | 按 `common`、`auth`、`ftp`、`gateway`、`logger`、`monitor`、`rpc` 分组的头文件与实现 |
-| `proto/` | 存储、认证、监控、网关的协议占位文件；CMake 配置了向 `build/generated/` 生成代码的步骤 |
-| `tests/`、`src/monitor/test/` | 主服务/基础模块测试，以及监控子系统测试 |
-| `config/`、`sql/` | MySQL 连接配置和建表脚本；`config/config.yaml.example` 目前为空，主程序不读取 YAML |
-| `scripts/build.sh` | 配置、编译、测试的封装脚本 |
-| `third/`、`third_party/` | 仓库内依赖与上游子模块；不要提交其构建产物 |
-| `doc/` | 网络和内存拷贝子系统的补充资料 |
+| `inc/`, `src/` | Headers and implementations grouped under `common`, `auth`, `ftp`, `gateway`, `logger`, `monitor`, and `rpc` |
+| `proto/` | Placeholder files for storage, authentication, monitoring, and gateway protocols; CMake includes code generation steps targeting `build/generated/` |
+| `tests/`, `src/monitor/test/` | Tests for the main service and infrastructure, plus monitoring subsystem tests |
+| `config/`, `sql/` | MySQL connection settings and schema script; `config/config.yaml.example` is empty, and the main program does not read YAML |
+| `scripts/build.sh` | Wrapper for configuration, compilation, and tests |
+| `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
+| `doc/` | Supplementary material for the networking and memory copy subsystems |
 
-顶层 CMake 组织 `common_lib`、`auth_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
+The top-level CMake configuration organizes `common_lib`, `auth_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
 
-## 构建与运行
+## Build and run
 
-### 环境要求
+### Requirements
 
-- Linux x86-64；C++17 编译器、CMake 3.21+、Make、NASM、pkg-config。当前构建包含 x86 汇编，不是通用跨架构构建。
-- OpenSSL、Protobuf（含 `protoc`）、gRPC（含 `grpc_cpp_plugin`）、yaml-cpp、pthread；GoogleTest 用于部分可选测试。
-- CMake 构建使用 `third/mysql/inc` 和 `third/mysql/lib/libmysqlclient.so` 中的 MySQL 客户端文件。运行主服务还需要可连接的 MySQL 8.0 实例（建库脚本使用 MySQL 8.0 排序规则）。
+- Linux x86-64, a C++17 compiler, CMake 3.21+, Make, NASM, and pkg-config. The build includes x86 assembly and is not a general cross-architecture build.
+- OpenSSL, Protobuf (including `protoc`), gRPC (including `grpc_cpp_plugin`), yaml-cpp, and pthreads. GoogleTest is needed for some optional tests.
+- The CMake build uses the MySQL client files at `third/mysql/inc` and `third/mysql/lib/libmysqlclient.so`. Running the main service also requires a reachable MySQL 8.0 instance; the schema script uses a MySQL 8.0 collation.
 
-项目的 gRPC/Protobuf 上游仓库以 Git 子模块记录；按需使用 `git submodule update --init --recursive` 获取源码。CMake 当前优先查找已安装的 Protobuf 和 gRPC，而不是自动编译子模块。
+The upstream gRPC and Protobuf repositories are recorded as Git submodules. Run `git submodule update --init --recursive` if you need their source. CMake currently looks for installed Protobuf and gRPC packages instead of building the submodules automatically.
 
-虽然 RPC 业务尚未实现，顶层 CMake 当前仍要求 gRPC、Protobuf 及其代码生成工具。Python 3 用于可选的目录 SQL 和客户端交互测试。Kafka 尚未接入，不是当前构建或运行依赖。
+Although RPC business services are not implemented, the top-level build still requires gRPC, Protobuf, and their code generation tools. Python 3 is used for the optional directory SQL test; additional client interaction scripts are not registered with CTest. Kafka is not integrated and is not a current build or runtime dependency.
 
-### 配置数据库
+### Configure the database
 
-主程序构造 `StorageService` 时会初始化 MySQL 连接池，并连接固定的 `tlss_db` 数据库。先在本地 MySQL 中执行建库脚本，再按本机环境调整配置：
+Constructing `StorageService` initializes the MySQL connection pool, which connects to a database named `tlss_db`. Create the database and tables locally, then adjust the connection settings for your environment:
 
 ```bash
 mysql -u root -p < sql/init_tlss_db.sql
 ```
 
-连接池从**可执行文件所在目录的上一级**读取 `config/mysql.cnf`。按默认输出布局，即 `bin/storage-service` 对应仓库根目录的 `config/mysql.cnf`。配置采用无空格的 `key=value` 格式，主要字段是 `ip`、`port`、`username`、`password`、`initSize`、`maxSize`；不要将真实凭据提交到仓库。启动时无法读取配置或建立初始数据库连接会导致进程退出。
+The pool reads `config/mysql.cnf` from the **parent directory of the executable's directory**. With the default layout, `bin/storage-service` uses `config/mysql.cnf` in the repository root. The file uses `key=value` lines without surrounding spaces; key settings include `ip`, `port`, `username`, `password`, `initSize`, and `maxSize`. Do not commit real credentials. The process exits if it cannot load the configuration or open its initial database connections.
 
-### 编译、测试、启动
+### Compile, test, and start
 
 ```bash
 cmake --preset debug
@@ -445,17 +503,25 @@ ctest --preset debug
 ./bin/storage-service
 ```
 
-建议从仓库根目录启动，日志会写到相对路径 `logs/`。主程序当前不解析命令行参数，监听端口固定为 `9000`；不要传入尚未实现的 `--config` 参数。另开交互终端启动客户端：
+Start the program from the repository root so relative log files are written under `logs/`. The main program does not currently parse command line options; its listening port is fixed at `9000`. Do not pass the unimplemented `--config` option. Start the client in another interactive terminal:
 
 ```bash
 ./bin/tlss-cli 127.0.0.1 9000
 ```
 
-也可以使用 `nc 127.0.0.1 9000` 手动检查行协议。`tlss-cli` 面向交互终端，不能把它视为已实现的批量命令或文件传输工具。
+Alternatively, use `nc 127.0.0.1 9000` to inspect login and directory commands manually. Use `tlss-cli` for files: it handles control frames, binary bodies, verification, and acknowledgments. It targets interactive terminals and has no batch command interface.
 
-首次使用时输入 `signup`，按提示创建用户名和密码；用户名为 3–64 个字母、数字或下划线，密码为 8–128 字节且不含控制字符。注册同时创建用户根目录，成功后再输入 `login` 登录。
+The server stores objects under `./data/objects` by default. To choose a different location, set the environment variable in the shell that starts the server:
 
-下面假设 `alice` 已注册，`documents` 尚不存在。`<password>` 代指注册时设置的密码，`nc` 不会自动隐藏输入；`ls` 查询空目录时只返回提示符。
+```bash
+TLSS_STORAGE_ROOT=/absolute/path/to/tlss-objects ./bin/storage-service
+```
+
+The object directory is created as needed and must be writable by the process. This variable only configures the server object root; client download paths come from interactive commands. See [Current interaction](#current-interaction) for examples.
+
+On your first connection, enter `signup` and follow the prompts to create a username and password. Usernames accept 3–64 letters, digits, or underscores; passwords accept 8–128 bytes without control characters. Signup also creates the user's root directory. Enter `login` after registration succeeds.
+
+The example below assumes `alice` is registered and `documents` does not yet exist. `<password>` stands for the password chosen at signup; `nc` does not automatically hide input. Listing an empty directory returns only the prompt.
 
 ```text
 $ nc 127.0.0.1 9000
@@ -475,28 +541,28 @@ tlss@alice:/>quit
 bye!
 ```
 
-服务收到 `SIGINT` 或 `SIGTERM` 后会尝试有序停机。`scripts/build.sh -t Debug` 也可完成配置、构建和测试；`-n` 不构建或运行测试，`-c` 会清理 `build/`、`bin/`、`lib/`，使用前请确认这些目录中的本地文件可以删除。优化构建使用 `cmake --preset release && cmake --build --preset release`。两个 preset 共用 `build/`，切换构建类型时需要重新配置。
+The service attempts an orderly shutdown on `SIGINT` or `SIGTERM`. `scripts/build.sh -t Debug` also configures, builds, and tests the project. Use `-n` to skip building and running tests. The `-c` option deletes `build/`, `bin/`, and `lib/`, so check those directories for local files first. For an optimized build, run `cmake --preset release && cmake --build --preset release`. Both presets share `build/`; reconfigure when switching build types.
 
-监控演示程序输出到 `bin/dome/`，例如 `./bin/dome/demo-m9-policy` 可单独演示三种监控策略。`demo-m9-collector` 和 `demo-m9-node` 是独立示例，前者默认监听本机 UDP `9300`（指标）、TCP `9400`（告警）和 TCP `9310`（CLI）；后者需要指定模块、源 ID、outbox 目录和 CLI 端口。详情见 `src/monitor/demo/`。
+Monitoring demos are placed in `bin/dome/`. For example, `./bin/dome/demo-m9-policy` demonstrates three monitoring policies. `demo-m9-collector` and `demo-m9-node` run separately: by default, the collector listens on local UDP `9300` for metrics, TCP `9400` for alarms, and TCP `9310` for its CLI. The node requires a module, source ID, outbox directory, and CLI port. See `src/monitor/demo/` for details.
 
-分别在三个终端运行以下命令。示例数据目录位于 `/tmp`，可保留用于进程重启恢复实验；它不是长期持久化目录。不同发送节点应使用不同源 ID、outbox 和 CLI 端口。
+Run the following in three separate terminals. The sample data directories under `/tmp` can be retained for process restart recovery experiments, but are not intended for long-term persistence. Use distinct source IDs, outbox directories, and CLI ports for different sending nodes.
 
 ```bash
-# 终端 1：接收指标与告警。
+# Terminal 1: receive metrics and alarms.
 ./bin/dome/demo-m9-collector /tmp/tlss-m9/collector-inbox
 
-# 终端 2：disk 模块的采样节点。
+# Terminal 2: sample the disk module.
 ./bin/dome/demo-m9-node disk 1 /tmp/tlss-m9/disk-outbox 9320
 
-# 终端 3：连接 Collector 的管理 CLI。
+# Terminal 3: connect to the Collector management CLI.
 nc 127.0.0.1 9310
 ```
 
-在管理 CLI 中输入 `modules`、`db_dump`、`alarm_status` 查看结果；通过各 demo 的 CLI `stop` 命令请求停止。
+Enter `modules`, `db_dump`, or `alarm_status` in the management CLI to inspect results. Use each demo's CLI `stop` command to request shutdown.
 
-### 可选内存拷贝基准
+### Optional memory copy benchmark
 
-基准目标默认关闭，可单独启用和构建：
+The benchmark target is disabled by default. Enable and build it separately:
 
 ```bash
 cmake --preset release -DTLSS_BUILD_MEMCPY_GLIBC_BENCHMARK=ON
@@ -504,134 +570,152 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 ./bin/memcpy_glibc_benchmark streaming
 ```
 
-该程序还支持 `hot / runtime` 模式；仅 `runtime` 接受可选的调用者 CPU 编号，未指定时默认 CPU 8，运行前应确认该 CPU 在允许的亲和性集合内。结果依赖 CPU、亲和性、内存布局、构建选项与负载；比较时应记录环境和测试方法。启用开关保存在共用的 CMake 缓存中，不再需要时可显式设为 `OFF`。
+The program also supports `hot / runtime` modes. Only `runtime` accepts an optional caller CPU ID, defaulting to CPU 8; check that this CPU is in the allowed affinity set before running it. Results depend on the CPU, affinity, memory layout, build options, and workload, so record the environment and methodology when comparing results. The option persists in the shared CMake cache; explicitly set it to `OFF` when no longer needed.
 
-## 测试与开发入口
+## Tests and where to start reading
 
-`ctest --preset debug` 运行 CMake 注册的测试。`tests/` 包含 TCP 停机、线程池异步提交、MySQL 预处理语句、内存拷贝链接，以及依赖 GoogleTest 的认证、注册、事务等测试；`src/monitor/test/` 覆盖监控引擎、策略、协议、存储、CLI 与可靠告警。若未找到 GoogleTest，仅跳过依赖它的测试；其他测试仍会注册。
+`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) currently registers memory copy linking, TCP shutdown, asynchronous worker submission, 20 file transfer scenarios, and the directory SQL test when Python 3 is found. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
 
-| 范围 | 验证内容与边界 |
+| Area | Coverage and boundaries |
 | --- | --- |
-| 网络 | 服务端停机、客户端取消/重连、旧回调及连接生命周期 |
-| 业务线程池 | 异步等待、超时、容量与停机 |
-| 目录查询 | Python 从生产代码提取 SQL，在内存 SQLite 中检查父子目录和用户隔离；不是完整 MySQL/TCP 集成测试 |
-| 交互客户端 | Python 伪终端与测试服务端交互 |
-| 认证和数据库 | GoogleTest 测试；部分要求显式配置测试数据库 |
-| 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke |
-| 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
+| Networking | Server shutdown is registered with CTest; `test_tcp_client.cpp` also checks cancellation/reconnection, stale callbacks, and lifetimes but is not registered with CMake |
+| Worker pool | Asynchronous waiting, timeouts, capacity, and shutdown |
+| Directory queries | Python extracts production SQL and checks parent/child queries and user isolation in in-memory SQLite; not a complete MySQL/TCP integration test |
+| File transfer | Real server/client handlers, chunked IO, hashes and publication, error frames, backpressure, cold-file waits, cancellation, stale callbacks, and shutdown; database/authentication substitutes are used, not real MySQL end-to-end validation |
+| Interactive client | `test_ftp_client.py` uses a pseudoterminal and test server; currently not registered with CTest |
+| Authentication and database | Service, repository, signup, transaction, and prepared-statement test sources are currently not registered with CMake; some require an explicitly configured real test database |
+| Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests |
+| Memory copy | Linking/basic correctness in CTest; deeper checks and benchmarks are spread across benchmark code and dedicated scripts |
 
-可使用 `ctest --preset debug -N` 查看当前构建目录登记的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake，不在文档中固定为某个通过数量。
+To run the built file transfer regression group:
 
-MySQL 集成测试使用 `TLSS_TEST_MYSQL_HOST`、`TLSS_TEST_MYSQL_USER`、`TLSS_TEST_MYSQL_PASSWORD`、`TLSS_TEST_MYSQL_DATABASE`，以及可选的 `TLSS_TEST_MYSQL_PORT`。注册端到端测试另需 `TLSS_TEST_FTP_SIGNUP=1`，并使用服务连接池配置。请使用专门的测试数据库；未配置环境时部分用例会跳过，跳过不等于验证成功。当前仍有旧测试接口失配，见[待收尾事项](#当前限制与待收尾事项)。
+```bash
+ctest --preset debug -R '^ftp_transfer_'
+```
 
-建议按以下顺序阅读源码：
+Use `ctest --preset debug -N` to list tests registered in the current build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun; this document does not claim a fixed passing test count.
 
-1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`：了解服务入口、命令派发、会话状态与停机流程。
-2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`：追踪连接与消息处理。
-3. `src/common/base/tlss_thread_pool.cpp`、`src/common/base/mysql_connection_pool.cpp`：查看任务与数据库资源的生命周期。
-4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`：追踪注册、登录与虚拟目录的数据库操作。
-5. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`：追踪独立监控示例。
-6. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
-7. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
+The unregistered MySQL integration test sources use `TLSS_TEST_MYSQL_HOST`, `TLSS_TEST_MYSQL_USER`, `TLSS_TEST_MYSQL_PASSWORD`, and `TLSS_TEST_MYSQL_DATABASE`, with optional `TLSS_TEST_MYSQL_PORT`. The signup end-to-end test additionally requires `TLSS_TEST_FTP_SIGNUP=1` and uses the service connection pool configuration. Use a dedicated test database. Some cases skip when their environment is not configured; a skip is not successful validation. Some old tests still reference obsolete interfaces; see [remaining work](#current-limitations-and-remaining-work).
 
-## 当前限制与待收尾事项
+Suggested source reading order:
 
-- 文件上传、下载、内容校验和对象存储未完成；目录操作已形成元数据闭环，但不是完整文件存储闭环。
-- 监控库未在主服务中初始化；连接数、业务队列、数据库池等指标尚未自动接入。
-- RPC/网关为占位，`.proto` 和 YAML 配置示例为空；端口、线程数量等尚无统一配置入口。
-- TCP 业务连接未启用 TLS；密码哈希保护的是存储凭据，不能替代传输保护。客户端尚未关闭密码输入回显。
-- `mkdir` 将目录 `object_hash` 写为字符串 `'NULL'`，注册根目录则写入 SQL `NULL`，需要统一语义。
-- [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) 仍引用旧的 `StorageEngine::ConnectionProvider`、`find_user_by_name()` 和旧会话字段，与当前接口失配；启用 GoogleTest 后需要先同步这些用例。[test_ftp_server.cpp](tests/test_ftp_server.cpp) 仍包含占位断言。
-- 监控中部分异常已被隔离，但错误记录仍为 TODO；业务线程池未捕获的异常则可能终止进程，两者的异常策略不同。
-- `scripts/build.sh` 末尾的运行提示仍含未实现的 `--config` 参数；实际启动方式以本文的 `./bin/storage-service` 为准。
+1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`: service entry point, command dispatch, session state, and shutdown flow.
+2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`: connection and message handling.
+3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
+4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`: database operations for signup, login, and virtual directories.
+5. `inc/ftp/file_transfer.h` → `src/ftp/async_file_receiver.cpp` → `src/ftp/async_file_source.cpp` → `src/common/net/tcp_connection.cpp`: publication, asynchronous disk IO, backpressure, and ordered sending.
+6. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
+7. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
+8. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
 
-## 演进路线与接入时机
+## Current limitations and remaining work
 
-以下是面向当前代码的建议路线，均不表示相关功能已经交付。推荐顺序为：**整理业务边界 → 接入小范围 gRPC → 完成文件存储闭环 → 接入 Kafka 异步事件 → 按实际需求拆分部署。**
+- Single-node uploads/downloads and content-addressed persistence are implemented. Resumable transfers, overwrite updates, file deletion, and object garbage collection are not. Failures between object publication and MySQL insertion can leave unreferenced objects; crash recovery for temporary files and metadata consistency is not implemented.
+- The main service does not initialize monitoring. Connection counts, worker queues, and database pool metrics are not automatically reported.
+- RPC and gateway code are placeholders; `.proto` files and the YAML example are empty. Ports, thread counts, and other settings do not yet share a unified configuration entry point.
+- Business TCP connections do not use TLS. Password hashing protects stored credentials, not transport. The client still echoes password input.
+- [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) still constructs `StorageEngine` through the old connection-provider interface and uses the removed `find_user_by_name()` method and old session fields. This source is not registered with CMake and needs updating before its target is restored. [test_ftp_server.cpp](tests/test_ftp_server.cpp) still contains a placeholder assertion.
+- Monitoring isolates some exceptions but leaves error reporting as TODO work. Uncaught worker pool exceptions can terminate the process, so the two components have different exception policies.
+- The final run hint in `scripts/build.sh` still includes the unimplemented `--config` option. Use `./bin/storage-service` as documented here.
 
-| 阶段 | 建设内容 | 可验证的完成条件 |
+## Evolution roadmap and integration timing
+
+The following is a proposed roadmap for the current code, not a list of delivered features. The recommended order is **clarify business boundaries → introduce a small gRPC API → improve storage consistency and recovery → add Kafka events → split deployments when needed**.
+
+| Stage | Work | Verifiable completion criteria |
 | --- | --- | --- |
-| 1. 稳定现有业务边界 | 提取协议无关业务接口、统一错误类型、修复旧测试和目录字段语义 | 业务用例不依赖 `TcpConnection` 即可测试；现有命令行为有回归验证 |
-| 2. gRPC 入口 | 认证、列目录、创建目录；与 TCP 共享业务实现 | 两种入口的权限与结果一致；验证 deadline、取消、重复写请求和有序退出 |
-| 3. 文件存储闭环 | MetadataStore、ObjectStore、上传下载、哈希、临时文件与恢复 | 上传内容可下载校验；中断、重试、对象与元数据不一致有明确处理 |
-| 4. Kafka 事件链路 | 事务 Outbox、发布器、一个审计或索引消费者 | broker 不可用时事件保留；恢复后可补发；重复消费不会重复产生业务效果 |
-| 5. 运行与部署演进 | 接入主服务监控，根据独立扩容和故障隔离需求拆服务 | 积压、失败和资源占用可观测；部署和恢复流程可验证 |
+| 1. Stabilize business boundaries | Extract protocol-independent interfaces, unify error types, repair and register obsolete tests | Business cases can be tested without `TcpConnection`; real MySQL and client end-to-end flows have regression checks |
+| 2. gRPC entry point | Authentication, directory listing, and directory creation sharing TCP business logic | Both entry points enforce the same permissions and results; validate deadlines, cancellation, duplicate writes, and orderly shutdown |
+| 3. Storage consistency and recovery | Extract MetadataStore and ObjectStore around existing transfers; add crash recovery, orphan reclamation, and retry semantics | Metadata failure after publication, process exits, duplicate requests, and interrupted transfers have verifiable repair or cleanup behavior |
+| 4. Kafka events | Transactional Outbox, publisher, and one audit or indexing consumer | Events survive broker outages and publish after recovery; duplicate consumption does not duplicate business effects |
+| 5. Operations and deployment | Integrate service monitoring and split services when independent scaling or failure isolation requires it | Backlogs, failures, and resource usage are observable; deployment and recovery procedures can be validated |
 
-监控接入可以随各阶段推进，尤其应覆盖 RPC 延迟、任务拒绝、数据库借用失败、outbox 积压和消费失败。阶段以能力和验证结果划分，不以固定开发天数划分。
+Monitoring can progress alongside these stages, particularly for RPC latency, rejected tasks, database acquisition failures, outbox backlog, and consumer failures. Stages are defined by capabilities and verification, not fixed development dates.
 
-### gRPC：业务接口稳定后即可接入
+### gRPC: integrate once business interfaces are stable
 
-现有 `AuthService` 和 `StorageEngine` 已有可复用基础。下一步让协议解析、会话提示符和连接对象留在入口层，让业务接口接收身份上下文、目录 ID/路径及结构化请求，并返回结构化结果。
+`AuthService` and `StorageEngine` already provide reusable foundations. Keep protocol parsing, session prompts, and connection objects in the entry layer. Business interfaces should accept identity context, directory IDs/paths, and structured requests, and return structured results.
 
 ```text
-TCP 命令入口 ─┐
-             ├→ 统一业务接口 → 用户仓储 / MetadataStore / ObjectStore
-gRPC 入口 ───┘
+TCP command entry ─┐
+                  ├→ Shared business APIs → User repository / MetadataStore / ObjectStore
+gRPC entry ────────┘
 ```
 
-第一版可在同一进程、不同端口提供 TCP 与 gRPC：保留自研 Reactor 供现有客户端使用，gRPC 使用自身运行时。无需为接入 RPC 同时拆分认证、目录、存储等微服务，也不必将 gRPC 的 socket 纳入现有 epoll 管理。
+The first version can serve TCP and gRPC on different ports in the same process. Keep the custom Reactor for existing clients and let gRPC use its own runtime. RPC integration does not require splitting authentication, directories, and storage into microservices at the same time, or managing gRPC sockets in the existing epoll loop.
 
-优先定义 `Register`、`Login`、`ListDirectory`、`CreateDirectory`；`GetFileInfo` 在业务实现后加入。用普通 RPC 先验证接口，再根据文件业务设计客户端流上传和服务端流下载。gRPC 提供普通请求、客户端流、服务端流和双向流等形态，见 [gRPC 核心概念](https://grpc.io/docs/what-is-grpc/core-concepts/)。
+Start with `Register`, `Login`, `ListDirectory`, and `CreateDirectory`; add `GetFileInfo` after implementing its business behavior. Validate the APIs with unary RPCs, then design client-streaming uploads and server-streaming downloads around the file workflow. gRPC supports unary, client-streaming, server-streaming, and bidirectional-streaming calls; see [gRPC core concepts](https://grpc.io/docs/what-is-grpc/core-concepts/).
 
-| 设计点 | 建议契约 |
+| Design point | Recommended contract |
 | --- | --- |
-| 身份 | 每次调用携带可验证凭据，服务端生成身份上下文并检查资源权限；不能把客户端自报的 user ID 当作认证 |
-| 当前目录 | 由客户端维护，RPC 显式携带目录 ID 或路径；`cd` 可作为客户端解析和更新上下文的行为 |
-| 错误 | 统一业务错误，由 TCP 和 gRPC 分别映射；不得把 SQL 或凭据等内部信息直接返回 |
-| deadline / 取消 | 客户端显式设置 deadline；服务端协作停止可取消工作，已提交的数据库写入不能据此认定失败 |
-| 写入幂等 | 注册、建目录、上传完成等操作定义请求 ID、去重范围和结果查询，避免超时重试重复执行 |
-| 执行与停机 | 明确 gRPC 处理线程和业务线程池的分工；使用异步 API 时不在回调中阻塞执行长 SQL/哈希；停机先停止请求再等待业务和运行时清理 |
+| Identity | Carry verifiable credentials on each call; derive identity and enforce resource permissions on the server. A caller-supplied user ID is not authentication |
+| Current directory | Maintain it on the client and pass a directory ID or path explicitly. `cd` can resolve and update client context |
+| Errors | Define shared business errors and map them separately for TCP and gRPC; do not return internal SQL or credentials |
+| Deadlines and cancellation | Set client deadlines explicitly; stop cancellable work cooperatively. Cancellation does not establish that a committed database write failed |
+| Idempotent writes | Define request IDs, deduplication scope, and result queries for signup, directory creation, and upload completion to prevent duplicate effects after timeout retries |
+| Execution and shutdown | Separate gRPC processing responsibilities from worker pool work. With asynchronous APIs, avoid long SQL/hash operations blocking callbacks. Stop new requests before draining work and cleaning up the runtime |
 
-gRPC 默认不设置 deadline；超时或取消也不意味着业务副作用已经回滚。实现应延续现有“提交结果未知”的表达，并验证重试行为，参考 [Deadlines](https://grpc.io/docs/guides/deadlines/) 与 [Cancellation](https://grpc.io/docs/guides/cancellation/)。
+gRPC has no default deadline. A timeout or cancellation also does not imply that side effects were rolled back. Preserve the existing unknown-commit-outcome distinction and validate retry behavior; see [Deadlines](https://grpc.io/docs/guides/deadlines/) and [Cancellation](https://grpc.io/docs/guides/cancellation/).
 
-不必等上传下载完成才引入 gRPC。先接稳定的认证与目录接口，再围绕相同业务边界设计文件传输，可以减少后续协议返工。
+Existing TCP uploads/downloads can remain available. Introduce stable authentication and directory RPCs first, then extract existing file business logic for reuse by streaming RPCs to reduce duplicate implementation during migration.
 
-### Kafka：有可靠业务事件和实际消费者时接入
+### Kafka: integrate when durable business events have real consumers
 
-Kafka 适合上传后异步处理、多个消费者订阅、积压恢复和历史事件重放。当前以目录请求/响应为主，优先完成存储闭环，再以 `FileUploaded → 审计或索引` 作为第一条链路。
+Kafka fits asynchronous post-upload processing, multiple subscribers, backlog recovery, and historical event replay. Uploads already publish objects and insert metadata, but no business events are emitted. Once recovery and idempotency semantics are defined, use `FileUploaded → audit or indexing` as the first event pipeline.
 
-候选事件包括 `FileUploaded`、`FileDeleted`、`DirectoryCreated`、`UserRegistered`；它们是后续协议设计，不是已有 topic。首版建议只选一个事件和一个消费者，验证可靠性后再扩展缩略图、扫描等处理。
+Candidate events include `FileUploaded`, `FileDeleted`, `DirectoryCreated`, and `UserRegistered`. These are proposed contracts, not existing topics. Start with one event and one consumer; validate reliability before adding thumbnail generation, scanning, or other processing.
 
 ```text
-文件可靠落盘，元数据可发布
+File durably stored; metadata ready to publish
             ↓
-MySQL 同一事务：更新业务元数据 + 插入 outbox_events
+One MySQL transaction: update business metadata + insert outbox_events
             ↓
-后台发布器读取 outbox → Kafka → 审计 / 索引消费者
+Background publisher reads outbox → Kafka → audit / indexing consumer
             ↓
-发送确认后标记已发送；消费者按 event_id 幂等处理
+Mark sent after delivery confirmation; consumer handles event_id idempotently
 ```
 
-只在 SQL 提交后调用一次 `send()` 会留下“数据库提交、消息未发送”的窗口；应将业务记录和事件记录写入同一数据库事务。后台发布器首版可以轮询数据库，后续再按需求引入 CDC。Outbox 的事件 ID 可用于去重，业务实体 ID 可作为消息 key，参考 [Debezium Outbox Event Router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html)。
+Calling `send()` once after an SQL commit leaves a window where the database is committed but the event is not sent. Write business records and event records in the same database transaction. The first publisher can poll the database; introduce CDC later if needed. Outbox event IDs support deduplication, and business entity IDs can serve as message keys; see [Debezium Outbox Event Router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html).
 
-需要先确定以下语义：
+Define the following semantics first:
 
-| 问题 | 建议处理 |
+| Concern | Recommended handling |
 | --- | --- |
-| 消息内容 | 传递事件 ID、版本、文件/用户 ID、对象哈希、大小等元数据；文件内容走存储和传输接口 |
-| 文件与数据库一致性 | 先完成临时文件、校验与可靠对象发布，再提交可用元数据和事件；处理失败后可能遗留的孤儿对象 |
-| 发布失败 | outbox 保留待发送记录，后台退避重试；broker 不可用时观察容量和积压 |
-| 重复发布 | 发送成功后、更新 outbox 状态前可能退出，因此必须允许重复事件 |
-| 消费幂等 | 处理成功后提交消费位置；数据库消费者将 event_id 去重记录与业务修改放入同一事务，外部副作用另设幂等机制 |
-| 顺序 | 选择合适的分区 key，例如文件 ID，并控制发布顺序；Kafka 分区有序不等于 topic 全局有序 |
-| 失败隔离 | 定义重试上限、失败事件保留与人工重放方式，避免坏事件无限阻塞正常消费 |
+| Message contents | Carry event ID, version, file/user IDs, object hash, size, and other metadata; transfer file contents through storage and transfer APIs |
+| File/database consistency | Complete temporary-file handling, verification, and durable object publication before committing available metadata and its event; handle orphaned objects left by failures |
+| Publishing failures | Retain pending outbox records and retry with backoff; monitor capacity and backlog during broker outages |
+| Duplicate publication | A process can exit after sending but before updating outbox state, so duplicate events must be expected |
+| Idempotent consumption | Commit consumer positions after successful processing. Database consumers should record event_id deduplication and business changes in one transaction; external effects need their own idempotency mechanism |
+| Ordering | Choose an appropriate partition key, such as file ID, and control publication order. Kafka partition ordering is not global topic ordering |
+| Failure isolation | Define retry limits, failed-event retention, and manual replay so a bad event cannot indefinitely block normal processing |
 
-Kafka 事务不能自动把 MySQL 和本地文件系统纳入一个原子事务。其 exactly-once 能力有明确适用范围，写外部系统仍需协调，参考 [Kafka 消息交付语义](https://kafka.apache.org/43/design/design/)。
+Kafka transactions do not automatically include MySQL and the local filesystem in an atomic transaction. Exactly-once guarantees have a defined scope, and external writes still require coordination; see [Kafka delivery semantics](https://kafka.apache.org/43/design/design/).
 
-现有告警文件 spool 可以提供持久化、重试和恢复的实现经验，但不能直接保证 MySQL 业务修改与事件原子提交；业务事件宜采用数据库事务 Outbox。
+The existing alarm file spool provides useful persistence, retry, and recovery experience, but cannot directly make MySQL business updates and event publication atomic. Business events should use a database transactional Outbox.
 
-### 可选的提前试验：监控事件进入 Kafka
+### Optional early experiment: monitoring events in Kafka
 
-如果近期目标是学习消息系统，可以先把独立监控 Collector 作为试验入口：
+If the immediate goal is learning messaging, the independent monitoring Collector offers an earlier integration point:
 
 ```text
-已有可靠告警 Collector
-→ 持久化的待转发记录
+Existing reliable alarm Collector
+→ Durable pending-forward records
 → Kafka
-→ 告警归档消费者
+→ Alarm archive consumer
 ```
 
-转发器需从持久化告警恢复待发送工作，并维护可恢复的发送进度。不能在 Collector 返回 ACK 后仅发起一次内存发送，否则进程退出会留下丢事件窗口。先保留已有可靠通道，通过桥接验证 Kafka；之后再决定是否调整节点上报架构。
+The forwarder must recover pending work from durable alarms and maintain recoverable publishing progress. A single in-memory send after the Collector returns ACK leaves an event-loss window if the process exits. Preserve the existing reliable channel while validating Kafka through a bridge, then decide whether to change node reporting.
 
-当业务确有独立部署或扩容需求时，再引入网关和跨进程 RPC。gRPC 承担需要立即响应的业务调用，Kafka 承担已发生业务事实的异步传播，各阶段都应先证明具体场景的收益。
+Introduce a gateway and cross-process RPC when independent deployment or scaling requires them. gRPC handles business calls that need an immediate response; Kafka distributes facts about completed business operations asynchronously. Each stage should demonstrate a benefit for a concrete use case.
 
+## About TLSS
+
+Toy-Level is the name this project has carried since its beginning.
+
+For me, it is both a software engineering project and a creation that grows as I learn.
+
+From the first networking code to a gradually emerging storage service, every module, every refactoring, and every problem encountered and solved reflects my understanding and thinking at a different stage.
+
+I hope TLSS keeps growing, and that its implementation, design, and lessons can offer something useful to other developers interested in C++, Linux, and storage systems.
+
+It may always be called Toy-Level, but I hope to keep treating every step of its growth with care.
