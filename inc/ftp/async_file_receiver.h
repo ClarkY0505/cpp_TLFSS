@@ -26,6 +26,7 @@
 
 namespace TLSS::FileStorage::Transfer {
 class AsyncReceiver;
+class AsyncFileSource;
 class DiskExecutor : NoCopy {
  public:
   static constexpr std::size_t kMaxReceivers = 64;
@@ -38,6 +39,7 @@ class DiskExecutor : NoCopy {
 
  private:
   friend class AsyncReceiver;
+  friend class AsyncFileSource;
 
   enum class Phase { created, running, closing, stopped };
 

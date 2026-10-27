@@ -3,6 +3,7 @@
 
 #include "ftp/file_transfer.h"
 #include "ftp/async_file_receiver.h"
+#include "ftp/async_file_source.h"
 
 #include <cstdint>
 #include <string>
@@ -48,6 +49,7 @@ struct SessionTransfer {
   /* std::shared_ptr<Transfer::Receiver> receiver; */
   // 使用异步磁盘任务，专用线程池，默认线程数量为2
   std::shared_ptr<Transfer::AsyncReceiver> writer;
+  std::shared_ptr<Transfer::AsyncFileSource> source;
 };
 
 struct ConnectionSession {

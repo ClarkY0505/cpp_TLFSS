@@ -232,7 +232,7 @@ void test_invalid_submission_is_rejected_without_callback() {
   require(runs == 0 && timeouts == 0,
           "expired rejected task ran or invoked timeout callback");
 }
-}  // namespace
+}  // namespace / 命名空间结束
 
 int main() {
   test_immediate_submission_executes_without_timeout();

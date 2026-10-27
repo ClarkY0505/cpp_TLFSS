@@ -392,7 +392,10 @@ void Client::reset_transfer() {
     _download_writer.reset();
   }
 
-  _upload_source.reset();
+  if (_upload_source) {
+    _upload_source->cancel();
+    _upload_source.reset();
+  }
 
   _download_destination.clear();
   _download_hash.clear();
@@ -401,11 +404,9 @@ void Client::reset_transfer() {
 }
 
 void Client::upload(const std::string& args) {
-  // FIXME 在修改了file_transfer中的数据结构后，不再抛出异常
   try {
     std::istringstream input(args);
-    const std::string local = Transfer::read_field(input);
-
+    const auto local = Transfer::read_field(input);
     input >> std::ws;
     std::string remote;
     if (input.eof()) {
@@ -414,24 +415,36 @@ void Client::upload(const std::string& args) {
       remote = Transfer::read_field(input);
       Transfer::require_end(input);
     }
-
-    if (local.find('\0') != std::string::npos || !Transfer::valid_name(remote)) {
+    if (local.empty() || local.find('\0') != std::string::npos || !Transfer::valid_name(remote)) {
       throw std::runtime_error("invalid filename");
     }
-
-    auto source = Transfer::open_source(local);
-
     auto conn = _client.connection();
-    if (!conn || !conn->connected()) {
-      throw std::runtime_error("not connected");
-    }
-
-    _upload_source = std::move(source);
-    _transfer_state = FileTransferState::waiting_upload_ready;
-
-    conn->send("@TLSS UPLOAD " + std::to_string(_upload_source->size) + " " +
-               Transfer::quote(remote) + "\n");
-
+    if (!conn || !conn->connected()) throw std::runtime_error("not connected");
+    _transfer_state = FileTransferState::preparing_upload_source;
+    auto lifetime = std::weak_ptr<int>(_disk_lifetime);
+    auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
+    auto factory = [local]() -> Transfer::AsyncFileSource::Opened {
+      return {Transfer::open_source(local), {}};
+    };
+    auto ready = [this, lifetime, weak_conn, remote](const Transfer::AsyncFileSource::Info& info) {
+      if (lifetime.expired()) return;
+      auto conn = weak_conn.lock();
+      if (!conn || !conn->connected() || _stopping) return;
+      if (_transfer_state != FileTransferState::preparing_upload_source) return;
+      _transfer_state = FileTransferState::waiting_upload_ready;
+      conn->send("@TLSS UPLOAD " + std::to_string(info.size) + " " + Transfer::quote(remote) + "\n");
+    };
+    auto failed = [this, lifetime, weak_conn](std::string error) {
+      if (lifetime.expired()) return;
+      const bool requested = _transfer_state != FileTransferState::preparing_upload_source;
+      reset_transfer();
+      std::cout << "[upload failed: " << error << "]\n" << std::flush;
+      if (requested) {
+        if (auto conn = weak_conn.lock()) conn->force_close();
+      }
+    };
+    _upload_source = Transfer::AsyncFileSource::open(
+        _disk_executor, conn, std::move(factory), std::move(ready), std::move(failed));
   } catch (const std::exception& exception) {
     reset_transfer();
     std::cout << "[upload failed: " << exception.what() << "]\n";
@@ -505,31 +518,23 @@ void Client::handle_transfer_response(const NET::TcpConnectionPtr& conn, const s
 
   if (verb == "UREADY" && _transfer_state == FileTransferState::waiting_upload_ready) {
     Transfer::require_end(input);
-
-    if (!_upload_source) {
-      throw std::runtime_error("upload source is missing");
-    }
-
-    const std::shared_ptr<Transfer::SourceFile> source = _upload_source;
+    if (!_upload_source) throw std::runtime_error("upload source is missing");
+    const auto source = _upload_source;
     auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
-
     _transfer_state = FileTransferState::waiting_upload_result;
-    NET::TcpConnection::FileSendCallback cb = [weak_conn](std::error_code error, uint64_t sent) {
+    NET::TcpConnection::FileSendCallback completed =
+        [source, weak_conn](std::error_code error, std::uint64_t sent) {
+      source->cancel();
       if (error) {
         std::cout << "\n[send failed after " << sent << " bytes: " << error.message() << "]\n"
                   << std::flush;
-
-        if (auto conn = weak_conn.lock()) {
-          conn->force_close();
-        }
+        if (auto conn = weak_conn.lock()) conn->force_close();
         return;
       }
-
       std::cout << "\n[sent " << sent << " bytes; waiting for server confirmation]\n" << std::flush;
     };
-    conn->send_file(source->file.fd, 0, source->size, cb);
-
-    _upload_source.reset();
+    conn->send_file_async(0, source->size(), source->reader(), std::move(completed));
+    // Keep the source until UOK/error so reset_transfer can cancel immediately.
     return;
   }
 

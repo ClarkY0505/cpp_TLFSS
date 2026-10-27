@@ -39,8 +39,8 @@ protected:
         ASSERT_TRUE(db_->connect(host, static_cast<unsigned short>(port),
                                  user, password, database));
 
-        // 临时 users 表仅当前连接可见，会遮蔽同名持久表。
-        // 所有测试数据均写入临时表，关闭连接后自动清理。
+        // 临时 users 表仅当前连接可见，会遮蔽同名持久表。 / The temporary users table is visible only to this connection and shadows the persistent table with the same name.
+        // 所有测试数据均写入临时表，关闭连接后自动清理。 / Write all test data to temporary tables, which are automatically removed when the connection closes.
         ASSERT_TRUE(db_->update_prepared(
             "CREATE TEMPORARY TABLE users ("
             "id BIGINT UNSIGNED NOT NULL PRIMARY KEY, "
@@ -56,7 +56,7 @@ protected:
     }
 
     void TearDown() override {
-        // 关闭连接时 MySQL 自动删除临时表。
+        // 关闭连接时 MySQL 自动删除临时表。 / MySQL automatically drops temporary tables when the connection closes.
         db_.reset();
     }
 
@@ -85,7 +85,7 @@ protected:
             std::make_shared<TLSS::FileStorage::ConnectionSession>();
         session->name = username;
 
-        // 把真实连接移交生产查询；查询完成后句柄关闭连接和临时表。
+        // 把真实连接移交生产查询；查询完成后句柄关闭连接和临时表。 / Pass the real connection to the production query; afterward the handle closes the connection and removes the temporary tables.
         TLSS::FileStorage::StorageEngine engine([this] {
             return TLSS::BASE::DbConnectionHandle(
                 db_.release(), TLSS::BASE::DbConnectionDeleter{});
@@ -285,5 +285,5 @@ TEST(StorageEngineInputTest, RejectsUnavailableConnection) {
               TLSS::FileStorage::LoginState::k_await_username);
 }
 
-}  // namespace
+}  // namespace / 命名空间结束
 

@@ -343,6 +343,9 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
     if (session && session->transfer.writer) {
       session->transfer.writer->cancel();
     }
+    if (session && session->transfer.source) {
+      session->transfer.source->cancel();
+    }
 
     return;
   }
@@ -1000,6 +1003,9 @@ void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
   if (session->transfer.writer) {
     session->transfer.writer->cancel();
   }
+  if (session->transfer.source) {
+    session->transfer.source->cancel();
+  }
   ++session->transfer_generation;
   session->transfer = SessionTransfer{};
 
@@ -1076,13 +1082,6 @@ void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
 void StorageService::handle_download(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& args) {
-  //
-  // HACK
-  // 在这里做try其实并不好
-  // 写在这里为了后续修改这部分
-  // 目前对于传输文件来说会抛出异常
-  // TODO 修改file_transfer中的数据结构
-  // FIXME 修改完数据结构后不再需要接收异常
   try {
     if (_stopping.load()) {
       conn->force_close();
@@ -1093,7 +1092,6 @@ void StorageService::handle_download(const NET::TcpConnectionPtr& conn,
       return;
     }
     if (session->transfer.phase != TransferPhase::idle) {
-      // Do not reset a transfer whose body may still be in flight.
       conn->force_close();
       return;
     }
@@ -1101,90 +1099,78 @@ void StorageService::handle_download(const NET::TcpConnectionPtr& conn,
       transfer_failed(conn, session, "session is busy");
       return;
     }
-
     std::istringstream input(args);
-    // FIXME 这里会抛出异常
-    const std::string name = Transfer::read_field(input);
-    // FIXME 这里会抛出异常
+    const auto name = Transfer::read_field(input);
     Transfer::require_end(input);
-    // FIXME 这里会抛出异常
     if (!Transfer::valid_name(name)) {
       transfer_failed(conn, session, "invalid remote filename");
       return;
     }
-
-    ++session->transfer_generation;
+    const auto generation = ++session->transfer_generation;
+    const auto user_id = session->user_id;
+    const auto username = session->name;
+    const auto directory = session->current_directory;
     session->transfer.phase = TransferPhase::preparing_download;
-
-    const std::string username = session->name;
-    const std::string directory = session->current_directory;
-
-    auto work = [this, username, directory, name]() -> PreparedDownload {
-      const StorageContext<std::string> result =
-          _storage_engine.find_download_hash(username, directory, name);
-      PreparedDownload prepared;
-      if (!result.success) {
-        prepared.error = "file not found or unavailable";
-        return prepared;
-      }
-
-      prepared.hash = result.result;
-      // FIXME 这里会抛出异常
-      prepared.source = Transfer::open_source(Transfer::object_root() / prepared.hash, true);
-      prepared.success = true;
-      return prepared;
+    auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
+    auto weak_session = std::weak_ptr<ConnectionSession>(session);
+    auto current = [weak_conn, weak_session, generation, user_id, username, directory] {
+      using Current = std::pair<NET::TcpConnectionPtr, std::shared_ptr<ConnectionSession>>;
+      auto conn = weak_conn.lock();
+      auto session = weak_session.lock();
+      if (!conn || !session || !conn->connected()) return Current{};
+      assert(conn->get_loop()->is_in_loop_thread());
+      if (session->transfer_generation != generation ||
+          session->login_state != LoginState::k_authenticated || session->user_id != user_id ||
+          session->name != username || session->current_directory != directory) return Current{};
+      return Current{std::move(conn), std::move(session)};
     };
-
-    /* auto finish = [this](const auto& conn, const auto& session, auto value, */
-    /* const std::string& error) { */
-    auto finish = [this](const std::shared_ptr<NET::TcpConnection>& conn,
-                         const std::shared_ptr<FileStorage::ConnectionSession>& session,
-                         std::optional<PreparedDownload> value, const std::string& error) {
-      // 本身的错误
-      if (!value) {
-        transfer_failed(conn, session, error);
+    auto factory = [this, username, directory, name]() -> Transfer::AsyncFileSource::Opened {
+      auto result = _storage_engine.find_download_hash(username, directory, name);
+      if (!result.success) throw std::runtime_error("file not found or unavailable");
+      auto file = Transfer::open_source(Transfer::object_root() / result.result, true);
+      return {std::move(file), std::move(result.result)};
+    };
+    auto ready = [this, current](const Transfer::AsyncFileSource::Info& info) {
+      auto [conn, session] = current();
+      if (!conn) return;
+      if (_stopping.load()) {
+        conn->force_close();
         return;
       }
-      // work业务的错误
-      if (!value->success) {
-        transfer_failed(conn, session, value->error);
-        return;
-      }
-
+      if (session->transfer.phase != TransferPhase::preparing_download) return;
+      const auto source = session->transfer.source;
+      if (!source) throw std::runtime_error("download source is missing");
       session->transfer.phase = TransferPhase::sending_download;
-      const std::uint64_t generation = session->transfer_generation;
-      auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
-      auto weak_session = std::weak_ptr<ConnectionSession>(session);
-
-      // 同一个 IO 回调中连续提交，保证头部和正文相邻。
-      Transfer::send_control(conn,
-                             "DATA " + std::to_string(value->source->size) + " " + value->hash);
-      // 在发送完文件后的一个回调函数
-      NET::TcpConnection::FileSendCallback cb = [weak_conn, weak_session, generation](
-                                                    std::error_code error, uint64_t) {
-        auto conn = weak_conn.lock();
-        auto session = weak_session.lock();
-
-        if (!conn || !session || !conn->connected() || session->transfer_generation != generation) {
-          return;
-        }
-        if (error) {
+      // 同一回调中入队；异步文件占据 FIFO 位置，后续文本不能插入正文。
+      Transfer::send_control(conn, "DATA " + std::to_string(info.size) + " " + info.tag);
+      NET::TcpConnection::FileSendCallback completed =
+          [this, current, source](std::error_code error, std::uint64_t) {
+        source->cancel();
+        auto [conn, session] = current();
+        if (!conn) return;
+        if (session->transfer.source == source) session->transfer.source.reset();
+        if (error || _stopping.load()) {
           conn->force_close();
           return;
         }
-
-        // 先切换状态，再发送 DONE，避免 ACK 竞态。
         session->transfer.phase = TransferPhase::waiting_download_ack;
         Transfer::send_control(conn, "DONE");
       };
-      // FIXME 存在慢磁盘阻塞
-      conn->send_file(value->source->file.fd, 0, value->source->size, cb);
+      conn->send_file_async(0, info.size, source->reader(), std::move(completed));
     };
-
-    const bool accepted = submit_transfer_job(_th_pool, &_stopping, conn, session, work, finish);
-    if (!accepted) {
-      transfer_failed(conn, session, "server is busy");
-    }
+    auto failed = [this, current](std::string error) {
+      auto [conn, session] = current();
+      if (!conn) return;
+      if (_stopping.load()) {
+        conn->force_close();
+      } else if (session->transfer.phase == TransferPhase::preparing_download) {
+        transfer_failed(conn, session, error);
+      } else {
+        conn->force_close();
+      }
+    };
+    session->transfer.source = Transfer::AsyncFileSource::open(
+        _disk_executor, conn, std::move(factory), std::move(ready), std::move(failed));
   } catch (const std::exception& exception) {
     transfer_failed(conn, session, exception.what());
   }

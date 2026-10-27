@@ -4,6 +4,7 @@
 #include "common/net/channel.h"
 #include "common/net/tcp_client.h"
 #include "ftp/async_file_receiver.h"
+#include "ftp/async_file_source.h"
 #include "ftp/file_transfer.h"
 
 #include <signal.h>
@@ -24,6 +25,7 @@ class Client {
  private:
   enum class FileTransferState {
     idle,
+    preparing_upload_source,
     waiting_upload_ready,
     waiting_upload_result,
 
@@ -69,7 +71,7 @@ class Client {
 
   FileTransferState _transfer_state = FileTransferState::idle;
 
-  std::shared_ptr<Transfer::SourceFile> _upload_source;
+  std::shared_ptr<Transfer::AsyncFileSource> _upload_source;
   /* std::shared_ptr<Transfer::Receiver> _download_receiver; */
   std::shared_ptr<Transfer::AsyncReceiver> _download_writer;
   Transfer::DiskExecutor _disk_executor{"tlss_cli_disk"};

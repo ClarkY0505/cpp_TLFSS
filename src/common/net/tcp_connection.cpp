@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <limits>
 #include <utility>
 
 namespace TLSS::NET {
@@ -267,6 +268,103 @@ void TcpConnection::send_file(int fd, off_t offset, uint64_t count, FileSendCall
   /* std::move(task), prepare_error)); */
 }
 
+
+void TcpConnection::send_file_async(off_t offset, std::uint64_t count,
+                                    FileReadFunction reader, FileSendCallback cb) {
+  PendingWrite task;
+  task.kind = PendingWrite::Kind::buffered_file;
+  task.file_offset = offset;
+  task.remaining = count;
+  task.reader = std::move(reader);
+  task.cb = std::move(cb);
+
+  int prepare_error = 0;
+  const auto max_offset = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+  if (offset < 0 || !task.reader) {
+    prepare_error = EINVAL;
+  } else if (count > max_offset - static_cast<std::uint64_t>(offset)) {
+    prepare_error = EOVERFLOW;
+  }
+
+  auto self = shared_from_this();
+  _loop->run_in_loop([self, task = std::move(task), prepare_error]() mutable {
+    self->send_file_in_loop(std::move(task), prepare_error);
+  });
+}
+
+void TcpConnection::request_file_read() {
+  assert(_loop->is_in_loop_thread());
+  assert(!_writes.empty());
+  if (_next_read_sequence == std::numeric_limits<std::uint64_t>::max()) {
+    fail_writes(EOVERFLOW);
+    return;
+  }
+
+  auto& task = _writes.front();
+  assert(task.kind == PendingWrite::Kind::buffered_file);
+  assert(!task.read_pending && task.data.empty() && task.remaining != 0);
+  const auto sequence = ++_next_read_sequence;
+  const auto offset = task.file_offset;
+  const auto count = static_cast<std::size_t>(
+      std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
+  auto reader = task.reader;
+  task.read_pending = true;
+  task.read_sequence = sequence;
+  task.read_size = count;
+
+  // 等待磁盘时没有可写数据，关闭 EPOLLOUT 避免空转。
+  if (_channel->is_writing()) {
+    _channel->disable_writing();
+  }
+  auto weak = weak_from_this();
+  FileReadCompletion completion = [weak, sequence](std::error_code error,
+                                                  std::string data) mutable {
+    if (auto conn = weak.lock()) {
+      // 即使 reader 同步完成，也不重入当前发送队列操作。
+      conn->_loop->queue_in_loop([weak, sequence, error, data = std::move(data)]() mutable {
+        if (auto conn = weak.lock()) {
+          conn->on_file_read(sequence, error, std::move(data));
+        }
+      });
+    }
+  };
+  // 调用外部 reader 后不再访问上面的队首引用。
+  try {
+    reader(offset, count, std::move(completion));
+  } catch (const std::system_error& exception) {
+    fail_writes(exception.code().value() != 0 ? exception.code().value() : EIO);
+  } catch (...) {
+    fail_writes(EIO);
+  }
+}
+
+void TcpConnection::on_file_read(std::uint64_t sequence, std::error_code error,
+                                 std::string data) {
+  assert(_loop->is_in_loop_thread());
+  // disconnecting 仍需要排空已有任务。
+  if (_state.load() == k_disconnected || _writes.empty()) {
+    return;
+  }
+  auto& task = _writes.front();
+  if (task.kind != PendingWrite::Kind::buffered_file || !task.read_pending ||
+      task.read_sequence != sequence) {
+    return;
+  }
+  task.read_pending = false;
+  if (error) {
+    fail_writes(error.value() != 0 ? error.value() : EIO);
+    return;
+  }
+  if (data.size() != task.read_size || data.size() > task.remaining ||
+      data.size() > task.read_reservation) {
+    fail_writes(EIO);
+    return;
+  }
+  task.data = std::move(data);
+  task.data_offset = 0;
+  enable_write_event();
+}
+
 void TcpConnection::set_high_water_mark(std::size_t bytes) {
   if (!_loop->is_in_loop_thread() || bytes == 0 || bytes > kMaxPendingBytes) {
     net_logger()->error("invalid high water mark");
@@ -408,6 +506,12 @@ void TcpConnection::handle_read(TIME::Timestamp receive_time) {
 }
 
 void TcpConnection::enable_write_event() {
+  if (!_writes.empty()) {
+    const auto& front = _writes.front();
+    if (front.kind == PendingWrite::Kind::buffered_file && front.read_pending) {
+      return;
+    }
+  }
   if (!_channel->is_writing()) {
     _channel->enable_writing();
   }
@@ -416,6 +520,7 @@ void TcpConnection::enable_write_event() {
 void TcpConnection::notify_file(PendingWrite task, int error) {
   // 1. 释放本任务持有的文件资源引用
   task.file.reset();
+  task.reader = {};
   // 2. 业务没有提供回调，资源释放后即可返回
   if (!task.cb) {
     return;
@@ -439,25 +544,21 @@ void TcpConnection::notify_file(PendingWrite task, int error) {
 }
 
 void TcpConnection::complete_front() {
-  // 1. 先取走任务，在删除队首元素
   PendingWrite task = std::move(_writes.front());
   _writes.pop_front();
-
   if (task.kind == PendingWrite::Kind::memory) {
-    // 2. 普通数据
-    // 扣除它占用的内存统计
     _pending_memory_bytes -= task.data.size();
-  } else {
-    // 3. 文件任务
-    // 减少文件数量， 报告成功
-    --_pending_files;
-    notify_file(std::move(task), 0);
+    return;
   }
+  if (task.kind == PendingWrite::Kind::buffered_file) {
+    _pending_memory_bytes -= task.read_reservation;
+  }
+  --_pending_files;
+  notify_file(std::move(task), 0);
 }
 
 void TcpConnection::handle_write() {
   assert(_loop->is_in_loop_thread());
-
   if (_state.load() == k_disconnected || !_channel->is_writing()) {
     return;
   }
@@ -466,92 +567,74 @@ void TcpConnection::handle_write() {
   unsigned steps = 0;
   while (!_writes.empty() && budget > 0 && steps < kWriteSteps) {
     ++steps;
-    PendingWrite& task = _writes.front();
-
-    // 空文件任务不需要执行 sendfile
-    if (task.kind == PendingWrite::Kind::file && task.remaining == 0) {
+    auto& task = _writes.front();
+    if (task.kind != PendingWrite::Kind::memory && task.remaining == 0) {
       complete_front();
       continue;
     }
+    if (task.kind == PendingWrite::Kind::buffered_file && task.data.empty()) {
+      if (task.read_pending) {
+        _channel->disable_writing();
+      } else {
+        request_file_read();
+      }
+      return;
+    }
 
     ssize_t n;
-    if (task.kind == PendingWrite::Kind::memory) {
-      // 普通数据
-      // 从上次发送结束的位置继续发送
-      const std::size_t remaining = task.data.size() - task.data_offset;
-      const std::size_t count = std::min(remaining, budget);
-      n = ::send(_channel->fd(), task.data.data() + task.data_offset, count, MSG_NOSIGNAL);
-    } else {
-      // 文件
-      // 从保存的文件偏移量继续
-      const std::size_t count =
-          static_cast<std::size_t>(std::min<uint64_t>(task.remaining, budget));
+    if (task.kind == PendingWrite::Kind::file) {
+      const auto count = static_cast<std::size_t>(
+          std::min<std::uint64_t>(task.remaining, budget));
       n = sendfile_no_sigpipe(_channel->fd(), task.file->fd, &task.file_offset, count);
+    } else {
+      const auto count = std::min(task.data.size() - task.data_offset, budget);
+      n = ::send(_channel->fd(), task.data.data() + task.data_offset, count, MSG_NOSIGNAL);
     }
 
     if (n > 0) {
-      const std::size_t written = static_cast<std::size_t>(n);
+      const auto written = static_cast<std::size_t>(n);
       budget -= written;
       bool completed;
       if (task.kind == PendingWrite::Kind::memory) {
         task.data_offset += written;
         completed = task.data_offset == task.data.size();
+      } else if (task.kind == PendingWrite::Kind::buffered_file) {
+        task.data_offset += written;
+        task.file_offset += static_cast<off_t>(written);
+        task.remaining -= written;
+        task.file_sent += written;
+        if (task.data_offset == task.data.size()) {
+          std::string{}.swap(task.data);
+          task.data_offset = 0;
+        }
+        completed = task.remaining == 0;
       } else {
-        // file_offset 已由 sendfile 更新
-        // 在这里不需要累加
         task.remaining -= written;
         task.file_sent += written;
         completed = task.remaining == 0;
       }
-
-      if (completed) {
-        complete_front();
-      }
-
+      if (completed) complete_front();
       continue;
     }
-
     if (n == 0) {
-      // 请求发送的长度大于0
-      // 提前读到了EOF
       fail_writes(EIO);
       return;
     }
     const int error = errno;
-    if (error == EINTR) {
-      continue;
-    }
-
-    if (error == EAGAIN || error == EWOULDBLOCK) {
-      // 暂时不可写，保留队列和发送进度
-      return;
-    }
+    if (error == EINTR) continue;
+    if (error == EAGAIN || error == EWOULDBLOCK) return;
     fail_writes(error);
     return;
   }
 
-  if (!_writes.empty()) {
-    // 本轮预算用完
-    // 保留写事件监听
-    return;
-  }
-
-  // 全部任务完成，避免无意义的可写事件。
+  if (!_writes.empty()) return;
   _channel->disable_writing();
-
   if (_write_cb) {
     auto self = shared_from_this();
     auto callback = _write_cb;
-
-    _loop->queue_in_loop([self, callback] {
-      callback(self);
-    });
+    _loop->queue_in_loop([self, callback] { callback(self); });
   }
-
-  // 优雅关闭：等全部任务发送完，再关闭写方向。
-  if (_state.load() == k_disconnecting) {
-    shutdown_in_loop();
-  }
+  if (_state.load() == k_disconnecting) shutdown_in_loop();
 }
 
 // 使用高水位设置后的修改函数
@@ -625,39 +708,42 @@ void TcpConnection::send_in_loop(const void* data, std::size_t len) {
 }
 
 void TcpConnection::send_file_in_loop(PendingWrite task, int prepare_error) {
-  // 其实这里检查是否在当前loop线程中没有必要
-  // 当前tlss的设计应该不会出现阻塞
-  // 在tlss中不会在线程池中自己关闭自己
-  // 虽然当前线程池设计了优雅退出能力，将主loop放入线程池中
-  // 可以通过回调完成自己关闭自己的能力
   assert(_loop->is_in_loop_thread());
-
-  // 1. 执行时再次检查连接状态
   if (_state.load() != k_connected) {
     notify_file(std::move(task), ENOTCONN);
     return;
   }
-
-  // 2.处理上一层准备文件时发生的错误
   if (prepare_error != 0) {
     notify_file(std::move(task), prepare_error);
     fail_writes(prepare_error);
     return;
   }
-
-  // 3. 检查待发送任务数量和文件数量
   if (_writes.size() >= kMaxPendingTasks || _pending_files >= kMaxPendingFiles) {
     notify_file(std::move(task), ENOBUFS);
     fail_writes(ENOBUFS);
     return;
   }
-
-  // 4. 放入队尾
+  if (task.kind == PendingWrite::Kind::buffered_file) {
+    task.read_reservation = static_cast<std::size_t>(
+        std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
+    if (task.read_reservation > kMaxPendingBytes - _pending_memory_bytes) {
+      notify_file(std::move(task), ENOBUFS);
+      fail_writes(ENOBUFS);
+      return;
+    }
+  }
+  const auto old_size = _pending_memory_bytes;
+  const auto reservation = task.read_reservation;
   _writes.push_back(std::move(task));
   ++_pending_files;
-
-  // 5. 等待可写事件，由handle_write()真正发送
+  _pending_memory_bytes += reservation;
   enable_write_event();
+  if (old_size < _high_water_mark && _pending_memory_bytes >= _high_water_mark && _high_water_cb) {
+    auto self = shared_from_this();
+    auto callback = _high_water_cb;
+    const auto size = _pending_memory_bytes;
+    _loop->queue_in_loop([self, callback, size] { callback(self, size); });
+  }
 }
 
 // 使用了高水位函数后的shutdow
@@ -674,8 +760,8 @@ void TcpConnection::shutdow() {
 }
 
 void TcpConnection::shutdown_in_loop() {
-  if (!_channel->is_writing()) {
-    // 此时当前缓冲区已经全部发送完成
+  // 等待读盘时 EPOLLOUT 已关闭，但发送队列可能仍未排空。
+  if (_writes.empty()) {
     _socket->shutdown_write();
   }
 }
@@ -687,7 +773,7 @@ void TcpConnection::cancel_pending(int error) {
     _writes.pop_front();
 
     // 2. 文件任务需要释放资源，并安排失败回调。
-    if (task.kind == PendingWrite::Kind::file) {
+    if (task.kind != PendingWrite::Kind::memory) {
       notify_file(std::move(task), error);
     }
 

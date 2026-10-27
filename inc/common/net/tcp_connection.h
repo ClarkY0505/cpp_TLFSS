@@ -29,7 +29,12 @@ class Socket;
  * */
 class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection> {
  public:
+  static constexpr std::size_t kAsyncFileChunk = 64 * 1024;
   using FileSendCallback = std::function<void(std::error_code error, uint64_t bytes_sent)>;
+  using FileReadCompletion = std::function<void(std::error_code, std::string)>;
+
+  using FileReadFunction =
+      std::function<void(off_t offset, std::size_t count, FileReadCompletion completion)>;
   TcpConnection(EventLoop* loop, const std::string& name, int sockfd, const InetAddress& local_addr,
                 const InetAddress& peer_addr);
   ~TcpConnection();
@@ -68,6 +73,11 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   //
   // 本函数返回不代表发送完成，以 callback 为准
   void send_file(int fd, off_t offset, uint64_t count, FileSendCallback cb = {});
+
+  // reader must complete every request with exactly count bytes or an error.
+  // The callback reports bytes submitted to the socket, not peer confirmation.
+  void send_file_async(off_t offset, std::uint64_t count, FileReadFunction reader,
+                       FileSendCallback cb = {});
   //
   // 异步落盘任务的独立的磁盘读取暂停
   // token 标识一个独立的磁盘接收任务。
@@ -120,7 +130,7 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
     int fd;
   };
   struct PendingWrite {
-    enum class Kind { memory, file };
+    enum class Kind { memory, file, buffered_file };
 
     Kind kind = Kind::memory;
 
@@ -135,6 +145,12 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
     uint64_t remaining = 0;
     uint64_t file_sent = 0;
     FileSendCallback cb;
+
+    FileReadFunction reader;
+    bool read_pending = false;
+    std::uint64_t read_sequence = 0;
+    std::size_t read_size = 0;
+    std::size_t read_reservation = 0;
   };
   void set_state(StateE s) {
     _state.store(s);
@@ -148,6 +164,8 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
   void send_in_loop(const void* data, size_t len);
   void send_file_in_loop(PendingWrite task, int prepare_error);
+  void request_file_read();
+  void on_file_read(std::uint64_t sequence, std::error_code error, std::string data);
 
   //
   // 异步落盘任务的独立的磁盘读取暂停
@@ -202,10 +220,12 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   std::deque<PendingWrite> _writes;
   /* Buffer _output_buffer; */
 
-  // 统计仍由内存任务持有的数据，包括已发送但尚未释放的前缀。
-  // 文件内容不计入该值。
+  // 普通任务持有的内存，加上异步文件任务预留的单块内存额度。
+  // 旧 send_file() 的文件内容不计入该值。
   std::size_t _pending_memory_bytes = 0;
   std::size_t _pending_files = 0;
+  // 连接级序列号，防止旧文件的迟到读取结果污染下一个文件。
+  std::uint64_t _next_read_sequence = 0;
 };
 }  // namespace TLSS::NET
 
