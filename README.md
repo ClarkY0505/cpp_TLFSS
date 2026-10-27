@@ -13,7 +13,7 @@ Built on a custom epoll Reactor networking framework, the project has gradually 
 
 By building foundational components rather than simply assembling established frameworks, TLSS explores how a storage service is built, runs, handles errors, and becomes more reliable through continued iteration.
 
-TLSS now provides basic single-node file storage. Ongoing work focuses on asynchronous disk IO, backpressure, resource lifecycles, testing and validation, and failure recovery.
+TLSS now provides basic single-node file storage capabilities, featuring asynchronous disk I/O and an initial traffic backpressure mechanism. The project is undergoing continuous refinement in areas such as resource lifecycle management, testing and verification, crash recovery, and file lifecycle management.
 
 **Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), file upload/download, SHA-256 content-addressed object storage, asynchronous disk IO, and graceful shutdown.
 
