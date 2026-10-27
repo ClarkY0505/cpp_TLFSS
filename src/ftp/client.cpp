@@ -56,7 +56,9 @@ Client::Client(NET::EventLoop* loop, const NET::InetAddress& server_addr)
 }
 
 Client::~Client() {
-  // start() and the EventLoop must have finished before destruction.
+  _disk_lifetime.reset();
+  reset_transfer();
+  _disk_executor.stop();
   remove_channel(_input_channel);
   remove_channel(_signal_channel);
   remove_channel(_timer_channel);
@@ -91,6 +93,8 @@ void Client::start() {
     NET::net_logger()->error("client pthread_sigmask");
   }
   _mask_saved = true;
+  // 工作线程继承当前线程的信号屏蔽状态。
+  _disk_executor.start(2);
 
   _signal_fd = ::signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
   if (_signal_fd < 0) {
@@ -143,30 +147,48 @@ void Client::on_connection(const NET::TcpConnectionPtr& conn) {
 void Client::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer,
                         TIME::Timestamp timestamp) {
   (void)timestamp;
+
   try {
     const std::string_view prefix = Transfer::kResponsePrefix;
+
     while (buffer->readable_bytes() != 0) {
+      if (_transfer_state == FileTransferState::preparing_download ||
+          _transfer_state == FileTransferState::finalizing_download) {
+        // 文件初始化或发布期间，保留已收到的内容。
+        return;
+      }
+
       if (_transfer_state == FileTransferState::receiving_download) {
-        _download_receiver->consume(*buffer);
-        if (_download_receiver->remaining() == 0) {
+        if (!_download_writer) {
+          throw std::runtime_error("download receiver is missing");
+        }
+
+        _download_writer->feed(*buffer);
+
+        if (_download_writer->remaining() == 0) {
           _transfer_state = FileTransferState::waiting_download_done;
         }
-        continue;
+
+        // 等本次磁盘任务完成后再处理 Buffer 剩余内容。
+        return;
       }
 
       const std::string_view bytes(buffer->peek(), buffer->readable_bytes());
+
       const auto position = bytes.find(prefix);
 
       if (position == std::string_view::npos) {
-        // 保留可能属于跨包控制前缀的末尾部分。
         std::size_t keep = std::min(bytes.size(), prefix.size() - 1);
+
         while (keep != 0 && bytes.substr(bytes.size() - keep) != prefix.substr(0, keep)) {
           --keep;
         }
+
         const std::size_t printable = bytes.size() - keep;
 
         if (printable != 0) {
           std::cout.write(buffer->peek(), static_cast<std::streamsize>(printable));
+
           std::cout.flush();
           buffer->retrieve(printable);
         }
@@ -176,6 +198,7 @@ void Client::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer,
 
       if (position != 0) {
         std::cout.write(buffer->peek(), static_cast<std::streamsize>(position));
+
         std::cout.flush();
 
         buffer->retrieve(position);
@@ -188,6 +211,7 @@ void Client::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer,
         if (bytes.size() > Transfer::kMaxControlBytes) {
           throw std::runtime_error("server control response too long");
         }
+
         return;
       }
 
@@ -337,15 +361,22 @@ void Client::finish_exit() {
   if (_finishing) {
     return;
   }
+
   _finishing = true;
+
+  reset_transfer();
+
+  // EventLoop 中只发起取消，不等待磁盘线程结束。
+  _disk_executor.begin_shutdown();
+
   _client.stop();
+
   remove_channel(_input_channel);
   remove_channel(_signal_channel);
   remove_channel(_timer_channel);
 
-  // TcpClient/Connector defer Channel removal through the EventLoop queue.
-  // Let these cleanup tasks run before quitting the loop.
   auto* loop = _loop;
+
   loop->queue_in_loop([loop] {
     loop->queue_in_loop([loop] {
       loop->queue_in_loop([loop] {
@@ -356,8 +387,12 @@ void Client::finish_exit() {
 }
 
 void Client::reset_transfer() {
+  if (_download_writer) {
+    _download_writer->cancel();
+    _download_writer.reset();
+  }
+
   _upload_source.reset();
-  _download_receiver.reset();
 
   _download_destination.clear();
   _download_hash.clear();
@@ -406,6 +441,7 @@ void Client::upload(const std::string& args) {
 void Client::download(const std::string& args) {
   try {
     std::istringstream input(args);
+
     const std::string remote = Transfer::read_field(input);
 
     if (!Transfer::valid_name(remote)) {
@@ -415,6 +451,7 @@ void Client::download(const std::string& args) {
     input >> std::ws;
 
     std::string local;
+
     if (input.eof()) {
       local = remote;
     } else {
@@ -426,27 +463,21 @@ void Client::download(const std::string& args) {
       throw std::runtime_error("invalid local path");
     }
 
-    const auto destination = std::filesystem::absolute(local);
-
-    if (std::filesystem::exists(destination)) {
-      throw std::runtime_error("local destination already exists");
-    }
-
-    if (!std::filesystem::is_directory(destination.parent_path())) {
-      throw std::runtime_error("local destination directory does not exist");
-    }
-
     auto conn = _client.connection();
+
     if (!conn || !conn->connected()) {
       throw std::runtime_error("not connected");
     }
 
-    _download_destination = destination;
+    // 此处只构造 path，不访问磁盘。
+    _download_destination = std::filesystem::path(local);
+
     _transfer_state = FileTransferState::waiting_download_header;
 
     conn->send("@TLSS DOWNLOAD " + Transfer::quote(remote) + "\n");
   } catch (const std::exception& exception) {
     reset_transfer();
+
     std::cout << "[download failed: " << exception.what() << "]\n";
   }
 }
@@ -518,24 +549,107 @@ void Client::handle_transfer_response(const NET::TcpConnectionPtr& conn, const s
   if (verb == "DATA" && _transfer_state == FileTransferState::waiting_download_header) {
     std::string size_text;
     std::string hash;
+
     if (!(input >> size_text >> hash)) {
       throw std::runtime_error("invalid download header");
     }
 
     Transfer::require_end(input);
-    const uint64_t size = Transfer::parse_size(size_text);
+
+    const std::uint64_t size = Transfer::parse_size(size_text);
 
     if (!Transfer::valid_hash(hash)) {
       throw std::runtime_error("invalid download hash");
     }
 
     _download_hash = hash;
+    _transfer_state = FileTransferState::preparing_download;
 
-    _download_receiver =
-        std::make_shared<Transfer::Receiver>(_download_destination.parent_path(), size);
+    struct LocalTarget {
+      std::filesystem::path destination;
+    };
 
-    _transfer_state = size == 0 ? FileTransferState::waiting_download_done
-                                : FileTransferState::receiving_download;
+    auto target = std::make_shared<LocalTarget>();
+
+    const auto requested_path = _download_destination;
+
+    auto lifetime = std::weak_ptr<int>(_disk_lifetime);
+    auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
+
+    auto factory = [requested_path, target, size] {
+      // 所有访问文件系统的操作都在工作线程执行。
+      target->destination = std::filesystem::absolute(requested_path);
+
+      if (std::filesystem::exists(target->destination)) {
+        throw std::runtime_error("local destination already exists");
+      }
+
+      if (!std::filesystem::is_directory(target->destination.parent_path())) {
+        throw std::runtime_error("local destination directory does not exist");
+      }
+
+      return std::make_unique<Transfer::Receiver>(target->destination.parent_path(), size);
+    };
+
+    auto finalizer = [target, hash](Transfer::Receiver& receiver) {
+      receiver.publish(target->destination, false, hash, 0600);
+
+      return target->destination.string();
+    };
+
+    auto ready = [this, lifetime, weak_conn, size] {
+      if (lifetime.expired()) {
+        return;
+      }
+
+      auto conn = weak_conn.lock();
+
+      if (!conn || !conn->connected() || _stopping) {
+        return;
+      }
+
+      _transfer_state = size == 0 ? FileTransferState::waiting_download_done
+                                  : FileTransferState::receiving_download;
+    };
+
+    auto done = [this, lifetime, weak_conn](std::string saved_path) {
+      if (lifetime.expired()) {
+        return;
+      }
+
+      auto conn = weak_conn.lock();
+
+      if (!conn || !conn->connected() || _stopping) {
+        return;
+      }
+
+      _download_destination = std::filesystem::path(std::move(saved_path));
+
+      _download_writer.reset();
+
+      _transfer_state = FileTransferState::waiting_download_ok;
+
+      // 文件已完整写入、校验、同步并发布之后才确认。
+      conn->send("@TLSS ACK\n");
+    };
+
+    auto failed = [this, lifetime, weak_conn](std::string error) {
+      if (lifetime.expired()) {
+        return;
+      }
+
+      std::cout << "\n[download failed: " << error << "]\n" << std::flush;
+
+      reset_transfer();
+
+      if (auto conn = weak_conn.lock()) {
+        conn->force_close();
+      }
+    };
+
+    _download_writer = Transfer::AsyncReceiver::create(
+        _disk_executor, conn, size, std::move(factory), std::move(finalizer), std::move(ready),
+        std::move(done), std::move(failed));
 
     return;
   }
@@ -543,17 +657,16 @@ void Client::handle_transfer_response(const NET::TcpConnectionPtr& conn, const s
   if (verb == "DONE" && _transfer_state == FileTransferState::waiting_download_done) {
     Transfer::require_end(input);
 
-    if (!_download_receiver || _download_receiver->remaining() != 0) {
+    if (!_download_writer || _download_writer->remaining() != 0) {
       throw std::runtime_error("download is incomplete");
     }
 
-    // 校验、同步并发布本地文件，不覆盖已有目标。
-    _download_receiver->publish(_download_destination, false, _download_hash, 0600);
-    _download_receiver.reset();
-    _transfer_state = FileTransferState::waiting_download_ok;
+    _transfer_state = FileTransferState::finalizing_download;
 
-    // 只有正文完整、校验通过并收到 DONE 后才确认。
-    conn->send("@TLSS ACK\n");
+    // 这里只提交工作线程任务。
+    // 校验、fsync 和 publish 不在 EventLoop 执行。
+    _download_writer->finish();
+
     return;
   }
 

@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <system_error>
+#include <unordered_set>
 namespace TLSS::NET {
 class Channel;
 class EventLoop;
@@ -67,6 +68,13 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   //
   // 本函数返回不代表发送完成，以 callback 为准
   void send_file(int fd, off_t offset, uint64_t count, FileSendCallback cb = {});
+  //
+  // 异步落盘任务的独立的磁盘读取暂停
+  // token 标识一个独立的磁盘接收任务。
+  // 恢复时只解除对应任务设置的暂停。
+  void pause_read_for_disk(std::uint64_t token);
+  void resume_read_after_disk(std::uint64_t token);
+
   void shutdow();
 
   void set_connection_cb(const ConnectionCb& cb) {
@@ -111,19 +119,16 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
     int fd;
   };
-  struct PendingWrite{
-      enum class Kind{
-          memory,
-          file
-      };
+  struct PendingWrite {
+    enum class Kind { memory, file };
 
-      Kind kind = Kind::memory;
+    Kind kind = Kind::memory;
 
-      // 普通数据任务
-      std::string data;
-      std::size_t data_offset = 0;
+    // 普通数据任务
+    std::string data;
+    std::size_t data_offset = 0;
 
-      // 文件任务。
+    // 文件任务。
     // shared_ptr 使任务可被 std::function 捕获。
     std::shared_ptr<FileHandle> file;
     off_t file_offset = 0;
@@ -143,6 +148,25 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
   void send_in_loop(const void* data, size_t len);
   void send_file_in_loop(PendingWrite task, int prepare_error);
+
+  //
+  // 异步落盘任务的独立的磁盘读取暂停
+  bool should_read_in_loop() const;
+  void update_read_interest();
+  void schedule_buffered_input();
+
+  // 发送缓冲区背压。
+  bool _send_read_paused = false;
+
+  // 停机期间只读取并丢弃数据，用来等待对端 FIN。
+  bool _read_eof_only = false;
+
+  // 已安排一次已有输入缓冲区的处理。
+  // 处理之前暂不继续从 socket 读取，防止积压增长。
+  bool _buffered_input_pending = false;
+
+  std::unordered_set<std::uint64_t> _disk_read_pauses;
+  TIME::Timestamp _last_receive_time;
 
   void enable_write_event();
   void complete_front();

@@ -27,6 +27,48 @@ class StorageService {
   bool stop(std::chrono::milliseconds grace_period = std::chrono::seconds(5));
 
  private:
+  struct PreparedUpload {
+    bool success = false;
+    std::string error;
+    std::string parent_id;
+    // 第一版使用的成员变量
+    // 该方法存在慢磁盘阻塞
+    /* std::shared_ptr<Transfer::Receiver> receiver; */
+  };
+  // 作为第一版上传文件数据结构的保留
+  /* struct CommitUploadResult { */
+  /* bool success = false; */
+  /* std::string hash; */
+  /* std::string error; */
+  /* }; */
+
+  struct PreparedDownload {
+    bool success = false;
+    std::string error;
+    std::string hash;
+    std::shared_ptr<Transfer::SourceFile> source;
+  };
+  struct UploadRequest {
+    std::uint64_t size = 0;
+    std::string name;
+  };
+
+  struct UploadContext {
+    std::weak_ptr<NET::TcpConnection> weak_conn;
+    std::weak_ptr<ConnectionSession> weak_session;
+
+    std::uint64_t generation = 0;
+    std::uint64_t user_id = 0;
+
+    std::string username;
+    std::string directory;
+    std::string name;
+    std::uint64_t size = 0;
+
+    using Current = std::pair<NET::TcpConnectionPtr, std::shared_ptr<ConnectionSession>>;
+
+    Current current() const;
+  };
   void on_connection(const NET::TcpConnectionPtr& conn);
   void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buf, TIME::Timestamp);
   bool dispatch_task(const NET::TcpConnectionPtr& conn,
@@ -48,13 +90,28 @@ class StorageService {
                      AUTH::SignupResult result);
 
   void handle_file_query();
+
+  UploadRequest parse_upload_request(const std::string& args);
+  void submit_upload_prepare(const NET::TcpConnectionPtr& conn,
+                             const std::shared_ptr<ConnectionSession>& session,
+                             UploadContext context);
+  void on_upload_prepared(const UploadContext& context, std::optional<PreparedUpload> value,
+                          const std::string& error);
+  void start_upload_receiver(const UploadContext& context, const NET::TcpConnectionPtr& conn,
+                             const std::shared_ptr<ConnectionSession>& session,
+                             const std::string& parent_id);
+  void on_upload_ready(const UploadContext& context);
+  void on_upload_done(const UploadContext& context, std::string hash);
+  void on_upload_failed(const UploadContext& context, std::string error);
   void handle_upload(const NET::TcpConnectionPtr& conn,
                      const std::shared_ptr<ConnectionSession>& session, const std::string& args);
 
   void handle_download(const NET::TcpConnectionPtr& conn,
                        const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  void finish_upload(const NET::TcpConnectionPtr& conn,
-                     const std::shared_ptr<ConnectionSession>& session);
+  // 该方法为第一版实现上传方式
+  // 现在版本为第二版，通过 AsyncReceiver::finish()来完成
+  /* void finish_upload(const NET::TcpConnectionPtr& conn, */
+  /* const std::shared_ptr<ConnectionSession>& session); */
   void handle_transfer_control(const NET::TcpConnectionPtr& conn,
                                const std::shared_ptr<ConnectionSession>& session,
                                const std::string& line);
@@ -86,6 +143,7 @@ class StorageService {
   NET::TcpServer _tcp_server;
   BASE::DbConnectionPool* _db_conn_pool;
   BASE::ThreadPool _th_pool;
+  Transfer::DiskExecutor _disk_executor{"tlss_disk"};
 
   std::atomic<bool> _stopping{false};
   std::mutex _stop_mutex;

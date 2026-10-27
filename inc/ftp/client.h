@@ -3,6 +3,7 @@
 
 #include "common/net/channel.h"
 #include "common/net/tcp_client.h"
+#include "ftp/async_file_receiver.h"
 #include "ftp/file_transfer.h"
 
 #include <signal.h>
@@ -25,14 +26,18 @@ class Client {
     idle,
     waiting_upload_ready,
     waiting_upload_result,
+
     waiting_download_header,
+    preparing_download,
     receiving_download,
     waiting_download_done,
+    finalizing_download,
     waiting_download_ok
   };
 
   void on_connection(const NET::TcpConnectionPtr& conn);
-  void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer, TIME::Timestamp timestamp);
+  void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buffer,
+                  TIME::Timestamp timestamp);
   void on_input();
   void on_signal();
   void on_timeout();
@@ -65,8 +70,11 @@ class Client {
   FileTransferState _transfer_state = FileTransferState::idle;
 
   std::shared_ptr<Transfer::SourceFile> _upload_source;
-  std::shared_ptr<Transfer::Receiver> _download_receiver;
-
+  /* std::shared_ptr<Transfer::Receiver> _download_receiver; */
+  std::shared_ptr<Transfer::AsyncReceiver> _download_writer;
+  Transfer::DiskExecutor _disk_executor{"tlss_cli_disk"};
+  // 异步回调访问 Client 前检查这个生命周期标记。
+  std::shared_ptr<int> _disk_lifetime = std::make_shared<int>(0);
   std::filesystem::path _download_destination;
   std::string _download_hash;
 };

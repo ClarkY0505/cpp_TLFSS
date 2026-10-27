@@ -48,9 +48,10 @@ StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir(
 
   std::string id = *row[0];
   result = db_conn->query_prepared(
-      "select file_name , file_type , created_at , updated_at  from virtual_files "
-      "where parent_id = ?;",
-      {id});
+      "select file_name , file_type , created_at , updated_at "
+      "from virtual_files "
+      "where username = ? and parent_id = ?;",
+      {username, id});
   if (!result.success) {
     BASE::mysql_logger()->error("storage engine query failed");
     return {false, {}};
@@ -174,7 +175,7 @@ bool StorageEngine::create_dir(const std::string& username, const std::string& c
   bool res = db_conn->update_prepared(
       "INSERT INTO virtual_files"
       "(file_name, username, parent_id, path, file_type, object_hash)"
-      "VALUES(? , ? , ? , ? ,'directory','NULL');",
+      "VALUES(? , ? , ? , ? ,'directory',NULL);",
       {directory, username, id, new_dir_path});
 
   return res;

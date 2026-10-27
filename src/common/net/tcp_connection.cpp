@@ -134,7 +134,7 @@ TcpConnection::TcpConnection(EventLoop* loop, const std::string& name, int sockf
     : _loop(check_loop_not_null(loop))
     , _name(name)
     , _state(k_connecting)
-    , _reading(true)
+    , _reading(false)
     , _read_paused_for_shutdown(false)
     , _socket(new Socket(sockfd))
     , _channel(new Channel(loop, sockfd))
@@ -277,67 +277,67 @@ void TcpConnection::set_high_water_mark(std::size_t bytes) {
 
 // 增加高水位函数后对应策略
 void TcpConnection::stop_read() {
-  auto self = shared_from_this();
-  _loop->run_in_loop([self] {
-    // 回调可能排队了一段时间；执行时重新检查水位。
-    if (self->_state.load() != k_connected || !self->_reading ||
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self] {
+    if (self->_state.load() != k_connected ||
         self->_pending_memory_bytes < self->_high_water_mark) {
       return;
     }
 
-    self->_reading = false;
-    self->_channel->disable_reading();
-  });
+    // 即使已经因为磁盘暂停，也要记录发送背压原因。
+    self->_send_read_paused = true;
+    self->update_read_interest();
+  };
+  _loop->run_in_loop(cb);
 }
 
 // 增加高水位函数后对应策略
 void TcpConnection::start_read() {
-  auto self = shared_from_this();
-  _loop->run_in_loop([self] {
-    // 写缓冲区排空后可恢复读取，但停机暂停标志优先于普通背压控制。
-    if (self->_state.load() != k_connected || self->_reading || self->_read_paused_for_shutdown ||
-        self->_pending_memory_bytes != 0) {
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self] {
+    if (self->_state.load() != k_connected || self->_pending_memory_bytes != 0) {
       return;
     }
 
-    self->_reading = true;
-    self->_channel->enable_reading();
-  });
+    // 这里只解除发送背压。
+    self->_send_read_paused = false;
+
+    self->schedule_buffered_input();
+    self->update_read_interest();
+  };
+  _loop->run_in_loop(cb);
 }
 
 void TcpConnection::pause_read_for_shutdown() {
-  auto self = shared_from_this();
-  _loop->run_in_loop([self] {
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self] {
     // 1. 设置停机标志，阻止普通背压恢复
     // 在所属 loop 中设置标志，阻止已经排队的写完成回调重新打开读取。
     self->_read_paused_for_shutdown = true;
-
-    // 2. 正常连接如果仍在读取，取消读事件监听
-    if (self->_reading && self->_state.load() == k_connected) {
-      self->_reading = false;
-      self->_channel->disable_reading();
-    }
-  });
+    self->_read_eof_only = false;
+    self->update_read_interest();
+  };
+  _loop->run_in_loop(cb);
 }
 
 void TcpConnection::shutdown_for_server_stop() {
-  auto self = shared_from_this();
-  _loop->run_in_loop([self] {
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self] {
     if (self->_state.load() != k_connected) {
       return;
     }
 
-     // 1. 拒绝新的发送任务，继续处理已有任务
+    // 1. 拒绝新的发送任务，继续处理已有任务
     self->set_state(k_disconnecting);
-    // 重新监听读事件只为识别对端 FIN；收到的数据会被丢弃。
-    if (!self->_reading) {
-     // 2. 重新监听读取，用于观察对端 EOF
-      self->_reading = true;
-      self->_channel->enable_reading();
-    }
+    self->_read_paused_for_shutdown = true;
+    self->_read_eof_only = true;
+
+    self->_input_buffer.retrieve_all();
+    self->update_read_interest();
     // 若输出缓冲区仍有数据，实际关闭写端由 handle_write 在排空后完成。
     self->shutdown_in_loop();
-  });
+  };
+  _loop->run_in_loop(cb);
 }
 
 // 增加高水位函数后对应策略
@@ -349,11 +349,15 @@ void TcpConnection::force_close() {
 }
 
 void TcpConnection::connect_established() {
+  assert(_loop->is_in_loop_thread());
+
   set_state(k_connected);
   _channel->tie(shared_from_this());
-  _channel->enable_reading();
+  update_read_interest();
 
-  _conn_cb(shared_from_this());
+  if (_conn_cb) {
+    _conn_cb(shared_from_this());
+  }
 }
 
 void TcpConnection::connect_destroyed() {
@@ -366,6 +370,8 @@ void TcpConnection::connect_destroyed() {
   if (!_channel->is_none_event()) {
     _channel->disable_all();
   }
+
+  _reading = false;
   // 确保未完成的发送任务已经清理。
   cancel_pending(ECANCELED);
   // 如果之前没有经过 handle_close()，在这里补发断开通知。
@@ -379,7 +385,7 @@ void TcpConnection::connect_destroyed() {
 }
 
 void TcpConnection::handle_read(TIME::Timestamp receive_time) {
-  if (_state.load() == k_disconnected) {
+  if (!should_read_in_loop() || (_buffered_input_pending && !_read_eof_only)) {
     return;
   }
 
@@ -387,8 +393,9 @@ void TcpConnection::handle_read(TIME::Timestamp receive_time) {
 
   const ssize_t n = _input_buffer.read_fd(_channel->fd(), &saved_error);
   if (n > 0) {
+    _last_receive_time = receive_time;
+
     if (_read_paused_for_shutdown) {
-      // 在其他线程出发停机后丢弃所有收到的数据
       _input_buffer.retrieve_all();
     } else if (_mess_cb) {
       _mess_cb(shared_from_this(), &_input_buffer, receive_time);
@@ -555,6 +562,7 @@ void TcpConnection::handle_close() {
 
   set_state(k_disconnected);
   _channel->disable_all();
+  _reading = false;
 
   cancel_pending(ECANCELED);
 
@@ -703,4 +711,88 @@ void TcpConnection::fail_writes(int error) {
   handle_close();
 }
 
+bool TcpConnection::should_read_in_loop() const {
+  const StateE state = _state.load();
+  if (state == k_connecting || state == k_disconnected) {
+    return false;
+  }
+
+  // 服务端停机时，允许读取并丢弃数据，以观察 FIN。
+  if (_read_eof_only) {
+    return true;
+  }
+
+  return !_read_paused_for_shutdown && !_send_read_paused && _disk_read_pauses.empty();
+}
+
+void TcpConnection::update_read_interest() {
+  assert(_loop->is_in_loop_thread());
+  const bool wanted = should_read_in_loop() && (_read_eof_only || !_buffered_input_pending);
+  if (wanted == _reading) {
+    return;
+  }
+
+  _reading = wanted;
+
+  if (wanted) {
+    _channel->enable_reading();
+  } else {
+    _channel->disable_reading();
+  }
+}
+
+void TcpConnection::schedule_buffered_input() {
+  assert(_loop->is_in_loop_thread());
+
+  if (_buffered_input_pending || !should_read_in_loop() || _read_eof_only ||
+      _read_paused_for_shutdown || _input_buffer.readable_bytes() == 0 || !_mess_cb) {
+    return;
+  }
+
+  _buffered_input_pending = true;
+
+  // 先处理已经读入 Buffer 的内容，再接收新的 socket 数据。
+  update_read_interest();
+
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self]() {
+    self->_buffered_input_pending = false;
+    if (self->should_read_in_loop() && !self->_read_eof_only && !self->_read_paused_for_shutdown &&
+        self->_input_buffer.readable_bytes() != 0 && self->_mess_cb) {
+      self->_mess_cb(self, &self->_input_buffer, self->_last_receive_time);
+    }
+    self->update_read_interest();
+  };
+  _loop->queue_in_loop(cb);
+}
+
+void TcpConnection::pause_read_for_disk(std::uint64_t token) {
+  if (token == 0) {
+    return;
+  }
+
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self, token] {
+    if (self->_state.load() == k_disconnected) {
+      return;
+    }
+    self->_disk_read_pauses.insert(token);
+    self->update_read_interest();
+  };
+  _loop->run_in_loop(cb);
+}
+
+void TcpConnection::resume_read_after_disk(std::uint64_t token) {
+  if (token == 0) {
+    return;
+  }
+
+  std::shared_ptr<TcpConnection> self = shared_from_this();
+  EventLoop::Functor cb = [self, token] {
+    self->_disk_read_pauses.erase(token);
+    self->schedule_buffered_input();
+    self->update_read_interest();
+  };
+  _loop->run_in_loop(cb);
+}
 }  // namespace TLSS::NET

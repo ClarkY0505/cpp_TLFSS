@@ -336,15 +336,15 @@ class Receiver {
     return remaining_;
   }
 
-  void consume(NET::Buffer& buffer) {
-    const auto count =
-        static_cast<std::size_t>(std::min<uint64_t>(remaining_, buffer.readable_bytes()));
+  void append(const char* data, std::size_t count) {
+    if (count > remaining_) {
+      throw std::runtime_error("received more bytes than declared");
+    }
 
     if (count == 0) {
       return;
     }
 
-    const char* data = buffer.peek();
     std::size_t written = 0;
 
     while (written < count) {
@@ -355,7 +355,6 @@ class Receiver {
       } else if (n == -1 && errno == EINTR) {
         continue;
       } else if (n == 0) {
-        transfer_logger()->error("file write made no progress");
         throw std::runtime_error("file write made no progress");
       } else {
         system_failure("write file");
@@ -363,8 +362,15 @@ class Receiver {
     }
 
     update_digest(digest_.get(), data, count);
-    buffer.retrieve(count);
     remaining_ -= count;
+  }
+
+  void consume(NET::Buffer& buffer) {
+    const auto count =
+        static_cast<std::size_t>(std::min<uint64_t>(remaining_, buffer.readable_bytes()));
+
+    append(buffer.peek(),count);
+    buffer.retrieve(count);
   }
 
   const std::string& hash() {
