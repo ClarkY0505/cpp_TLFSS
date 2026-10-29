@@ -29,6 +29,14 @@ add_library(common_lib
     net/tcp_client.cpp
 )
 
+target_sources(common_lib PRIVATE
+    ${CMAKE_SOURCE_DIR}/inc/common/cache/arc_cache.h
+    ${CMAKE_SOURCE_DIR}/inc/common/cache/arc_lfu.h
+    ${CMAKE_SOURCE_DIR}/inc/common/cache/arc_lru.h
+    ${CMAKE_SOURCE_DIR}/inc/common/cache/arc_node.h
+    ${CMAKE_SOURCE_DIR}/inc/common/cache/cache_policy.h
+)
+
 target_include_directories(common_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/inc
 )
