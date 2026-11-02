@@ -66,6 +66,29 @@ class ArcLfu {
     return _main_cache.find(key) != _main_cache.end();
   }
 
+  // 主动失效必须同步维护频率桶和最小频率，同时清除同键历史。
+  // 它不经过容量淘汰流程，避免把业务失效当成缓存容量不足的反馈。
+  bool invalidate(const Key& key) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    bool removed = false;
+    auto it = _main_cache.find(key);
+    if (it != _main_cache.end()) {
+      const auto node = it->second;
+      auto bucket = _freq_map.find(node->get_access_count());
+      if (bucket != _freq_map.end()) {
+        bucket->second.remove(node);
+        if (bucket->second.empty()) {
+          _freq_map.erase(bucket);
+        }
+      }
+      _main_cache.erase(it);
+      _min_freq = _freq_map.empty() ? 0 : _freq_map.begin()->first;
+      removed = true;
+    }
+    const bool ghost_removed = erase_ghost(key);
+    return removed || ghost_removed;
+  }
+
   // 命中后消费历史，由 ArcCache 决定是否为 LFU 增加配额。
   bool check_ghost(Key key) {
     std::lock_guard<std::mutex> lock(_mutex);

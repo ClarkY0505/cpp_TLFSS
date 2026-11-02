@@ -76,6 +76,21 @@ class ArcLru {
     return true;
   }
 
+  // 业务失效同时清除主节点和历史，不生成新的淘汰记录。
+  // 晋升仍使用上面的 erase，避免改变原有的所有权迁移语义。
+  bool invalidate(const Key& key) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    bool removed = false;
+    auto it = _main_cache.find(key);
+    if (it != _main_cache.end()) {
+      remove_from_main(it->second);
+      _main_cache.erase(it);
+      removed = true;
+    }
+    const bool ghost_removed = erase_ghost(key);
+    return removed || ghost_removed;
+  }
+
   // 此接口命中即消费历史，不是无副作用的存在性查询。
   bool check_ghost(Key key) {
     std::lock_guard<std::mutex> lock(_mutex);

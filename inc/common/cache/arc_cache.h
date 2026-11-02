@@ -75,6 +75,14 @@ class ArcCache : public CachePolicy<Key, Value> {
     return _lfu->get(key, value);
   }
 
+  // 同时清除两个分区中的主节点和历史；过期不应留下淘汰反馈。
+  bool erase(const Key& key) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    const bool lru_removed = _lru->invalidate(key);
+    const bool lfu_removed = _lfu->invalidate(key);
+    return lru_removed || lfu_removed;
+  }
+
   Value get(Key key) override {
     Value value{};
     get(key, value);
@@ -168,6 +176,15 @@ class HashArcCache {
     // 获取key的hash值，并计算出对应的分片索引
     size_t slice_idx = k_hash(key) % _slice_num;
     return _arc_slice_caches[slice_idx]->get(key, value);
+  }
+
+  // 与读写使用同一个分片映射，零容量时无需计算取模。
+  bool erase(const Key& key) {
+    if (_slice_num == 0) {
+      return false;
+    }
+    const std::size_t index = k_hash(key) % _slice_num;
+    return _arc_slice_caches[index]->erase(key);
   }
 
   Value get(Key key) {
