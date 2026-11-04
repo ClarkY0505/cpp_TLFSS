@@ -17,8 +17,8 @@ StorageEngine::StorageEngine(BASE::DbConnectionPool& pool)
     : StorageEngine(pool, std::make_shared<MetadataCache>()) {}
 
 StorageEngine::StorageEngine(BASE::DbConnectionPool& pool, std::shared_ptr<MetadataCache> cache)
-    : _db_conn_pool(pool),
-      _metadata_cache(cache ? std::move(cache) : std::make_shared<MetadataCache>()) {}
+    : _db_conn_pool(pool)
+    , _metadata_cache(cache ? std::move(cache) : std::make_shared<MetadataCache>()) {}
 
 StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir_db(
     const std::string& username, const std::string& current_directory) {
@@ -143,7 +143,7 @@ StorageContext<std::string> StorageEngine::move_dir_by_current_dir_db(
 }
 
 bool StorageEngine::create_dir_db(const std::string& username, const std::string& current_directory,
-                               const std::string& directory) {
+                                  const std::string& directory) {
   if (username.empty() || current_directory.empty() || directory.empty()) {
     return false;
   }
@@ -226,8 +226,8 @@ StorageContext<std::string> StorageEngine::prepare_upload(const std::string& use
 }
 
 bool StorageEngine::commit_upload_db(const std::string& username, const std::string& parent_id,
-                                  const std::string& directory, const std::string& file_name,
-                                  const std::string& hash) {
+                                     const std::string& directory, const std::string& file_name,
+                                     const std::string& hash) {
   if (!Transfer::valid_name(file_name) || !Transfer::valid_hash(hash)) {
     return false;
   }
@@ -260,8 +260,8 @@ bool StorageEngine::commit_upload_db(const std::string& username, const std::str
 }
 
 StorageContext<std::string> StorageEngine::find_download_hash_db(const std::string& username,
-                                                              const std::string& directory,
-                                                              const std::string& file_name) {
+                                                                 const std::string& directory,
+                                                                 const std::string& file_name) {
   if (!Transfer::valid_name(file_name)) {
     return {false, {}};
   }
@@ -293,71 +293,70 @@ StorageContext<std::string> StorageEngine::find_download_hash_db(const std::stri
 
 StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir(
     const std::string& username, const std::string& current_directory) {
-    if (username.empty() || current_directory.empty()) {
-        return {false, {}};
-    }
-    return _metadata_cache->list(username, current_directory,
-        [this, &username, &current_directory] {
-            return find_file_by_current_dir_db(username, current_directory);
-        });
+  if (username.empty() || current_directory.empty()) {
+    return {false, {}};
+  }
+  return _metadata_cache->list(username, current_directory, [this, &username, &current_directory] {
+    return find_file_by_current_dir_db(username, current_directory);
+  });
 }
 
 StorageContext<std::string> StorageEngine::move_dir_by_current_dir(
     const std::string& username, const std::string& current_directory,
     const std::string& dir_name) {
-    if (username.empty() || current_directory.empty() || dir_name.empty()) {
-        return {false, {}};
-    }
-    // 根目录返回上级无需访问缓存或数据库；会话更新仍由原 IO 线程负责。
-    if (current_directory == "/" && dir_name == "..") {
-        return {true, "/"};
-    }
-    return _metadata_cache->cd(username, current_directory, dir_name,
-        [this, &username, &current_directory, &dir_name] {
-            return move_dir_by_current_dir_db(username, current_directory, dir_name);
-        });
+  if (username.empty() || current_directory.empty() || dir_name.empty()) {
+    return {false, {}};
+  }
+  // 根目录返回上级无需访问缓存或数据库；会话更新仍由原 IO 线程负责。
+  if (current_directory == "/" && dir_name == "..") {
+    return {true, "/"};
+  }
+  return _metadata_cache->cd(
+      username, current_directory, dir_name, [this, &username, &current_directory, &dir_name] {
+        return move_dir_by_current_dir_db(username, current_directory, dir_name);
+      });
 }
 
-StorageContext<std::string> StorageEngine::find_download_hash(
-    const std::string& username, const std::string& directory, const std::string& file_name) {
-    if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
-        return {false, {}};
-    }
-    // 只缓存经数据库验证的对象哈希，文件内容和句柄仍走原磁盘流程。
-    return _metadata_cache->download(username, directory, file_name,
-        [this, &username, &directory, &file_name] {
-            return find_download_hash_db(username, directory, file_name);
-        });
+StorageContext<std::string> StorageEngine::find_download_hash(const std::string& username,
+                                                              const std::string& directory,
+                                                              const std::string& file_name) {
+  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
+    return {false, {}};
+  }
+  // 只缓存经数据库验证的对象哈希，文件内容和句柄仍走原磁盘流程。
+  return _metadata_cache->download(username, directory, file_name,
+                                   [this, &username, &directory, &file_name] {
+                                     return find_download_hash_db(username, directory, file_name);
+                                   });
 }
 
-bool StorageEngine::create_dir(const std::string& username,
-                               const std::string& current_directory,
+bool StorageEngine::create_dir(const std::string& username, const std::string& current_directory,
                                const std::string& directory) {
-    if (username.empty() || current_directory.empty() || directory.empty()) {
-        return false;
-    }
-    return _metadata_cache->write(username, current_directory,
-        [this, &username, &current_directory, &directory] {
-            return create_dir_db(username, current_directory, directory);
-        });
+  if (username.empty() || current_directory.empty() || directory.empty()) {
+    return false;
+  }
+  return _metadata_cache->write(username, current_directory,
+                                [this, &username, &current_directory, &directory] {
+                                  return create_dir_db(username, current_directory, directory);
+                                });
 }
 
 bool StorageEngine::commit_upload(const std::string& username, const std::string& parent_id,
                                   const std::string& directory, const std::string& file_name,
                                   const std::string& hash) {
-    if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
-        !Transfer::valid_hash(hash)) {
-        return false;
-    }
-    // 上传准备仍直接查数据库；最终登记通过协调锁与版本维护缓存一致性。
-    return _metadata_cache->write(username, directory,
-        [this, &username, &parent_id, &directory, &file_name, &hash] {
-            return commit_upload_db(username, parent_id, directory, file_name, hash);
-        });
+  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
+      !Transfer::valid_hash(hash)) {
+    return false;
+  }
+  // 上传准备仍直接查数据库；最终登记通过协调锁与版本维护缓存一致性。
+  return _metadata_cache->write(
+      username, directory, [this, &username, &parent_id, &directory, &file_name, &hash] {
+        return commit_upload_db(username, parent_id, directory, file_name, hash);
+      });
 }
 
 MetadataCacheStats StorageEngine::metadata_cache_stats() const {
-    return _metadata_cache->stats();
+  return _metadata_cache->stats();
 }
 
 }  // namespace TLSS::FileStorage
