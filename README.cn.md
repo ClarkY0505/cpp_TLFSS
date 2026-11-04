@@ -15,18 +15,28 @@ TLSS（Toy-Level File Storage Service）是我用于探索 Linux 系统编程、
 
 目前，TLSS 已具备基本的单机文件存储能力，实现了异步磁盘读写与初步流量背压机制。项目正在持续完善资源生命周期管理、测试验证、崩溃恢复与文件生命周期管理。
 
-**已实现功能：** epoll Reactor、异步 TCP 客户端 (`tlss-cli`)、有界线程池、MySQL 连接池、基于 PBKDF2 的密码哈希、用户注册/登录、虚拟目录操作（`mkdir`、`cd`、`ls`、`pwd`）、文件上传/下载、SHA-256 内容寻址对象存储、异步磁盘读写以及优雅停机（graceful shutdown）。
+**已实现功能：** epoll Reactor、异步 TCP 客户端（`tlss-cli`）、有界线程池、MySQL 连接池、基于 PBKDF2 的密码哈希、用户注册/登录、虚拟目录操作（`mkdir`、`cd`、`ls`、`pwd`）、分片元数据缓存、文件上传/下载、SHA-256 内容寻址对象存储、异步磁盘读写以及优雅停机（graceful shutdown）。
 
-**独立子系统：** 监控与可靠告警机制、基于 AVX2/REP MOVSB 指令优化的内存拷贝功能。
+**配套子系统：** 监控与可靠告警通过独立 demo 运行；AVX2/REP MOVSB 内存拷贝库已接入网络缓冲区，并保留独立基准入口。
 
 **后续方向：** 对象与元数据一致性恢复、对象回收、主服务监控接入、gRPC 接口以及分布式存储。
 
 ### 快速入门
 
-完成下方的依赖安装、数据库初始化和项目构建后，分别在两个终端启动服务端与客户端：
+按[构建与运行](#构建与运行)准备依赖、初始化数据库并调整 `config/mysql.cnf`，然后在仓库根目录构建：
 
 ```bash
+cmake --preset debug
+cmake --build --preset debug --parallel 4
+ctest --preset debug
+```
+
+分别在两个交互终端启动服务端与客户端：
+
+```bash
+# 终端 1
 ./bin/storage-service
+# 终端 2
 ./bin/tlss-cli 127.0.0.1 9000
 ```
 
@@ -43,7 +53,9 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 - [功能与实现状态](#功能与实现状态)
 - [当前交互](#当前交互)
 - [架构与执行模型](#架构与执行模型)
+- [存储组件职责与调用链](#存储组件职责与调用链)
 - [模块实现](#模块实现)
+- [元数据缓存](#元数据缓存)
 - [文件传输与异步磁盘任务](#文件传输与异步磁盘任务)
 - [网络服务生命周期与线程约束](#网络服务生命周期与线程约束)
 - [代码结构](#代码结构)
@@ -51,7 +63,7 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 - [测试与开发入口](#测试与开发入口)
 - [当前限制与待收尾事项](#当前限制与待收尾事项)
 - [演进路线与接入时机](#演进路线与接入时机)
-- [为什么叫Toy-Level?](#关于TLSS)
+- [关于 TLSS](#关于-tlss)
 
 ## 功能与实现状态
 
@@ -60,6 +72,7 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 - **bounded worker pool** — 有界任务队列、非阻塞提交与异步排队超时。
 - **MySQL connection pool** — 连接复用、预处理语句与 RAII 事务。
 - **virtual filesystem namespace** — 用户根目录与 `mkdir / cd / ls / pwd` 命令。
+- **metadata cache** — 按用户隔离的目录列表、目录切换结果和下载哈希缓存，支持分片、TTL、并发加载合并与写后失效。
 - **content-addressed object storage** — 以 SHA-256 标识本地对象，通过 `object_hash` 关联用户虚拟文件；同内容对象复用。
 - **asynchronous file transfer** — 上传/下载使用独立磁盘线程池、分块读写、临时文件、持久化和传输确认。
 - **graceful shutdown** — 响应 `SIGINT / SIGTERM`，排空任务并回收连接与线程。
@@ -74,6 +87,7 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 | MySQL | 连接池、预处理语句、RAII 事务 | 已使用 |
 | 认证 | 注册、密码校验、用户与根目录事务创建 | 已使用 |
 | 虚拟目录 | `mkdir / cd / ls / pwd` | 已使用 |
+| 元数据缓存 | `HashArcCache`、TTL、目录版本协调、统计快照 | 默认由 `MetadataService` 创建，目录操作和下载查询已使用 |
 | 客户端 | `tlss-cli <IPv4> <port>`，支持交互命令和文件上传/下载 | 独立可执行程序 |
 | 监控 | 指标、策略、CLI、UDP、可靠 TCP 告警 | 库已链接，通过独立 demo 运行；主入口未启动 |
 | 内存拷贝 | `TLSS::MEMORY::memcpy` 动态库 | 已被网络 `Buffer::append()` 调用，使用 Default 提示 |
@@ -123,31 +137,64 @@ download "readme-copy.md" "./readme-downloaded.md"
 
 ```mermaid
 flowchart TD
-    Client[tlss-cli / nc] --> Acceptor[主 EventLoop / Acceptor]
-    Acceptor --> Connection[IO EventLoop / TcpConnection]
-    Connection --> Service[StorageService]
-    Service --> Workers[ThreadPool]
-    Service --> Session["Session (ConnectionSession)"]
-    Workers --> Engine[StorageEngine]
-    Workers --> Auth[AuthService / UserRepository]
-    Service --> Disk[DiskExecutor / 磁盘线程池]
-    Disk --> Transfer[AsyncReceiver / AsyncFileSource]
-    Transfer --> Filesystem[本地 SHA-256 对象文件]
-    Transfer --> Engine
-    Engine --> Pool[DbConnectionPool]
+    Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
+    Network --> Service[StorageService]
+    Service --> Session[ConnectionSession / active TransferTask]
+    Service --> Auth[AuthService / UserRepository]
+    Service --> Upload[UploadEngine / UploadTask]
+    Service --> Download[DownloadEngine / DownloadTask]
+    Service --> Metadata[MetadataService]
+    Upload --> Metadata
+    Download --> Metadata
+    Auth --> Root[create_root_in_transaction]
+    Upload --> Receiver[AsyncReceiver]
+    Download --> Source[AsyncFileSource / send_file_async]
+    Receiver --> Objects[ObjectStorageEngine / VerifyEngine]
+    Source --> Objects
+    Objects --> Filesystem[Local SHA-256 objects]
+    Metadata --> Cache[MetadataCache / HashArcCache]
+    Metadata --> Pool[DbConnectionPool]
     Auth --> Pool
     Pool --> MySQL[MySQL]
+    Root -->|same transaction connection| MySQL
 ```
 
-图中为当前实现。`StorageEngine` 通过 `DbConnectionPool` 直接读写 MySQL 中的目录和文件元数据；`AsyncReceiver / AsyncFileSource` 在 `DiskExecutor` 中处理本地文件。`MetadataStore / ObjectStore` 仍是后续可提取的抽象，当前没有对应实现类。
+图中为当前实现。主服务直接使用自研 TCP 网络库，`src/gateway/` 尚未参与请求处理。`MetadataService` 先查缓存，未命中时通过连接池执行 SQL；注册创建根目录时复用用户仓储已借用的事务连接，不经过普通缓存读写入口。
 
-网络层负责连接与消息回调，`StorageService` 解析命令并维护会话。每个连接的 `ConnectionSession` 保存认证状态、用户身份、当前目录和传输状态，由所属 IO 线程读写。认证、目录操作和上传前置检查派发到业务线程池；文件读写、下载查询及上传最终登记由磁盘任务执行。认证结果、目录切换结果和传输结果通过 `queue_in_loop` 返回连接所属的 EventLoop。
+网络层负责连接与消息回调，`StorageService` 解析命令并维护会话。每个连接的 `ConnectionSession` 保存认证状态、用户身份、当前目录和活动传输任务句柄；具体传输状态由任务持有，均由所属 IO 线程读写。认证、目录操作和上传前置检查派发到业务线程池；文件读写、下载查询及上传最终登记由磁盘任务执行。认证结果、目录切换结果和传输结果通过 `queue_in_loop` 返回连接所属的 EventLoop。
 
 服务端默认配置为 4 个 IO 线程、8 个业务线程、256 个业务执行队列槽位和 128 个异步等待队列槽位；独立磁盘线程池默认使用 2 个线程。目录操作通过 `try_run` 提交，队列已满时返回忙碌提示；登录与注册通过 `submit_async` 提交，排队等待期限为 2 秒。
 
 主线程之外还存在信号控制线程、业务池的超时管理线程，以及数据库连接生产与空闲扫描线程。2 秒只限制认证任务等待进入执行队列的时间，不中断已开始执行的 SQL 或密码计算。
 
+| 执行位置 | 当前职责 | 结果交接 |
+| --- | --- | --- |
+| 主 EventLoop | 接受连接、分配 IO loop、维护连接表 | 连接交给所属 IO loop |
+| 连接所属 IO loop | 协议拆帧、会话读写、传输状态推进、socket 收发 | 耗时操作提交业务池或磁盘池 |
+| 业务线程池 | 登录/注册、目录 SQL、上传前置检查 | 会话及传输状态变更排回 IO loop；文本响应通过连接发送接口调度 |
+| 磁盘线程池 | 文件打开、分块读写、哈希、同步、发布与关闭；下载元数据查询、上传最终元数据登记 | 通过 `queue_in_loop()` 返回结果 |
+| 独立控制线程 | 等待信号、协调停机并 join 资源线程 | 主 loop 在停机屏障完成前持续运行 |
+
+这里的“异步磁盘 IO”指把阻塞文件操作移到专用线程池，当前未使用 io_uring 或内核异步文件 API。SQL 也可能在磁盘工作线程执行；组件拆分没有给每个引擎创建专属线程池。
+
 停机时先停止接受连接并暂停读取，再排空业务任务、取消并等待磁盘任务收尾，半关闭现有连接；连接等待超时后强制清理。随后回收 IO 线程和数据库连接池，退出主事件循环，最后关闭日志系统。
+
+### 存储组件职责与调用链
+
+| 组件与源码 | 负责的内容 | 边界 |
+| --- | --- | --- |
+| [StorageService](src/ftp/server.cpp) | 认证交互、命令/控制帧解析、会话索引、任务创建、响应和停机编排 | 不直接实现对象落盘与摘要计算 |
+| [TransferTask / TransferContext](inc/ftp/transfer_task.h) | 每次传输的阶段、取消、事件通知；捕获身份和目录快照 | 在 IO loop 校验连接、会话、用户、目录和传输代次，过滤过期结果 |
+| [UploadEngine / UploadTask](src/ftp/upload_engine.cpp) | 上传预检查、接收器组装、先发布对象再登记元数据 | 引擎创建每次传输的 task；task 复用共享执行资源 |
+| [DownloadEngine / DownloadTask](src/ftp/download_engine.cpp) | 查询文件映射、打开对象、排队发送并等待客户端 ACK | 发送完成后仍需对端持久化确认 |
+| [MetadataService](src/ftp/metadata_service.cpp) | 目录、上传元数据和下载哈希的参数化 SQL，以及缓存协调 | 不持有文件正文；`prepare_upload()` 直接查询数据库 |
+| [ObjectStorageEngine](src/ftp/object_storage_engine.cpp) | 临时对象、内容寻址发布、已有对象校验、打开与偏移读取 | 同步原语，不依赖数据库、协议或会话；由调用者选择执行线程 |
+| [VerifyEngine](src/ftp/verify_engine.cpp) | 精确长度约束、增量 SHA-256 与预期摘要比对 | 文件完整性校验，与用户认证分开 |
+| [DiskExecutor](inc/ftp/disk_executor.h) / [异步适配器](inc/ftp/async_file_receiver.h) | 磁盘任务调度、活动资源登记、取消与清理，向 IO loop 回传结果 | 执行资源和异步适配层，不负责业务权限或虚拟目录 |
+
+上传链路为 `StorageService → UploadTask → 上传预检查 → AsyncReceiver → 对象发布 → 元数据登记 → UOK`；下载链路为 `StorageService → DownloadTask → 元数据/缓存 → AsyncFileSource → send_file_async → DONE → ACK → OK`。客户端只在本地校验、同步和发布成功后发送 ACK。
+
+注册仍由 `AuthService → MySqlUserRepository` 发起事务，调用 `MetadataService::create_root_in_transaction()` 创建根目录；该函数不额外借连接、不独立提交，用户与根目录共用一次事务。旧头文件 [service_engine.h](inc/ftp/service_engine.h) 中的 `StorageEngine` 是 `MetadataService` 的源码兼容别名。
 
 ## 模块实现
 
@@ -173,7 +220,7 @@ flowchart TD
 
 ### 会话、注册与登录
 
-[ConnectionSession](inc/ftp/context.h) 保存登录状态、交互中的用户名和密码、认证尝试编号、已认证身份、当前目录、目录切换标志、传输阶段及传输代次。会话内容只由所属 IO 线程读写；会话索引表另由互斥锁保护。
+[ConnectionSession](inc/ftp/context.h) 保存登录状态、交互中的用户名和密码、认证尝试编号、已认证身份、当前目录、目录切换标志、活动传输任务句柄及传输代次。会话内容只由所属 IO 线程读写；会话索引表另由互斥锁保护。
 
 ```text
 登录：
@@ -208,9 +255,31 @@ signup → 用户名 → 密码 → 确认密码 → registering
 | `mkdir <名称>` | 查询父节点、拼接路径并插入目录记录 |
 | `upload / download` | 上传前检查目录和重名节点，发布对象后插入文件记录；下载按用户、当前目录和文件名查询对象哈希 |
 
-[StorageEngine](src/ftp/service_engine.cpp) 当前直接执行预处理 SQL。`cd` 支持直接子目录与父目录，尚未实现通用绝对/相对路径解析。目录切换期间 `directory_change_pending` 阻止后续目录命令继续执行；其他异步命令没有完整的逐连接串行执行队列，不能假定所有响应严格按输入顺序返回。
+[MetadataService](src/ftp/metadata_service.cpp) 在缓存未命中时执行预处理 SQL，写入由缓存协调层包裹。`cd` 支持直接子目录与父目录，尚未实现通用绝对/相对路径解析。目录切换期间 `directory_change_pending` 阻止后续目录命令继续执行；其他异步命令没有完整的逐连接串行执行队列，不能假定所有响应严格按输入顺序返回。
 
-目录记录的 `object_hash` 为 SQL `NULL`，文件记录保存 SHA-256 哈希。对象文件独立于用户目录树，相同内容可被多条虚拟文件记录引用。后续可将元数据访问抽取为 `MetadataStore`，将内容落盘封装为 `ObjectStore`。
+目录记录的 `object_hash` 为 SQL `NULL`，文件记录保存 SHA-256 哈希。对象文件独立于用户目录树，相同内容可被多条虚拟文件记录引用。元数据访问已收口到 `MetadataService`，内容落盘通过 `ObjectStorageEngine`；`StorageEngine` 保留为元数据服务的源码兼容别名。
+
+### 元数据缓存
+
+[MetadataCache](inc/ftp/metadata_cache.h) 是主服务已使用的进程内缓存。它保存元数据查询结果，不缓存文件正文、文件描述符、密码或登录结果。键包含经过认证的用户名、当前目录以及相应参数，用长度前缀区分字段；成功命中不再借用 MySQL 连接。
+
+| 类别 | 查询键 | 默认总容量 | 基础 TTL |
+| --- | --- | --- | --- |
+| 目录列表 | 用户 + 当前目录 | 1024 条 | 5 秒 |
+| 下载哈希 | 用户 + 当前目录 + 文件名 | 4096 条 | 30 秒 |
+| `cd` 成功路径 | 用户 + 当前目录 + 命令参数 | 4096 条 | 60 秒 |
+
+每类缓存默认分为 16 个存储分片，总容量由分片分摊。底层 [HashArcCache](inc/common/cache/arc_cache.h) 使用项目自研的 LRU/LFU 自适应组合：近期条目进入 LRU，多次访问后晋升 LFU，淘汰历史用于调整两部分配额。TTL 按键加入约 ±10% 抖动，在访问时检查，没有后台过期扫描线程。
+
+一致性和并发行为如下：
+
+- 另有 64 个固定目录协调分片。命中使用共享锁；未命中取得独占锁后复查，并在查询、回填期间持锁，以合并并发加载并防止旧查询覆盖写入后的结果。不同目录若映射到同一协调分片，仍会互相等待。
+- `create_dir()` 和 `commit_upload()` 在独占协调锁内执行数据库写入，退出时推进版本，使对应分片的旧列表与下载哈希失效；经此路径的写入无论成功、失败还是抛异常都会推进版本。`prepare_upload()` 不走缓存，同名竞争仍由数据库唯一约束裁决。
+- 只缓存成功结果，包括成功的空目录；查询失败或资源不存在不缓存。目录列表估算逻辑大小超过 64 KiB 时仍正常返回，但跳过缓存，这不是进程内存用量上限。
+- 目前没有目录删除、移动、重命名，所以成功的 `cd` 路径仅依赖 TTL。未来增加这些写操作时需要扩展失效规则。
+- 每个 `MetadataService` 默认拥有独立缓存；多个实例只有显式共享同一个 `std::shared_ptr<MetadataCache>` 才共享协调锁、版本和统计。其他进程或直接 SQL 修改不会触发本地失效，已有条目依赖 TTL 刷新；当前不保证跨进程强一致性。
+
+`MetadataCacheConfig` 可在 C++ 构造时调整容量、TTL、分片数和目录列表大小限制；容量或 TTL 为零可关闭对应类别，TTL 合法范围为 0–24 小时。目前没有环境变量、配置文件或 CLI 调参入口。`MetadataService::metadata_cache_stats()` 返回各类的 `requests / hits / misses / loads / coalesced / admission_skips`，统计尚未接入主服务监控或管理 CLI。
 
 ### 文件传输与异步磁盘任务
 
@@ -455,7 +524,6 @@ cpp_TLFSS/
 ├── proto/                        空的协议占位
 ├── config/ / sql/                配置与数据库脚本
 ├── scripts/ / doc/               构建脚本与技术资料
-├── docs/superpowers/             本地设计与实施计划（当前被 Git 忽略）
 ├── third/ / third_party/         第三方依赖
 └── build/、bin/、lib/             默认构建产物
 ```
@@ -468,9 +536,11 @@ cpp_TLFSS/
 | `config/`、`sql/` | MySQL 连接配置和建表脚本；`config/config.yaml.example` 目前为空，主程序不读取 YAML |
 | `scripts/build.sh` | 配置、编译、测试的封装脚本 |
 | `third/`、`third_party/` | 仓库内依赖与上游子模块；不要提交其构建产物 |
-| `doc/` | 网络和内存拷贝子系统的补充资料 |
+| `inc/common/cache/`、`inc/ftp/metadata_cache.h` | 通用分片 LRU/LFU 缓存与业务元数据缓存，均为头文件实现 |
+| `src/ftp/` | `metadata_lib` 管理元数据；`transfer_lib` 提供对象、校验和异步磁盘原语；`ftp_lib` 组合任务、协议与客户端 |
+| `doc/` | 内存拷贝子系统的设计报告与导读，以及本地技术笔记 |
 
-顶层 CMake 组织 `common_lib`、`auth_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
+顶层 CMake 组织 `common_lib`、`auth_lib`、`metadata_lib`、`transfer_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
 
 ## 构建与运行
 
@@ -492,7 +562,34 @@ cpp_TLFSS/
 mysql -u root -p < sql/init_tlss_db.sql
 ```
 
+该脚本适用于新数据库：`virtual_files` 的建表语句没有 `IF NOT EXISTS`，也不提供旧表迁移。已有数据库请先核对表结构，不要将其当作可反复执行的升级脚本。
+
 连接池从**可执行文件所在目录的上一级**读取 `config/mysql.cnf`。按默认输出布局，即 `bin/storage-service` 对应仓库根目录的 `config/mysql.cnf`。配置采用无空格的 `key=value` 格式，主要字段是 `ip`、`port`、`username`、`password`、`initSize`、`maxSize`；不要将真实凭据提交到仓库。启动时无法读取配置或建立初始数据库连接会导致进程退出。
+
+| 配置项 | 含义 | 构造默认值或约束 |
+| --- | --- | --- |
+| `ip`、`port` | 数据库主机与端口 | `127.0.0.1:3306`；端口范围 1–65535 |
+| `username`、`password` | MySQL 凭据，与 TLSS 注册用户无关 | 按本机数据库账户配置 |
+| `initSize`、`maxSize` | 初始连接数、总连接上限 | 10、1024；要求 `1 <= initSize <= maxSize` |
+| `maxIdleTime` | 空闲回收阈值及扫描间隔，秒 | 60，必须为正 |
+| `ConnectionTimeOut` | 借用连接时的条件变量等待期限，毫秒 | 100，必须为正；不包含后续网络调用耗时 |
+| `connectTimeout`、`readTimeout`、`writeTimeout` | MySQL 客户端建连、读、写超时，秒 | 各 5，必须为正 |
+
+键名区分大小写，不会裁剪首尾空白，未知键会导致配置加载失败。当前示例将最后一个网络超时误写成第二个 `readTimeout`；需要显式配置写超时时，将该行改为 `writeTimeout=5`，否则沿用构造默认值 5 秒。
+
+### 运行参数与配置边界
+
+| 设置 | 当前取值 | 配置入口 |
+| --- | --- | --- |
+| 服务监听端口 | `9000` | `src/main.cpp`，尚无命令行选项 |
+| IO / 业务线程数、业务队列容量 | 4 / 8 / 256 | `StorageService` 构造参数 |
+| 认证等待队列容量 / 入队期限 | 128 / 2 秒 | `src/ftp/server.cpp` |
+| 磁盘线程数 / 活动文件源与接收器上限 | 2 / 每个执行器合计 64 | `DiskExecutor::start()` 参数 / 编译期常量 |
+| 对象目录 | `./data/objects` | 启动前设置 `TLSS_STORAGE_ROOT` 可覆盖 |
+| 日志目录 | `./logs` | 相对于进程工作目录，主程序中固定 |
+| 元数据缓存 | 默认容量和 TTL 见[元数据缓存](#元数据缓存) | C++ 构造参数，未暴露给主程序配置 |
+
+`config/config.yaml.example` 为空，主程序不加载 YAML；安装规则也不会自动适配连接池的配置查找路径。当前运行步骤以仓库内 `bin/` 布局为准。
 
 ### 编译、测试、启动
 
@@ -574,24 +671,31 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 
 ## 测试与开发入口
 
-`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 当前注册内存拷贝链接、TCP 停机、线程池异步提交、20 个文件传输场景，以及找到 Python 3 时的目录 SQL 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
+`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 当前注册对象存储与校验、注册事务边界、元数据缓存、内存拷贝链接、TCP 停机、线程池异步提交、24 个文件传输场景，以及找到 Python 3 时的目录 SQL 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
 
 | 范围 | 验证内容与边界 |
 | --- | --- |
 | 网络 | CTest 注册服务端停机测试；`test_tcp_client.cpp` 中另有取消/重连、旧回调及生命周期检查，尚未接入 CMake |
 | 业务线程池 | 异步等待、超时、容量与停机 |
+| 对象存储与校验 | 实际 `ObjectStorageEngine / VerifyEngine`，覆盖长度约束、摘要、偏移读取、同内容复用、损坏对象拒绝和临时文件清理；无需 MySQL |
+| 元数据缓存 | 17 个场景覆盖三类查询、TTL、写后失效、失败不缓存、并发加载合并、旧值回填防护、协调分片并发、大小限制、统计、禁用、缓存共享及 LRU/LFU 行为；使用进程内数据库替代实现 |
 | 目录查询 | Python 从生产代码提取 SQL，在内存 SQLite 中检查父子目录和用户隔离；不是完整 MySQL/TCP 集成测试 |
 | 文件传输 | 实际服务端/客户端处理器、分块收发、哈希与发布、错误帧、背压、冷文件等待、取消、旧回调和停机；使用数据库/认证替代实现，不是真实 MySQL 端到端测试 |
 | 交互客户端 | `test_ftp_client.py` 使用伪终端与测试服务端交互，目前未注册到 CTest |
-| 认证和数据库 | 认证服务、仓储、注册、事务和预处理语句测试源码当前未注册到 CMake；部分要求显式配置真实测试数据库 |
+| 认证和数据库 | 已注册 `signup_transaction_boundary_test`，以数据库替代实现验证真实仓储和根目录创建共用事务、回滚及提交结果未知；其余认证服务、仓储、注册、事务和预处理语句测试源码尚未注册，部分要求真实测试数据库 |
 | 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke |
 | 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
 
-可按需运行已构建的传输回归组：
+可按需运行已构建的回归组：
 
 ```bash
+ctest --preset debug -R '^metadata_cache_'
+ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
+ctest --preset debug -R '^monitor_'
 ```
+
+网络、传输和部分监控测试会创建本机 TCP/UDP 套接字，demo smoke 还会使用固定端口；运行环境需允许本机监听，并避免已有进程占用相应端口。这些回归组无需启动真实 MySQL，不能替代真实数据库和交互客户端的端到端验证。
 
 可使用 `ctest --preset debug -N` 查看当前构建目录登记的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake，不在文档中固定为某个通过数量。
 
@@ -602,16 +706,18 @@ ctest --preset debug -R '^ftp_transfer_'
 1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`：了解服务入口、命令派发、会话状态与停机流程。
 2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`：追踪连接与消息处理。
 3. `src/common/base/tlss_thread_pool.cpp`、`src/common/base/mysql_connection_pool.cpp`：查看任务与数据库资源的生命周期。
-4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`：追踪注册、登录与虚拟目录的数据库操作。
-5. `inc/ftp/file_transfer.h` → `src/ftp/async_file_receiver.cpp` → `src/ftp/async_file_source.cpp` → `src/common/net/tcp_connection.cpp`：追踪文件发布、异步磁盘处理、背压及有序发送。
-6. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`：追踪独立监控示例。
-7. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
-8. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
+4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`：追踪注册、登录与虚拟目录的数据库操作。
+5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`：理解缓存命中、版本失效、加载合并与分片容量。
+6. 从 `src/ftp/transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp`：追踪任务状态、发布、校验、异步适配与发送。
+7. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`：追踪独立监控示例。
+8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
+9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
 
 ## 当前限制与待收尾事项
 
 - 已实现单机上传/下载和内容寻址落盘；尚无断点续传、覆盖更新、文件删除和对象垃圾回收。对象发布与 MySQL 登记之间的故障可能留下无引用对象，崩溃后的临时文件清理与一致性修复尚未实现。
 - 监控库未在主服务中初始化；连接数、业务队列、数据库池等指标尚未自动接入。
+- 元数据缓存只协调显式共享同一缓存实例的调用者；跨进程、独立实例及直接 SQL 写入依赖 TTL 刷新。后续目录删除、移动与重命名还需补齐失效规则。
 - RPC/网关为占位，`.proto` 和 YAML 配置示例为空；端口、线程数量等尚无统一配置入口。
 - TCP 业务连接未启用 TLS；密码哈希保护的是存储凭据，不能替代传输保护。客户端尚未关闭密码输入回显。
 - [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) 仍通过旧的连接提供器方式构造 `StorageEngine`，并调用已移除的 `find_user_by_name()` 和旧会话字段，与当前接口失配，目前未注册到 CMake；恢复测试目标前需要同步这些用例。[test_ftp_server.cpp](tests/test_ftp_server.cpp) 仍包含占位断言。
@@ -626,7 +732,7 @@ ctest --preset debug -R '^ftp_transfer_'
 | --- | --- | --- |
 | 1. 稳定现有业务边界 | 提取协议无关业务接口、统一错误类型、修复并注册旧测试 | 业务用例不依赖 `TcpConnection` 即可测试；真实 MySQL 与客户端端到端链路有回归验证 |
 | 2. gRPC 入口 | 认证、列目录、创建目录；与 TCP 共享业务实现 | 两种入口的权限与结果一致；验证 deadline、取消、重复写请求和有序退出 |
-| 3. 存储一致性与恢复 | 在现有上传/下载上提取 MetadataStore、ObjectStore，补齐崩溃恢复、孤儿对象回收与重试语义 | 对象发布后元数据失败、进程退出、重复请求和中断传输都有可验证的修复或清理行为 |
+| 3. 存储一致性与恢复 | 基于已拆分的 MetadataService、ObjectStorageEngine，补齐崩溃恢复、孤儿对象回收与重试语义 | 对象发布后元数据失败、进程退出、重复请求和中断传输都有可验证的修复或清理行为 |
 | 4. Kafka 事件链路 | 事务 Outbox、发布器、一个审计或索引消费者 | broker 不可用时事件保留；恢复后可补发；重复消费不会重复产生业务效果 |
 | 5. 运行与部署演进 | 接入主服务监控，根据独立扩容和故障隔离需求拆服务 | 积压、失败和资源占用可观测；部署和恢复流程可验证 |
 
@@ -634,11 +740,11 @@ ctest --preset debug -R '^ftp_transfer_'
 
 ### gRPC：业务接口稳定后即可接入
 
-现有 `AuthService` 和 `StorageEngine` 已有可复用基础。下一步让协议解析、会话提示符和连接对象留在入口层，让业务接口接收身份上下文、目录 ID/路径及结构化请求，并返回结构化结果。
+现有 `AuthService`、`MetadataService`、上传和下载引擎已有可复用基础。下一步让协议解析、会话提示符和连接对象留在入口层，让业务接口接收身份上下文、目录 ID/路径及结构化请求，并返回结构化结果。
 
 ```text
 TCP 命令入口 ─┐
-             ├→ 统一业务接口 → 用户仓储 / MetadataStore / ObjectStore
+             ├→ 统一业务接口 → 用户仓储 / MetadataService / ObjectStorageEngine
 gRPC 入口 ───┘
 ```
 
@@ -708,7 +814,8 @@ Kafka 事务不能自动把 MySQL 和本地文件系统纳入一个原子事务�
 
 当业务确有独立部署或扩容需求时，再引入网关和跨进程 RPC。gRPC 承担需要立即响应的业务调用，Kafka 承担已发生业务事实的异步传播，各阶段都应先证明具体场景的收益。
 
-## 关于TLSS
+## 关于 TLSS
+
 Toy-Level 是这个项目从诞生之初就保留的名字。
 
 对我而言，它不仅是一个软件工程项目，也是一件随着学习不断成长的作品。

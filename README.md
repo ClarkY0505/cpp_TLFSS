@@ -15,18 +15,28 @@ By building foundational components rather than simply assembling established fr
 
 TLSS now provides basic single-node file storage capabilities, featuring asynchronous disk I/O and an initial traffic backpressure mechanism. The project is undergoing continuous refinement in areas such as resource lifecycle management, testing and verification, crash recovery, and file lifecycle management.
 
-**Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), file upload/download, SHA-256 content-addressed object storage, asynchronous disk IO, and graceful shutdown.
+**Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), sharded metadata caching, file upload/download, SHA-256 content-addressed object storage, asynchronous disk IO, and graceful shutdown.
 
-**Independent subsystems:** monitoring and reliable alarm delivery, optimized AVX2/REP MOVSB memory copy.
+**Supporting subsystems:** monitoring and reliable alarms run through standalone demos; the AVX2/REP MOVSB memory copy library is used by network buffers and has a separate benchmark entry point.
 
 **Next steps:** object/metadata consistency recovery, object reclamation, main-service monitoring, gRPC interfaces, and distributed storage.
 
 ### Quick Start
 
-After installing dependencies, initializing the database, and building the project as described below, start the server and client in separate terminals:
+Prepare dependencies, initialize the database, and adjust `config/mysql.cnf` as described in [Build and run](#build-and-run), then build from the repository root:
 
 ```bash
+cmake --preset debug
+cmake --build --preset debug --parallel 4
+ctest --preset debug
+```
+
+Start the server and client in separate interactive terminals:
+
+```bash
+# Terminal 1
 ./bin/storage-service
+# Terminal 2
 ./bin/tlss-cli 127.0.0.1 9000
 ```
 
@@ -43,7 +53,9 @@ See the build instructions, architecture, and implementation notes below.
 - [Features and implementation status](#features-and-implementation-status)
 - [Current interaction](#current-interaction)
 - [Architecture and execution model](#architecture-and-execution-model)
+- [Storage component responsibilities and call chains](#storage-component-responsibilities-and-call-chains)
 - [Module implementation](#module-implementation)
+- [Metadata cache](#metadata-cache)
 - [File transfer and asynchronous disk work](#file-transfer-and-asynchronous-disk-work)
 - [Network service lifecycle and threading requirements](#network-service-lifecycle-and-threading-requirements)
 - [Code layout](#code-layout)
@@ -60,6 +72,7 @@ See the build instructions, architecture, and implementation notes below.
 - **bounded worker pool** — Bounded task queues, nonblocking submission, and asynchronous queue wait timeouts.
 - **MySQL connection pool** — Connection reuse, prepared statements, and RAII transactions.
 - **virtual filesystem namespace** — Per-user root directories and `mkdir / cd / ls / pwd` commands.
+- **metadata cache** — Per-user directory listings, resolved directory changes, and download hashes, with sharding, TTLs, concurrent load coalescing, and write invalidation.
 - **content-addressed object storage** — Local objects identified by SHA-256 and referenced by virtual files through `object_hash`; identical contents reuse an object.
 - **asynchronous file transfer** — Uploads/downloads use a dedicated disk pool, chunked IO, temporary files, persistence, and transfer acknowledgments.
 - **graceful shutdown** — Handles `SIGINT / SIGTERM`, drains tasks, and releases connections and threads.
@@ -74,6 +87,7 @@ See the build instructions, architecture, and implementation notes below.
 | MySQL | Connection pool, prepared statements, RAII transactions | In use |
 | Authentication | Signup, password verification, transactional user and root directory creation | In use |
 | Virtual directories | `mkdir / cd / ls / pwd` | In use |
+| Metadata cache | `HashArcCache`, TTLs, directory generation coordination, statistics snapshots | Created by `MetadataService` by default; used by directory operations and download lookups |
 | Client | `tlss-cli <IPv4> <port>` with interactive commands and file upload/download | Standalone executable |
 | Monitoring | Metrics, policies, CLI, UDP, reliable TCP alarms | Library linked; runs through standalone demos, not started by the main entry point |
 | Memory copy | `TLSS::MEMORY::memcpy` shared library | Called by networking `Buffer::append()` with the Default hint |
@@ -123,31 +137,64 @@ An upload defaults to the local basename if the remote name is omitted. A downlo
 
 ```mermaid
 flowchart TD
-    Client[tlss-cli / nc] --> Acceptor[Main EventLoop / Acceptor]
-    Acceptor --> Connection[IO EventLoop / TcpConnection]
-    Connection --> Service[StorageService]
-    Service --> Workers[ThreadPool]
-    Service --> Session["Session (ConnectionSession)"]
-    Workers --> Engine[StorageEngine]
-    Workers --> Auth[AuthService / UserRepository]
-    Service --> Disk[DiskExecutor / disk pool]
-    Disk --> Transfer[AsyncReceiver / AsyncFileSource]
-    Transfer --> Filesystem[Local SHA-256 object files]
-    Transfer --> Engine
-    Engine --> Pool[DbConnectionPool]
+    Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
+    Network --> Service[StorageService]
+    Service --> Session[ConnectionSession / active TransferTask]
+    Service --> Auth[AuthService / UserRepository]
+    Service --> Upload[UploadEngine / UploadTask]
+    Service --> Download[DownloadEngine / DownloadTask]
+    Service --> Metadata[MetadataService]
+    Upload --> Metadata
+    Download --> Metadata
+    Auth --> Root[create_root_in_transaction]
+    Upload --> Receiver[AsyncReceiver]
+    Download --> Source[AsyncFileSource / send_file_async]
+    Receiver --> Objects[ObjectStorageEngine / VerifyEngine]
+    Source --> Objects
+    Objects --> Filesystem[Local SHA-256 objects]
+    Metadata --> Cache[MetadataCache / HashArcCache]
+    Metadata --> Pool[DbConnectionPool]
     Auth --> Pool
     Pool --> MySQL[MySQL]
+    Root -->|same transaction connection| MySQL
 ```
 
-The diagram shows the current implementation. `StorageEngine` reads and writes directory and file metadata in MySQL through `DbConnectionPool`. `AsyncReceiver / AsyncFileSource` handle local files through `DiskExecutor`. `MetadataStore / ObjectStore` remain possible future abstractions, not implemented classes.
+The diagram shows the current implementation. The main service uses the custom TCP library directly; `src/gateway/` does not participate in request handling. `MetadataService` checks its cache before borrowing a database connection and executing SQL on a miss. Signup creates the root directory using the transaction connection already borrowed by the user repository, bypassing ordinary cache operations.
 
-The networking layer handles connections and message callbacks. `StorageService` parses commands and maintains sessions. Each connection's `ConnectionSession` stores its authentication state, user identity, current directory, and transfer state, and is accessed by its owning IO thread. Authentication, directory operations, and upload preflight checks run in the business pool. File IO, download lookups, and final upload metadata insertion run in disk tasks. Authentication, directory change, and transfer results return to the connection's EventLoop through `queue_in_loop`.
+The networking layer handles connections and message callbacks. `StorageService` parses commands and maintains sessions. Each connection's `ConnectionSession` stores its authentication state, user identity, current directory, and an active transfer task handle. The task owns the transfer state; both are accessed by the owning IO thread. Authentication, directory operations, and upload preflight checks run in the business pool. File IO, download lookups, and final upload metadata insertion run in disk tasks. Authentication, directory change, and transfer results return to the connection's EventLoop through `queue_in_loop`.
 
 Server defaults are 4 IO threads, 8 business worker threads, 256 business execution queue slots, and 128 asynchronous wait queue slots. A separate disk pool uses 2 threads by default. Directory operations use `try_run` and report a busy server when the queue is full. Login and signup use `submit_async` with a 2-second queue wait deadline.
 
 Additional threads include the signal control thread, the worker pool's deadline management thread, and the database connection producer and idle scanner. The 2-second deadline only limits how long authentication tasks wait to enter the execution queue; it does not interrupt SQL or password computation that has already started.
 
+| Execution resource | Current work | Result handoff |
+| --- | --- | --- |
+| Main EventLoop | Accept connections, assign IO loops, maintain the connection map | Connections move to their owning IO loop |
+| Owning IO loop | Protocol framing, session access, transfer state transitions, socket reads/writes | Expensive operations go to the business or disk pool |
+| Business worker pool | Login/signup, directory SQL, upload preflight checks | Session and transfer state changes return to the IO loop; text responses use the connection's scheduled send interface |
+| Disk worker pool | File open, chunked IO, hashing, sync, publication, and close; download metadata lookups and final upload metadata insertion | Results return through `queue_in_loop()` |
+| Separate control thread | Wait for signals, coordinate shutdown, join resource threads | The main loop keeps running until shutdown barriers complete |
+
+“Asynchronous disk IO” means moving blocking file operations to a dedicated worker pool. The implementation does not use io_uring or kernel asynchronous file APIs. SQL can also execute on disk workers; splitting components did not create a dedicated pool for each engine.
+
 Shutdown first stops accepting connections and pauses reads, then drains business tasks, cancels and waits for disk work to finish, and shuts down the write side of existing connections. Connections are forcibly closed if the connection grace period expires. The service then joins IO threads, shuts down the database pool, and exits the main event loop. Logging shuts down last.
+
+### Storage component responsibilities and call chains
+
+| Component and source | Responsibilities | Boundary |
+| --- | --- | --- |
+| [StorageService](src/ftp/server.cpp) | Authentication dialogue, command/control framing, session index, task creation, responses, shutdown coordination | Delegates object persistence and digest computation |
+| [TransferTask / TransferContext](inc/ftp/transfer_task.h) | Per-transfer phase, cancellation, events, identity and directory snapshots | Validates connection, session, user, directory, and generation on the IO loop to discard stale results |
+| [UploadEngine / UploadTask](src/ftp/upload_engine.cpp) | Preflight checks, receiver setup, object publication followed by metadata insertion | The engine creates per-transfer tasks that share execution resources |
+| [DownloadEngine / DownloadTask](src/ftp/download_engine.cpp) | Resolve file mappings, open objects, queue sends, wait for client ACK | Socket send completion still requires peer persistence acknowledgment |
+| [MetadataService](src/ftp/metadata_service.cpp) | Prepared SQL for directories, upload metadata, and download hashes; cache coordination | Holds no file contents; `prepare_upload()` queries the database directly |
+| [ObjectStorageEngine](src/ftp/object_storage_engine.cpp) | Temporary objects, content-addressed publication, existing-object validation, open and offset reads | Synchronous primitives without database, protocol, or session state; callers choose execution threads |
+| [VerifyEngine](src/ftp/verify_engine.cpp) | Exact-length validation, incremental SHA-256, expected digest comparison | File integrity, separate from user authentication |
+| [DiskExecutor](inc/ftp/disk_executor.h) / [async adapters](inc/ftp/async_file_receiver.h) | Disk scheduling, active resource tracking, cancellation, cleanup, result delivery to IO loops | Execution and adaptation, without business permissions or virtual directories |
+
+Uploads follow `StorageService → UploadTask → preflight → AsyncReceiver → publish object → insert metadata → UOK`. Downloads follow `StorageService → DownloadTask → metadata/cache → AsyncFileSource → send_file_async → DONE → ACK → OK`. The client sends ACK only after local verification, sync, and publication succeed.
+
+Signup still starts a transaction through `AuthService → MySqlUserRepository` and calls `MetadataService::create_root_in_transaction()` to create the root directory. This function neither borrows another connection nor commits independently: the user and root share one transaction. `StorageEngine` in the compatibility header [service_engine.h](inc/ftp/service_engine.h) aliases `MetadataService`.
 
 ## Module implementation
 
@@ -173,7 +220,7 @@ Cross-thread calls use `queue_in_loop()` and wake the target loop through `event
 
 ### Sessions, signup, and login
 
-[ConnectionSession](inc/ftp/context.h) stores login state, temporary username and password input, an authentication attempt number, authenticated identity, the current directory, a directory change flag, a transfer phase, and a transfer generation. Only the owning IO thread accesses session contents; a separate mutex protects the session index.
+[ConnectionSession](inc/ftp/context.h) stores login state, temporary username and password input, an authentication attempt number, authenticated identity, the current directory, a directory change flag, an active transfer task handle, and a transfer generation. Only the owning IO thread accesses session contents; a separate mutex protects the session index.
 
 ```text
 Login:
@@ -208,9 +255,31 @@ The [schema script](sql/init_tlss_db.sql) defines `users` and `virtual_files`. T
 | `mkdir <name>` | Look up the parent, construct the path, and insert a directory record |
 | `upload / download` | Check the directory and duplicate names before uploading; insert file metadata after object publication; look up download hashes by user, current directory, and filename |
 
-[StorageEngine](src/ftp/service_engine.cpp) currently executes prepared SQL directly. `cd` supports direct children and the parent directory, without a general absolute/relative path parser. While a directory change is pending, `directory_change_pending` blocks subsequent directory commands. Other asynchronous commands do not have a complete per-connection serial execution queue, so responses must not be assumed to follow input order strictly.
+[MetadataService](src/ftp/metadata_service.cpp) executes prepared SQL on cache misses and wraps writes in cache coordination. `cd` supports direct children and the parent directory, without a general absolute/relative path parser. While a directory change is pending, `directory_change_pending` blocks subsequent directory commands. Other asynchronous commands do not have a complete per-connection serial execution queue, so responses must not be assumed to follow input order strictly.
 
-Directory records use SQL `NULL` for `object_hash`; file records store a SHA-256 hash. Object files are independent of the user directory tree, and multiple virtual file records can reference identical contents. Metadata access and content persistence may later be extracted into `MetadataStore` and `ObjectStore`.
+Directory records use SQL `NULL` for `object_hash`; file records store a SHA-256 hash. Object files are independent of the user directory tree, and multiple virtual file records can reference identical contents. Metadata access goes through `MetadataService`, and content persistence through `ObjectStorageEngine`. `StorageEngine` remains a source-compatible alias for the metadata service.
+
+### Metadata cache
+
+[MetadataCache](inc/ftp/metadata_cache.h) is an in-process cache already used by the main service. It stores metadata query results, not file contents, descriptors, passwords, or authentication results. Keys contain the authenticated username, current directory, and relevant arguments, with length prefixes separating fields. Successful hits avoid borrowing a MySQL connection.
+
+| Category | Query key | Default total capacity | Base TTL |
+| --- | --- | --- | --- |
+| Directory listing | User + current directory | 1024 entries | 5 seconds |
+| Download hash | User + current directory + filename | 4096 entries | 30 seconds |
+| Successful `cd` path | User + current directory + command argument | 4096 entries | 60 seconds |
+
+Each category has 16 storage shards by default, sharing its total capacity. The underlying [HashArcCache](inc/common/cache/arc_cache.h) uses a custom adaptive LRU/LFU combination: recent entries enter LRU, repeated access promotes entries to LFU, and eviction history adjusts their capacity shares. TTLs have approximately ±10% per-key jitter and are checked on access; there is no background expiry scanner.
+
+Consistency and concurrency behavior:
+
+- A separate set of 64 fixed directory coordination shards uses shared locks for hits. Misses acquire an exclusive lock, check again, and hold it through database loading and cache fill. This coalesces concurrent loads and prevents old fills from overwriting results after writes. Different directories mapped to the same coordination shard can still block each other.
+- `create_dir()` and `commit_upload()` hold the exclusive coordination lock during database writes and advance the generation on exit, invalidating older listings and download hashes in that shard. Writes through this path advance the generation on success, failure, or exception. `prepare_upload()` bypasses the cache; database uniqueness constraints still resolve competing names.
+- Only successful results are cached, including empty directory listings. Failures and missing resources are not cached. Listings exceeding an estimated logical size of 64 KiB are returned normally but skip admission; this is not a process memory limit.
+- Successful `cd` paths currently depend only on TTL because directory deletion, moves, and renames are not implemented. Those operations will require additional invalidation rules.
+- Each `MetadataService` creates its own cache by default. Multiple instances share coordination locks, generations, and statistics only when explicitly given the same `std::shared_ptr<MetadataCache>`. Other processes and direct SQL writes do not invalidate local entries; existing entries rely on TTL refresh. Cross-process strong consistency is not provided.
+
+`MetadataCacheConfig` configures capacities, TTLs, shard count, and listing size limits at C++ construction time. Zero capacity or TTL disables that category; valid TTLs range from 0 to 24 hours. There is no environment variable, configuration file, or CLI tuning interface. `MetadataService::metadata_cache_stats()` exposes `requests / hits / misses / loads / coalesced / admission_skips` for each category; these counters are not yet connected to main-service monitoring or an administrative CLI.
 
 ### File transfer and asynchronous disk work
 
@@ -455,7 +524,6 @@ cpp_TLFSS/
 ├── proto/                        Empty protocol placeholders
 ├── config/ / sql/                Configuration and database scripts
 ├── scripts/ / doc/               Build scripts and technical documentation
-├── docs/superpowers/             Local designs and plans (currently Git-ignored)
 ├── third/ / third_party/         Third-party dependencies
 └── build/, bin/, lib/            Default build output
 ```
@@ -468,9 +536,11 @@ cpp_TLFSS/
 | `config/`, `sql/` | MySQL connection settings and schema script; `config/config.yaml.example` is empty, and the main program does not read YAML |
 | `scripts/build.sh` | Wrapper for configuration, compilation, and tests |
 | `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
-| `doc/` | Supplementary material for the networking and memory copy subsystems |
+| `inc/common/cache/`, `inc/ftp/metadata_cache.h` | Generic sharded LRU/LFU cache and business metadata cache; both are header-only |
+| `src/ftp/` | `metadata_lib` owns metadata; `transfer_lib` provides object, verification, and async disk primitives; `ftp_lib` combines tasks, protocol handling, and the client |
+| `doc/` | Memory copy design report and tutorial, plus local technical notes |
 
-The top-level CMake configuration organizes `common_lib`, `auth_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
+The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_lib`, `transfer_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
 
 ## Build and run
 
@@ -492,7 +562,34 @@ Constructing `StorageService` initializes the MySQL connection pool, which conne
 mysql -u root -p < sql/init_tlss_db.sql
 ```
 
+This script targets a new database: the `virtual_files` statement has no `IF NOT EXISTS`, and no migration of existing tables is provided. Check an existing schema before running it; this is not a repeatable upgrade script.
+
 The pool reads `config/mysql.cnf` from the **parent directory of the executable's directory**. With the default layout, `bin/storage-service` uses `config/mysql.cnf` in the repository root. The file uses `key=value` lines without surrounding spaces; key settings include `ip`, `port`, `username`, `password`, `initSize`, and `maxSize`. Do not commit real credentials. The process exits if it cannot load the configuration or open its initial database connections.
+
+| Setting | Meaning | Constructor default or constraint |
+| --- | --- | --- |
+| `ip`, `port` | Database host and port | `127.0.0.1:3306`; port range 1–65535 |
+| `username`, `password` | MySQL credentials, separate from registered TLSS users | Set for your local database account |
+| `initSize`, `maxSize` | Initial connections and total connection limit | 10, 1024; require `1 <= initSize <= maxSize` |
+| `maxIdleTime` | Idle reclamation threshold and scan interval, seconds | 60; positive |
+| `ConnectionTimeOut` | Condition-variable wait when borrowing a connection, milliseconds | 100; positive; excludes subsequent network calls |
+| `connectTimeout`, `readTimeout`, `writeTimeout` | MySQL client connect/read/write timeouts, seconds | 5 each; positive |
+
+Keys are case-sensitive, surrounding whitespace is not trimmed, and unknown keys fail configuration loading. The current sample mistakenly repeats `readTimeout` for the last network timeout. To set the write timeout explicitly, change that line to `writeTimeout=5`; otherwise the constructor default of 5 seconds applies.
+
+### Runtime settings and configuration boundaries
+
+| Setting | Current value | Configuration entry point |
+| --- | --- | --- |
+| Listening port | `9000` | `src/main.cpp`; no command line option |
+| IO / business threads, business queue capacity | 4 / 8 / 256 | `StorageService` constructor arguments |
+| Authentication wait queue capacity / admission deadline | 128 / 2 seconds | `src/ftp/server.cpp` |
+| Disk threads / active file source and receiver limit | 2 / 64 combined per executor | `DiskExecutor::start()` argument / compile-time constant |
+| Object directory | `./data/objects` | Override with `TLSS_STORAGE_ROOT` before startup |
+| Log directory | `./logs` | Relative to the process working directory; fixed in the main program |
+| Metadata cache | Default capacities and TTLs in [Metadata cache](#metadata-cache) | C++ construction arguments; not exposed through main-program configuration |
+
+`config/config.yaml.example` is empty and the main program does not load YAML. Installation rules do not adapt the connection pool's configuration lookup path automatically; these instructions use the repository's `bin/` layout.
 
 ### Compile, test, and start
 
@@ -574,24 +671,31 @@ The program also supports `hot / runtime` modes. Only `runtime` accepts an optio
 
 ## Tests and where to start reading
 
-`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) currently registers memory copy linking, TCP shutdown, asynchronous worker submission, 20 file transfer scenarios, and the directory SQL test when Python 3 is found. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
+`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) currently registers object storage and verification, signup transaction boundaries, metadata caching, memory copy linking, TCP shutdown, asynchronous worker submission, 24 file transfer scenarios, and the directory SQL test when Python 3 is found. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
 
 | Area | Coverage and boundaries |
 | --- | --- |
 | Networking | Server shutdown is registered with CTest; `test_tcp_client.cpp` also checks cancellation/reconnection, stale callbacks, and lifetimes but is not registered with CMake |
 | Worker pool | Asynchronous waiting, timeouts, capacity, and shutdown |
+| Object storage and verification | Real `ObjectStorageEngine / VerifyEngine`: length constraints, digests, offset reads, same-content reuse, corrupt-object rejection, and temporary file cleanup; no MySQL required |
+| Metadata cache | 17 scenarios covering all three queries, TTLs, write invalidation, uncached failures, concurrent load coalescing, stale-fill prevention, coordination shard concurrency, size limits, statistics, disabling, shared caches, and LRU/LFU behavior; in-process database substitutes |
 | Directory queries | Python extracts production SQL and checks parent/child queries and user isolation in in-memory SQLite; not a complete MySQL/TCP integration test |
 | File transfer | Real server/client handlers, chunked IO, hashes and publication, error frames, backpressure, cold-file waits, cancellation, stale callbacks, and shutdown; database/authentication substitutes are used, not real MySQL end-to-end validation |
 | Interactive client | `test_ftp_client.py` uses a pseudoterminal and test server; currently not registered with CTest |
-| Authentication and database | Service, repository, signup, transaction, and prepared-statement test sources are currently not registered with CMake; some require an explicitly configured real test database |
+| Authentication and database | Registered `signup_transaction_boundary_test` uses database substitutes with the real repository/root creation to verify a shared transaction, rollback, and unknown commit outcomes. Other service, repository, signup, transaction, and prepared-statement test sources remain unregistered; some require a real test database |
 | Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests |
 | Memory copy | Linking/basic correctness in CTest; deeper checks and benchmarks are spread across benchmark code and dedicated scripts |
 
-To run the built file transfer regression group:
+To run individual built regression groups:
 
 ```bash
+ctest --preset debug -R '^metadata_cache_'
+ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
+ctest --preset debug -R '^monitor_'
 ```
+
+Networking, transfer, and some monitoring tests create local TCP/UDP sockets; demo smoke tests also use fixed ports. The environment must allow local listeners, with those ports free. These regression groups do not require a real MySQL server and do not replace end-to-end validation with the real database and interactive client.
 
 Use `ctest --preset debug -N` to list tests registered in the current build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun; this document does not claim a fixed passing test count.
 
@@ -602,16 +706,18 @@ Suggested source reading order:
 1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`: service entry point, command dispatch, session state, and shutdown flow.
 2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`: connection and message handling.
 3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
-4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/service_engine.cpp`: database operations for signup, login, and virtual directories.
-5. `inc/ftp/file_transfer.h` → `src/ftp/async_file_receiver.cpp` → `src/ftp/async_file_source.cpp` → `src/common/net/tcp_connection.cpp`: publication, asynchronous disk IO, backpressure, and ordered sending.
-6. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
-7. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
-8. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
+4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`: database operations for signup, login, and virtual directories.
+5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`: hits, generation invalidation, load coalescing, and sharded capacities.
+6. Start with `src/ftp/transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp`: task state, publication, verification, async adapters, and sending.
+7. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
+8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
+9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
 
 ## Current limitations and remaining work
 
 - Single-node uploads/downloads and content-addressed persistence are implemented. Resumable transfers, overwrite updates, file deletion, and object garbage collection are not. Failures between object publication and MySQL insertion can leave unreferenced objects; crash recovery for temporary files and metadata consistency is not implemented.
 - The main service does not initialize monitoring. Connection counts, worker queues, and database pool metrics are not automatically reported.
+- Metadata cache coordination covers callers explicitly sharing one cache instance. Other processes, independent instances, and direct SQL writes rely on TTL refresh. Directory deletion, moves, and renames will require additional invalidation rules.
 - RPC and gateway code are placeholders; `.proto` files and the YAML example are empty. Ports, thread counts, and other settings do not yet share a unified configuration entry point.
 - Business TCP connections do not use TLS. Password hashing protects stored credentials, not transport. The client still echoes password input.
 - [test_mysql_prepared.cpp](tests/test_mysql_prepared.cpp) still constructs `StorageEngine` through the old connection-provider interface and uses the removed `find_user_by_name()` method and old session fields. This source is not registered with CMake and needs updating before its target is restored. [test_ftp_server.cpp](tests/test_ftp_server.cpp) still contains a placeholder assertion.
@@ -626,7 +732,7 @@ The following is a proposed roadmap for the current code, not a list of delivere
 | --- | --- | --- |
 | 1. Stabilize business boundaries | Extract protocol-independent interfaces, unify error types, repair and register obsolete tests | Business cases can be tested without `TcpConnection`; real MySQL and client end-to-end flows have regression checks |
 | 2. gRPC entry point | Authentication, directory listing, and directory creation sharing TCP business logic | Both entry points enforce the same permissions and results; validate deadlines, cancellation, duplicate writes, and orderly shutdown |
-| 3. Storage consistency and recovery | Extract MetadataStore and ObjectStore around existing transfers; add crash recovery, orphan reclamation, and retry semantics | Metadata failure after publication, process exits, duplicate requests, and interrupted transfers have verifiable repair or cleanup behavior |
+| 3. Storage consistency and recovery | Build on MetadataService and ObjectStorageEngine; add crash recovery, orphan reclamation, and retry semantics | Metadata failure after publication, process exits, duplicate requests, and interrupted transfers have verifiable repair or cleanup behavior |
 | 4. Kafka events | Transactional Outbox, publisher, and one audit or indexing consumer | Events survive broker outages and publish after recovery; duplicate consumption does not duplicate business effects |
 | 5. Operations and deployment | Integrate service monitoring and split services when independent scaling or failure isolation requires it | Backlogs, failures, and resource usage are observable; deployment and recovery procedures can be validated |
 
@@ -634,11 +740,11 @@ Monitoring can progress alongside these stages, particularly for RPC latency, re
 
 ### gRPC: integrate once business interfaces are stable
 
-`AuthService` and `StorageEngine` already provide reusable foundations. Keep protocol parsing, session prompts, and connection objects in the entry layer. Business interfaces should accept identity context, directory IDs/paths, and structured requests, and return structured results.
+`AuthService`, `MetadataService`, and the upload/download engines already provide reusable foundations. Keep protocol parsing, session prompts, and connection objects in the entry layer. Business interfaces should accept identity context, directory IDs/paths, and structured requests, and return structured results.
 
 ```text
 TCP command entry ─┐
-                  ├→ Shared business APIs → User repository / MetadataStore / ObjectStore
+                  ├→ Shared business APIs → User repository / MetadataService / ObjectStorageEngine
 gRPC entry ────────┘
 ```
 
