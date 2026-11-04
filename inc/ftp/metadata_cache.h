@@ -2,7 +2,7 @@
 #define TLSS_FTP_METADATA_CACHE_H
 
 #include "common/cache/arc_cache.h"
-#include "ftp/context.h"
+#include "ftp/metadata_types.h"
 
 #include <array>
 #include <atomic>

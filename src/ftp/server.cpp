@@ -3,7 +3,7 @@
 #include "common/net/event_loop.h"
 #include "common/net/tcp_connection.h"
 #include "ftp/context.h"
-#include "ftp/file_transfer.h"
+#include "ftp/transfer_protocol.h"
 #include "ftp/server.h"
 #include "ftp/service_logger.h"
 
@@ -60,157 +60,6 @@ std::optional<HandleCommand> string_to_command(std::string_view command) {
   return HandleCommand::unknown;
 }
 
-/* template <typename Work, typename Finish> */
-/* bool submit_transfer_job(BASE::ThreadPool& pool, const std::atomic<bool>* stopping, */
-/*                          const NET::TcpConnectionPtr& conn, */
-/*                          const std::shared_ptr<ConnectionSession>& session, Work work, */
-/*                          Finish finish) { */
-/*   // 推导 Work 类型的对象以左值形式、不带参数调用时的返回类型 */
-/*   using Result = std::invoke_result_t<Work&>; */
-/*   auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn); */
-/*   auto weak_session = std::weak_ptr<ConnectionSession>(session); */
-/*   NET::EventLoop* io_loop = conn->get_loop(); */
-
-/*   const std::uint64_t generation = session->transfer_generation; */
-/*   const std::uint64_t user_id = session->user_id; */
-/*   const std::string username = session->name; */
-/*   const std::string directory = session->current_directory; */
-
-/*   return pool.try_run([weak_conn, weak_session, io_loop, stopping, generation, user_id, username,
- */
-/*                        directory, work = std::move(work), finish = std::move(finish)]() mutable {
- */
-/*     std::optional<Result> value; */
-/*     std::string error; */
-/*     if (stopping->load()) { */
-/*       error = "server is stopping"; */
-/*       service_logger()->info("transfer job skipped: {}", error); */
-/*     } else { */
-/*       try { */
-/*         value.emplace(work()); */
-/*       } catch (const std::exception& exception) { */
-/*         error = exception.what(); */
-/*         service_logger()->error("transfer job failed: {}", error); */
-/*       } catch (...) { */
-/*         error = "unexpected transfer failure"; */
-/*         service_logger()->error("transfer job failed: {}", error); */
-/*       } */
-/*     } */
-
-/*     io_loop->queue_in_loop([weak_conn, weak_session, stopping, generation, user_id, username, */
-/*                             directory, value = std::move(value), error = std::move(error), */
-/*                             finish = std::move(finish)]() mutable { */
-/*       auto conn = weak_conn.lock(); */
-/*       auto session = weak_session.lock(); */
-
-/*       if (!conn || !session || !conn->connected()) { */
-/*         return; */
-/*       } */
-
-/*       if (session->transfer_generation != generation || */
-/*           session->login_state != LoginState::k_authenticated || session->user_id != user_id ||
- */
-/*           session->name != username || session->current_directory != directory) { */
-/*         return; */
-/*       } */
-
-/*       if (stopping->load()) { */
-/*         conn->force_close(); */
-/*         return; */
-/*       } */
-
-/*       finish(conn, session, std::move(value), error); */
-/*     }); */
-/*   }); */
-/* } */
-
-struct TransferJobContext {
-  std::weak_ptr<NET::TcpConnection> weak_conn;
-  std::weak_ptr<ConnectionSession> weak_session;
-
-  NET::EventLoop* io_loop;
-  const std::atomic<bool>* stopping;
-
-  std::uint64_t generation;
-  std::uint64_t user_id;
-  std::string username;
-  std::string directory;
-};
-
-template <typename Result, typename Finish>
-void finish_transfer_job(const TransferJobContext& context, std::optional<Result>& value,
-                         const std::string& error, Finish& finish) {
-  auto conn = context.weak_conn.lock();
-  auto session = context.weak_session.lock();
-
-  if (!conn || !session || !conn->connected()) {
-    return;
-  }
-
-  if (session->transfer_generation != context.generation ||
-      session->login_state != LoginState::k_authenticated || session->user_id != context.user_id ||
-      session->name != context.username || session->current_directory != context.directory) {
-    return;
-  }
-
-  if (context.stopping->load()) {
-    conn->force_close();
-    return;
-  }
-
-  finish(conn, session, std::move(value), error);
-}
-
-template <typename Work, typename Finish>
-void run_transfer_job(const TransferJobContext& context, Work& work, Finish& finish) {
-  using Result = std::invoke_result_t<Work&>;
-
-  std::optional<Result> value;
-  std::string error;
-  if (context.stopping->load()) {
-    error = "server is stopping";
-    service_logger()->info("transfer job skipped: {}", error);
-  } else {
-    //
-    // TODO 如果想做，消除异常处理
-    // 这里的异常大部分是由optional提供的
-    // FIXME 少部分来自work,目前work用于传输文件
-    //       在调用file_transfer中的函数会抛出异常
-    //       在修改完数据结构后，这里不应该在出现来自work的异常
-    // 如果不想要接收异常需重载std::error_code&
-    // 然后明确函数状态
-    try {
-      value.emplace(work());
-    } catch (const std::exception& exception) {
-      error = exception.what();
-      service_logger()->error("transfer job failed: {}", error);
-    } catch (...) {
-      error = "unexpected transfer failure";
-      service_logger()->error("transfer job failed: {}", error);
-    }
-  }
-
-  context.io_loop->queue_in_loop(std::bind(&finish_transfer_job<Result, Finish>, context,
-                                           std::move(value), std::move(error), std::move(finish)));
-}
-
-template <typename Work, typename Finish>
-bool submit_transfer_job(BASE::ThreadPool& pool, const std::atomic<bool>* stopping,
-                         const NET::TcpConnectionPtr& conn,
-                         const std::shared_ptr<ConnectionSession>& session, Work work,
-                         Finish finish) {
-  TransferJobContext context{std::weak_ptr<NET::TcpConnection>(conn),
-                             std::weak_ptr<ConnectionSession>(session),
-                             conn->get_loop(),
-                             stopping,
-                             session->transfer_generation,
-                             session->user_id,
-                             session->name,
-                             session->current_directory};
-  return pool.try_run(std::bind(&run_transfer_job<Work, Finish>, std::move(context),
-                                std::move(work), std::move(finish)));
-}
-
 }  // namespace
 
 StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
@@ -223,7 +72,9 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _th_pool("tlss_worker")
     , _user_repository(*_db_conn_pool)
     , _auth_service(_user_repository)
-    , _storage_engine(*_db_conn_pool) {
+    , _metadata_service(*_db_conn_pool)
+    , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage, _stopping)
+    , _download_engine(_disk_executor, _metadata_service, _object_storage, _stopping) {
   _tcp_server.set_connection_cb(
       std::bind(&StorageService::on_connection, this, std::placeholders::_1));
 
@@ -340,12 +191,7 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
       }
     }
 
-    if (session && session->transfer.writer) {
-      session->transfer.writer->cancel();
-    }
-    if (session && session->transfer.source) {
-      session->transfer.source->cancel();
-    }
+    if (session && session->transfer) session->transfer->cancel();
 
     return;
   }
@@ -446,24 +292,12 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
 
   try {
     while (conn->connected() && buf->readable_bytes() != 0) {
-      auto phase = session->transfer.phase;
+      const auto phase = session->transfer ? session->transfer->phase() : TransferPhase::idle;
       if (phase == TransferPhase::receiving_upload) {
-        const auto writer = session->transfer.writer;
+        const auto task = session->transfer;
+        task->consume(*buf);
+        // One disk block per iteration; the adapter resumes buffered input.
 
-        if (!writer) {
-          throw std::runtime_error("upload receiver is missing");
-        }
-
-        writer->feed(*buf);
-
-        if (writer->remaining() == 0) {
-          session->transfer.phase = TransferPhase::finalizing_upload;
-
-          writer->finish();
-        }
-
-        // 本次只交出一块数据。
-        // 剩余 Buffer 由磁盘任务完成后的读取恢复逻辑继续处理。
         return;
       }
 
@@ -509,7 +343,7 @@ void StorageService::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* 
         handle_transfer_control(conn, session, command.substr(6));
         continue;
       }
-      if (session->transfer.phase != TransferPhase::idle) {
+      if (session->transfer != nullptr) {
         buf->retrieve_all();
         conn->force_close();
         return;
@@ -627,7 +461,7 @@ void StorageService::move_file_by_cur_dir(const std::string& username,
                                           const std::weak_ptr<ConnectionSession>& original,
                                           const std::weak_ptr<NET::TcpConnection>& connection,
                                           const std::string& directory, NET::EventLoop* io_loop) {
-  auto cur_path = _storage_engine.move_dir_by_current_dir(username, current_directory, directory);
+  auto cur_path = _metadata_service.move_dir_by_current_dir(username, current_directory, directory);
   io_loop->queue_in_loop([original, connection, cur_path = std::move(cur_path)] {
     auto session = original.lock();
     auto conn = connection.lock();
@@ -663,7 +497,7 @@ void StorageService::handle_ls(const NET::TcpConnectionPtr& conn,
 void StorageService::lookup_file_by_cur_dir(const std::string& username,
                                             const std::string& current_directory,
                                             std::weak_ptr<NET::TcpConnection>& connection) {
-  auto files_info = _storage_engine.find_file_by_current_dir(username, current_directory);
+  auto files_info = _metadata_service.find_file_by_current_dir(username, current_directory);
   auto conn = connection.lock();
   if (!conn || !conn->connected()) {
     return;
@@ -715,7 +549,7 @@ void StorageService::handle_mkdir(const NET::TcpConnectionPtr& conn,
 void StorageService::create_dir(const std::string& username, const std::string& current_directory,
                                 const std::string& directory,
                                 std::weak_ptr<NET::TcpConnection>& connection) {
-  bool res = _storage_engine.create_dir(username, current_directory, directory);
+  bool res = _metadata_service.create_dir(username, current_directory, directory);
   auto conn = connection.lock();
   if (!conn || !conn->connected()) {
     return;
@@ -1000,177 +834,75 @@ void StorageService::finish_authentication(std::weak_ptr<ConnectionSession> orig
 void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& error) {
-  if (session->transfer.writer) {
-    session->transfer.writer->cancel();
-  }
-  if (session->transfer.source) {
-    session->transfer.source->cancel();
-  }
+  if (session->transfer) session->transfer->cancel();
   ++session->transfer_generation;
-  session->transfer = SessionTransfer{};
-
+  session->transfer.reset();
   Transfer::send_control(conn, "ERROR " + Transfer::quote(Transfer::safe_error(error)));
   transfer_prompt(conn, session);
 }
 
-//
-// 第一版上传文件
-/* void StorageService::finish_upload(const NET::TcpConnectionPtr& conn, */
-/*                                    const std::shared_ptr<ConnectionSession>& session) { */
-/*   if (session->transfer.phase != TransferPhase::receiving_upload || !session->transfer.receiver
- * || */
-/*       session->transfer.receiver->remaining() != 0) { */
-/*     return; */
-/*   } */
+TransferContext StorageService::transfer_context(
+    const NET::TcpConnectionPtr& conn, const std::shared_ptr<ConnectionSession>& session) {
+  return {conn, session, ++session->transfer_generation, session->user_id,
+          session->name, session->current_directory};
+}
 
-/*   if (_stopping.load()) { */
-/*     conn->force_close(); */
-/*     return; */
-/*   } */
-
-/*   session->transfer.phase = TransferPhase::finalizing_upload; */
-/*   const std::shared_ptr<Transfer::Receiver> receiver = session->transfer.receiver; */
-/*   const std::string username = session->name; */
-/*   const std::string parent_id = session->transfer.parent_id; */
-/*   const std::string directory = session->transfer.directory; */
-/*   const std::string name = session->transfer.file_name; */
-
-/*   auto work = [this, receiver, username, parent_id, directory, name]() -> CommitUploadResult {
- */
-/*     std::string hash = receiver->hash(); */
-/*     receiver->publish(Transfer::object_root() / hash, true, hash, 0444); */
-/*     if (!_storage_engine.commit_upload(username, parent_id, directory, name, hash)) { */
-/*       // 不能删除可能被其他用户引用的共享对象 */
-/*       return {false, {}, "file stored but metadata registration failed"}; */
-/*     } */
-
-/*     return {true, std::move(hash), {}}; */
-/*   }; */
-
-/*   /1* * */
-/*    * auto finish = [this, conn](const std::shared_ptr<NET::TcpConnection>& lamdba_conn, */
-/*    * const std::shared_ptr<FileStorage::ConnectionSession>& session, */
-/*    * std::optional<CommitUploadResult> value, const std::string& error) {}; */
-/*    * *1/ */
-/*   auto finish = [this](const auto& conn, const auto& session, auto value, */
-/*                        const std::string& error) { */
-/*     // 任务未执行，或执行过程中抛出了异常。 */
-/*     if (!value) { */
-/*       transfer_failed(conn, session, error); */
-/*       return; */
-/*     } */
-
-/*     // 任务正常返回，但元数据登记失败。 */
-/*     if (!value->success) { */
-/*       transfer_failed(conn, session, value->error); */
-/*       return; */
-/*     } */
-
-/*     session->transfer = SessionTransfer{}; */
-
-/*     Transfer::send_control(conn, "UOK " + value->hash); */
-/*     transfer_prompt(conn, session); */
-/*   }; */
-
-/*   const bool accepted = submit_transfer_job(_th_pool, &_stopping, conn, session, work, finish);
- */
-/*   if (!accepted) { */
-/*     transfer_failed(conn, session, "server is busy"); */
-/*   } */
-/* } */
+void StorageService::on_transfer_event(const TransferContext& context, TransferEvent event) {
+  auto [conn, session] = context.current();
+  if (!conn) return;
+  if (_stopping.load() || event.close_connection) {
+    conn->force_close();
+    return;
+  }
+  switch (event.kind) {
+    case TransferEvent::Kind::upload_ready:
+      Transfer::send_control(conn, "UREADY");
+      break;
+    case TransferEvent::Kind::upload_complete:
+      session->transfer.reset();
+      Transfer::send_control(conn, "UOK " + event.value);
+      transfer_prompt(conn, session);
+      break;
+    case TransferEvent::Kind::download_ready:
+      Transfer::send_control(conn, "DATA " + std::to_string(event.size) + " " + event.value);
+      break;
+    case TransferEvent::Kind::download_sent:
+      Transfer::send_control(conn, "DONE");
+      break;
+    case TransferEvent::Kind::download_complete:
+      session->transfer.reset();
+      Transfer::send_control(conn, "OK");
+      transfer_prompt(conn, session);
+      break;
+    case TransferEvent::Kind::failed:
+      transfer_failed(conn, session, event.value);
+      break;
+  }
+}
 
 void StorageService::handle_download(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& args) {
   try {
-    if (_stopping.load()) {
-      conn->force_close();
-      return;
-    }
+    if (_stopping.load()) { conn->force_close(); return; }
     if (session->login_state != LoginState::k_authenticated) {
-      transfer_failed(conn, session, "login required");
-      return;
+      transfer_failed(conn, session, "login required"); return;
     }
-    if (session->transfer.phase != TransferPhase::idle) {
-      conn->force_close();
-      return;
-    }
+    if (session->transfer) { conn->force_close(); return; }
     if (session->directory_change_pending) {
-      transfer_failed(conn, session, "session is busy");
-      return;
+      transfer_failed(conn, session, "session is busy"); return;
     }
     std::istringstream input(args);
     const auto name = Transfer::read_field(input);
     Transfer::require_end(input);
     if (!Transfer::valid_name(name)) {
-      transfer_failed(conn, session, "invalid remote filename");
-      return;
+      transfer_failed(conn, session, "invalid remote filename"); return;
     }
-    const auto generation = ++session->transfer_generation;
-    const auto user_id = session->user_id;
-    const auto username = session->name;
-    const auto directory = session->current_directory;
-    session->transfer.phase = TransferPhase::preparing_download;
-    auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
-    auto weak_session = std::weak_ptr<ConnectionSession>(session);
-    auto current = [weak_conn, weak_session, generation, user_id, username, directory] {
-      using Current = std::pair<NET::TcpConnectionPtr, std::shared_ptr<ConnectionSession>>;
-      auto conn = weak_conn.lock();
-      auto session = weak_session.lock();
-      if (!conn || !session || !conn->connected()) return Current{};
-      assert(conn->get_loop()->is_in_loop_thread());
-      if (session->transfer_generation != generation ||
-          session->login_state != LoginState::k_authenticated || session->user_id != user_id ||
-          session->name != username || session->current_directory != directory) return Current{};
-      return Current{std::move(conn), std::move(session)};
-    };
-    auto factory = [this, username, directory, name]() -> Transfer::AsyncFileSource::Opened {
-      auto result = _storage_engine.find_download_hash(username, directory, name);
-      if (!result.success) throw std::runtime_error("file not found or unavailable");
-      auto file = Transfer::open_source(Transfer::object_root() / result.result, true);
-      return {std::move(file), std::move(result.result)};
-    };
-    auto ready = [this, current](const Transfer::AsyncFileSource::Info& info) {
-      auto [conn, session] = current();
-      if (!conn) return;
-      if (_stopping.load()) {
-        conn->force_close();
-        return;
-      }
-      if (session->transfer.phase != TransferPhase::preparing_download) return;
-      const auto source = session->transfer.source;
-      if (!source) throw std::runtime_error("download source is missing");
-      session->transfer.phase = TransferPhase::sending_download;
-      // 同一回调中入队；异步文件占据 FIFO 位置，后续文本不能插入正文。
-      Transfer::send_control(conn, "DATA " + std::to_string(info.size) + " " + info.tag);
-      NET::TcpConnection::FileSendCallback completed =
-          [this, current, source](std::error_code error, std::uint64_t) {
-        source->cancel();
-        auto [conn, session] = current();
-        if (!conn) return;
-        if (session->transfer.source == source) session->transfer.source.reset();
-        if (error || _stopping.load()) {
-          conn->force_close();
-          return;
-        }
-        session->transfer.phase = TransferPhase::waiting_download_ack;
-        Transfer::send_control(conn, "DONE");
-      };
-      conn->send_file_async(0, info.size, source->reader(), std::move(completed));
-    };
-    auto failed = [this, current](std::string error) {
-      auto [conn, session] = current();
-      if (!conn) return;
-      if (_stopping.load()) {
-        conn->force_close();
-      } else if (session->transfer.phase == TransferPhase::preparing_download) {
-        transfer_failed(conn, session, error);
-      } else {
-        conn->force_close();
-      }
-    };
-    session->transfer.source = Transfer::AsyncFileSource::open(
-        _disk_executor, conn, std::move(factory), std::move(ready), std::move(failed));
+    const auto context = transfer_context(conn, session);
+    const auto task = _download_engine.create(context, name,
+        [this, context](TransferEvent event) { on_transfer_event(context, std::move(event)); });
+    session->transfer = task;
+    task->start();
   } catch (const std::exception& exception) {
     transfer_failed(conn, session, exception.what());
   }
@@ -1182,72 +914,30 @@ void StorageService::handle_transfer_control(const NET::TcpConnectionPtr& conn,
   std::istringstream input(line);
   std::string verb;
   input >> verb;
-  if (session->transfer.phase == TransferPhase::waiting_download_ack) {
+  if (session->transfer && session->transfer->phase() == TransferPhase::waiting_download_ack) {
     Transfer::require_end(input);
-    if (verb != "ACK") {
-      conn->force_close();
-      return;
-    }
-
-    session->transfer = SessionTransfer{};
-    Transfer::send_control(conn, "OK");
-    transfer_prompt(conn, session);
+    if (verb != "ACK") { conn->force_close(); return; }
+    const auto task = session->transfer;
+    task->acknowledge();
     return;
   }
-
-  if (session->transfer.phase != TransferPhase::idle) {
-    conn->force_close();
-    return;
-  }
-
+  if (session->transfer) { conn->force_close(); return; }
   std::string args;
   std::getline(input >> std::ws, args);
-  if (verb == "UPLOAD") {
-    handle_upload(conn, session, args);
-  } else if (verb == "DOWNLOAD") {
-    handle_download(conn, session, args);
-  } else {
-    transfer_failed(conn, session, "unknown transfer command");
-  }
+  if (verb == "UPLOAD") handle_upload(conn, session, args);
+  else if (verb == "DOWNLOAD") handle_download(conn, session, args);
+  else transfer_failed(conn, session, "unknown transfer command");
 }
 
-StorageService::UploadContext::Current StorageService::UploadContext::current() const {
-  auto conn = weak_conn.lock();
-  auto session = weak_session.lock();
-
-  if (!conn || !session || !conn->connected()) {
-    return {};
-  }
-
-  assert(conn->get_loop()->is_in_loop_thread());
-
-  if (session->transfer_generation != generation ||
-      session->login_state != LoginState::k_authenticated || session->user_id != user_id ||
-      session->name != username || session->current_directory != directory) {
-    return {};
-  }
-
-  return {std::move(conn), std::move(session)};
-}
-
-StorageService::UploadRequest StorageService::parse_upload_request(const std::string& args) {
+UploadRequest StorageService::parse_upload_request(const std::string& args) {
   std::istringstream input(args);
   std::string size_text;
-
-  if (!(input >> size_text)) {
-    throw std::runtime_error("missing file size");
-  }
-
+  if (!(input >> size_text)) throw std::runtime_error("missing file size");
   UploadRequest request;
   request.size = Transfer::parse_size(size_text);
   request.name = Transfer::read_field(input);
-
   Transfer::require_end(input);
-
-  if (!Transfer::valid_name(request.name)) {
-    throw std::runtime_error("invalid remote filename");
-  }
-
+  if (!Transfer::valid_name(request.name)) throw std::runtime_error("invalid remote filename");
   return request;
 }
 
@@ -1255,228 +945,23 @@ void StorageService::handle_upload(const NET::TcpConnectionPtr& conn,
                                    const std::shared_ptr<ConnectionSession>& session,
                                    const std::string& args) {
   try {
-    if (_stopping.load()) {
-      conn->force_close();
-      return;
-    }
-
+    if (_stopping.load()) { conn->force_close(); return; }
     if (session->login_state != LoginState::k_authenticated) {
-      transfer_failed(conn, session, "login required");
-      return;
+      transfer_failed(conn, session, "login required"); return;
     }
-
-    if (session->transfer.phase != TransferPhase::idle) {
-      conn->force_close();
-      return;
-    }
-
+    if (session->transfer) { conn->force_close(); return; }
     if (session->directory_change_pending) {
-      transfer_failed(conn, session, "session is busy");
-      return;
+      transfer_failed(conn, session, "session is busy"); return;
     }
-
     auto request = parse_upload_request(args);
-
-    const auto generation = ++session->transfer_generation;
-
-    session->transfer.phase = TransferPhase::preparing_upload;
-
-    session->transfer.file_name = request.name;
-    session->transfer.directory = session->current_directory;
-
-    UploadContext context{conn,
-                          session,
-                          generation,
-                          session->user_id,
-                          session->name,
-                          session->current_directory,
-                          std::move(request.name),
-                          request.size};
-
-    submit_upload_prepare(conn, session, std::move(context));
-
+    const auto context = transfer_context(conn, session);
+    const auto task = _upload_engine.create(context, std::move(request),
+        [this, context](TransferEvent event) { on_transfer_event(context, std::move(event)); });
+    session->transfer = task;
+    task->start();
   } catch (const std::exception& exception) {
     transfer_failed(conn, session, exception.what());
   }
-}
-
-void StorageService::submit_upload_prepare(const NET::TcpConnectionPtr& conn,
-                                           const std::shared_ptr<ConnectionSession>& session,
-                                           UploadContext context) {
-  auto work = [this, context]() -> PreparedUpload {
-    PreparedUpload result;
-
-    auto parent = _storage_engine.prepare_upload(context.username, context.directory, context.name);
-
-    if (!parent.success) {
-      result.error = "directory unavailable or filename already exists";
-      return result;
-    }
-
-    result.parent_id = parent.result;
-    result.success = true;
-    return result;
-  };
-
-  auto finish = [this, context](const NET::TcpConnectionPtr&,
-                                const std::shared_ptr<ConnectionSession>&,
-                                std::optional<PreparedUpload> value, const std::string& error) {
-    on_upload_prepared(context, std::move(value), error);
-  };
-
-  if (!submit_transfer_job(_th_pool, &_stopping, conn, session, std::move(work),
-                           std::move(finish))) {
-    transfer_failed(conn, session, "server is busy");
-  }
-}
-
-void StorageService::on_upload_prepared(const UploadContext& context,
-                                        std::optional<PreparedUpload> value,
-                                        const std::string& error) {
-  auto [conn, session] = context.current();
-
-  if (!conn) {
-    return;
-  }
-
-  // 防止过期的数据库结果重新启动上传。
-  if (session->transfer.phase != TransferPhase::preparing_upload) {
-    return;
-  }
-
-  if (!value) {
-    transfer_failed(conn, session, error);
-    return;
-  }
-
-  if (!value->success) {
-    transfer_failed(conn, session, value->error);
-    return;
-  }
-
-  if (_stopping.load()) {
-    conn->force_close();
-    return;
-  }
-
-  session->transfer.parent_id = value->parent_id;
-
-  try {
-    start_upload_receiver(context, conn, session, value->parent_id);
-  } catch (const std::exception& exception) {
-    if (_stopping.load()) {
-      conn->force_close();
-    } else {
-      transfer_failed(conn, session, exception.what());
-    }
-  }
-}
-
-void StorageService::start_upload_receiver(const UploadContext& context,
-                                           const NET::TcpConnectionPtr& conn,
-                                           const std::shared_ptr<ConnectionSession>& session,
-                                           const std::string& parent_id) {
-  auto factory = [size = context.size] {
-    return std::make_unique<Transfer::Receiver>(Transfer::object_root(), size);
-  };
-
-  auto finalizer = [this, username = context.username, directory = context.directory,
-                    name = context.name, parent_id](Transfer::Receiver& receiver) {
-    const std::string hash = receiver.hash();
-
-    receiver.publish(Transfer::object_root() / hash, true, hash, 0444);
-
-    if (!_storage_engine.commit_upload(username, parent_id, directory, name, hash)) {
-      throw std::runtime_error("file stored but metadata registration failed");
-    }
-
-    return hash;
-  };
-
-  auto ready = [this, context] {
-    on_upload_ready(context);
-  };
-
-  auto done = [this, context](std::string hash) {
-    on_upload_done(context, std::move(hash));
-  };
-
-  auto failed = [this, context](std::string error) {
-    on_upload_failed(context, std::move(error));
-  };
-
-  session->transfer.writer = Transfer::AsyncReceiver::create(
-      _disk_executor, conn, context.size, std::move(factory), std::move(finalizer),
-      std::move(ready), std::move(done), std::move(failed));
-}
-
-void StorageService::on_upload_ready(const UploadContext& context) {
-  auto [conn, session] = context.current();
-
-  if (!conn) {
-    return;
-  }
-
-  if (_stopping.load()) {
-    conn->force_close();
-    return;
-  }
-
-  if (session->transfer.phase != TransferPhase::preparing_upload) {
-    return;
-  }
-
-  session->transfer.phase = TransferPhase::receiving_upload;
-
-  Transfer::send_control(conn, "UREADY");
-
-  if (context.size == 0) {
-    session->transfer.phase = TransferPhase::finalizing_upload;
-
-    session->transfer.writer->finish();
-  }
-}
-
-void StorageService::on_upload_done(const UploadContext& context, std::string hash) {
-  auto [conn, session] = context.current();
-
-  if (!conn) {
-    return;
-  }
-
-  if (_stopping.load()) {
-    conn->force_close();
-    return;
-  }
-
-  session->transfer = SessionTransfer{};
-
-  Transfer::send_control(conn, "UOK " + hash);
-  transfer_prompt(conn, session);
-}
-
-void StorageService::on_upload_failed(const UploadContext& context, std::string error) {
-  auto [conn, session] = context.current();
-
-  if (!conn) {
-    return;
-  }
-
-  if (_stopping.load()) {
-    conn->force_close();
-    return;
-  }
-
-  const auto phase = session->transfer.phase;
-
-  if (phase == TransferPhase::preparing_upload || phase == TransferPhase::finalizing_upload) {
-    transfer_failed(conn, session, error);
-    return;
-  }
-
-  service_logger()->error("upload disk write failed: {}", error);
-
-  conn->force_close();
 }
 
 }  // namespace TLSS::FileStorage

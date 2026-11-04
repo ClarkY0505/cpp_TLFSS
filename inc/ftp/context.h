@@ -1,20 +1,13 @@
 #ifndef __INC_FTP_CONTEXT_H__
 #define __INC_FTP_CONTEXT_H__
 
-#include "ftp/file_transfer.h"
-#include "ftp/async_file_receiver.h"
-#include "ftp/async_file_source.h"
+#include "ftp/metadata_types.h"
+#include "ftp/transfer_task.h"
 
 #include <cstdint>
 #include <string>
 
 namespace TLSS::FileStorage {
-
-template <typename T>
-struct StorageContext {
-  bool success = false;
-  T result{};
-};
 
 enum class LoginState {
   k_await_choice,
@@ -26,30 +19,6 @@ enum class LoginState {
   k_signup_confirm,
   k_registering,
   k_authenticated,
-};
-
-enum class TransferPhase {
-  idle,
-  preparing_upload,
-  receiving_upload,
-  finalizing_upload,
-  preparing_download,
-  sending_download,
-  waiting_download_ack
-};
-
-struct SessionTransfer {
-  TransferPhase phase = TransferPhase::idle;
-
-  std::string file_name;
-  std::string directory;
-  std::string parent_id;
-
-  // 第一次实现使用的方法，存在慢磁盘阻塞io
-  /* std::shared_ptr<Transfer::Receiver> receiver; */
-  // 使用异步磁盘任务，专用线程池，默认线程数量为2
-  std::shared_ptr<Transfer::AsyncReceiver> writer;
-  std::shared_ptr<Transfer::AsyncFileSource> source;
 };
 
 struct ConnectionSession {
@@ -73,15 +42,9 @@ struct ConnectionSession {
   bool directory_change_pending = false;
 
   std::uint64_t transfer_generation = 0;
-  SessionTransfer transfer;
+  std::shared_ptr<TransferTask> transfer;
 };
 
-struct FileInfo {
-  std::string file_name;
-  std::string type;
-  std::string create_at;
-  std::string update_at;
-};
 
 }  // namespace TLSS::FileStorage
 

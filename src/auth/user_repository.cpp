@@ -1,4 +1,5 @@
 #include "auth/user_repository.h"
+#include "ftp/metadata_service.h"
 
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
@@ -40,10 +41,7 @@ UserCreateResult MySqlUserRepository::create_user_with_root(
     }
     if (user.insert_id == 0 || user.affected_rows != 1) return {};
 
-    const auto root = connection->execute_prepared(
-        "INSERT INTO virtual_files(username, file_name, parent_id, path, file_type, object_hash) "
-        "VALUES (?, '/', -1, '/', 'directory', NULL)", {username});
-    if (!root.success || root.affected_rows != 1) return {};
+    if (!FileStorage::MetadataService::create_root_in_transaction(*connection, username)) return {};
 
     // 失败时可能已经提交，不能自动重试或谎报注册失败。
     switch (transaction.commit()) {

@@ -8,19 +8,18 @@
 #include "common/base/base_logger.h"
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
-#include "ftp/context.h"
-#include "ftp/file_transfer.h"
-#include "ftp/service_engine.h"
+#include "ftp/transfer_validation.h"
+#include "ftp/metadata_service.h"
 
 namespace TLSS::FileStorage {
-StorageEngine::StorageEngine(BASE::DbConnectionPool& pool)
-    : StorageEngine(pool, std::make_shared<MetadataCache>()) {}
+MetadataService::MetadataService(BASE::DbConnectionPool& pool)
+    : MetadataService(pool, std::make_shared<MetadataCache>()) {}
 
-StorageEngine::StorageEngine(BASE::DbConnectionPool& pool, std::shared_ptr<MetadataCache> cache)
+MetadataService::MetadataService(BASE::DbConnectionPool& pool, std::shared_ptr<MetadataCache> cache)
     : _db_conn_pool(pool)
     , _metadata_cache(cache ? std::move(cache) : std::make_shared<MetadataCache>()) {}
 
-StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir_db(
+StorageContext<std::vector<FileInfo>> MetadataService::find_file_by_current_dir_db(
     const std::string& username, const std::string& current_directory) {
   if (username.empty() || current_directory.empty()) {
     return {false, {}};
@@ -79,7 +78,7 @@ StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir_db
   return {true, files_info};
 }
 
-StorageContext<std::string> StorageEngine::move_dir_by_current_dir_db(
+StorageContext<std::string> MetadataService::move_dir_by_current_dir_db(
     const std::string& username, const std::string& current_directory,
     const std::string& dir_name) {
   if (username.empty() || current_directory.empty() || dir_name.empty()) {
@@ -142,7 +141,7 @@ StorageContext<std::string> StorageEngine::move_dir_by_current_dir_db(
   return {true, *row[0]};
 }
 
-bool StorageEngine::create_dir_db(const std::string& username, const std::string& current_directory,
+bool MetadataService::create_dir_db(const std::string& username, const std::string& current_directory,
                                   const std::string& directory) {
   if (username.empty() || current_directory.empty() || directory.empty()) {
     return false;
@@ -186,7 +185,7 @@ bool StorageEngine::create_dir_db(const std::string& username, const std::string
   return res;
 }
 
-StorageContext<std::string> StorageEngine::prepare_upload(const std::string& username,
+StorageContext<std::string> MetadataService::prepare_upload(const std::string& username,
                                                           const std::string& directory,
                                                           const std::string& file_name) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
@@ -225,7 +224,7 @@ StorageContext<std::string> StorageEngine::prepare_upload(const std::string& use
   return {true, *result.rows[0][0]};
 }
 
-bool StorageEngine::commit_upload_db(const std::string& username, const std::string& parent_id,
+bool MetadataService::commit_upload_db(const std::string& username, const std::string& parent_id,
                                      const std::string& directory, const std::string& file_name,
                                      const std::string& hash) {
   if (!Transfer::valid_name(file_name) || !Transfer::valid_hash(hash)) {
@@ -259,7 +258,7 @@ bool StorageEngine::commit_upload_db(const std::string& username, const std::str
   return result.success && result.affected_rows == 1;
 }
 
-StorageContext<std::string> StorageEngine::find_download_hash_db(const std::string& username,
+StorageContext<std::string> MetadataService::find_download_hash_db(const std::string& username,
                                                                  const std::string& directory,
                                                                  const std::string& file_name) {
   if (!Transfer::valid_name(file_name)) {
@@ -291,7 +290,7 @@ StorageContext<std::string> StorageEngine::find_download_hash_db(const std::stri
   return {true, *result.rows[0][0]};
 }
 
-StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir(
+StorageContext<std::vector<FileInfo>> MetadataService::find_file_by_current_dir(
     const std::string& username, const std::string& current_directory) {
   if (username.empty() || current_directory.empty()) {
     return {false, {}};
@@ -301,7 +300,7 @@ StorageContext<std::vector<FileInfo>> StorageEngine::find_file_by_current_dir(
   });
 }
 
-StorageContext<std::string> StorageEngine::move_dir_by_current_dir(
+StorageContext<std::string> MetadataService::move_dir_by_current_dir(
     const std::string& username, const std::string& current_directory,
     const std::string& dir_name) {
   if (username.empty() || current_directory.empty() || dir_name.empty()) {
@@ -317,7 +316,7 @@ StorageContext<std::string> StorageEngine::move_dir_by_current_dir(
       });
 }
 
-StorageContext<std::string> StorageEngine::find_download_hash(const std::string& username,
+StorageContext<std::string> MetadataService::find_download_hash(const std::string& username,
                                                               const std::string& directory,
                                                               const std::string& file_name) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
@@ -330,7 +329,7 @@ StorageContext<std::string> StorageEngine::find_download_hash(const std::string&
                                    });
 }
 
-bool StorageEngine::create_dir(const std::string& username, const std::string& current_directory,
+bool MetadataService::create_dir(const std::string& username, const std::string& current_directory,
                                const std::string& directory) {
   if (username.empty() || current_directory.empty() || directory.empty()) {
     return false;
@@ -341,7 +340,7 @@ bool StorageEngine::create_dir(const std::string& username, const std::string& c
                                 });
 }
 
-bool StorageEngine::commit_upload(const std::string& username, const std::string& parent_id,
+bool MetadataService::commit_upload(const std::string& username, const std::string& parent_id,
                                   const std::string& directory, const std::string& file_name,
                                   const std::string& hash) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
@@ -355,7 +354,7 @@ bool StorageEngine::commit_upload(const std::string& username, const std::string
       });
 }
 
-MetadataCacheStats StorageEngine::metadata_cache_stats() const {
+MetadataCacheStats MetadataService::metadata_cache_stats() const {
   return _metadata_cache->stats();
 }
 

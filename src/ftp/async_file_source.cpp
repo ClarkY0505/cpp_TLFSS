@@ -189,25 +189,10 @@ void AsyncFileSource::State::run_read(off_t offset, std::size_t count) {
     if (is_cancelled()) {
       error = make_error(ECANCELED);
     } else {
-      data.resize(count);
-      std::size_t done = 0;
-      while (done < count) {
-        if (is_cancelled()) {
-          error = make_error(ECANCELED);
-          break;
-        }
-        const ssize_t n = ::pread(file->file.fd, data.data() + done, count - done,
-                                  offset + static_cast<off_t>(done));
-        if (n > 0) {
-          done += static_cast<std::size_t>(n);
-        } else if (n == -1 && errno == EINTR) {
-          continue;
-        } else {
-          error = make_error(n == 0 ? EIO : errno);
-          break;
-        }
-      }
+      data = ObjectStorageEngine::read(file, offset, count, [this] { return is_cancelled(); });
     }
+  } catch (const std::system_error& exception) {
+    error = exception.code();
   } catch (const std::bad_alloc&) {
     error = make_error(ENOMEM);
   } catch (...) {

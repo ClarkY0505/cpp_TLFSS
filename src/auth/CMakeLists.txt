@@ -11,6 +11,7 @@ target_include_directories(auth_lib PUBLIC
 target_link_libraries(auth_lib
     PUBLIC
         common_lib
+        metadata_lib
     PRIVATE
         OpenSSL::Crypto
         MySQLClient::MySQLClient
