@@ -1,6 +1,20 @@
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/test")
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
+add_executable(test_storage_engines test_storage_engines.cpp)
+add_dependencies(test_storage_engines prepare_runtime_directories)
+target_link_libraries(test_storage_engines PRIVATE transfer_lib)
+add_test(NAME storage_engines_test COMMAND test_storage_engines)
+
+add_executable(test_signup_transaction_boundary
+    test_signup_transaction_boundary.cpp
+    ${PROJECT_SOURCE_DIR}/src/auth/user_repository.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/metadata_root.cpp
+)
+add_dependencies(test_signup_transaction_boundary prepare_runtime_directories)
+target_link_libraries(test_signup_transaction_boundary PRIVATE common_lib)
+add_test(NAME signup_transaction_boundary_test COMMAND test_signup_transaction_boundary)
+
 add_executable(test_tlss_memory_link test_tlss_memory_link.cpp)
 add_dependencies(test_tlss_memory_link prepare_runtime_directories)
 target_link_libraries(test_tlss_memory_link PRIVATE common_lib)
@@ -17,23 +31,39 @@ target_link_libraries(test_thread_pool_async PRIVATE common_lib)
 add_test(NAME thread_pool_async_test COMMAND test_thread_pool_async)
 set_tests_properties(thread_pool_async_test PROPERTIES TIMEOUT 15)
 
+# 使用进程内数据库替代实现测试实际的存储引擎。
+# 通过查询和连接借用计数验证缓存命中，无需启动 MySQL 服务。
+add_executable(test_metadata_cache
+    test_metadata_cache.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
+)
+add_dependencies(test_metadata_cache prepare_runtime_directories)
+target_link_libraries(test_metadata_cache PRIVATE common_lib OpenSSL::Crypto)
+foreach(scenario IN ITEMS list cd download failures writes failed_write concurrent stale_fill
+        local_invalidation partition_concurrency ttl large statistics disabled arc shared config)
+    add_test(NAME metadata_cache_${scenario} COMMAND test_metadata_cache ${scenario})
+    set_tests_properties(metadata_cache_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
 # Compile the real FTP handlers with local database/authentication substitutes.
 # Private access is limited to this regression target for callback/error injection.
 add_executable(test_ftp_transfer
     test_ftp_transfer.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/transfer_task.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/upload_engine.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/download_engine.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/server.cpp
-    ${PROJECT_SOURCE_DIR}/src/ftp/service_engine.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/client.cpp
-    ${PROJECT_SOURCE_DIR}/src/ftp/async_file_receiver.cpp
-    ${PROJECT_SOURCE_DIR}/src/ftp/async_file_source.cpp
 )
 add_dependencies(test_ftp_transfer prepare_runtime_directories)
 target_compile_options(test_ftp_transfer PRIVATE -fno-access-control)
-target_link_libraries(test_ftp_transfer PRIVATE common_lib OpenSSL::Crypto)
+target_link_libraries(test_ftp_transfer PRIVATE transfer_lib common_lib OpenSSL::Crypto)
 foreach(scenario IN ITEMS
         commit_hash upload download error_frame busy_reply receive_error
         control_limit source_type source_fifo upload_chunked client_download shutdown_wait
-        cold_send source_cancel stale_read source_eof client_upload empty_send reader_error legacy_send)
+        cold_send source_cancel stale_read source_eof client_upload empty_send reader_error legacy_send
+        metadata_failure stale_prepare upload_cancel task_isolation)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()

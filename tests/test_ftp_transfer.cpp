@@ -1,4 +1,5 @@
 #include "ftp/server.h"
+#include "ftp/service_engine.h"
 #include "ftp/client.h"
 #include "ftp/async_file_source.h"
 #include "common/base/mysql_connection.h"
@@ -55,6 +56,7 @@ extern "C" ssize_t pread(int fd, void* data, size_t count, off_t offset) {
 // The actual FTP handlers, file receiver, client parser and storage engine run. / 运行实际的 FTP 处理函数、文件接收器、客户端解析器和存储引擎。
 namespace {
 std::atomic<int> inserts{0};
+std::atomic<bool> fail_metadata_insert{false};
 std::atomic<bool> database_shutdown_called{false};
 std::atomic<bool> finalizer_active{false};
 std::atomic<bool> shutdown_during_finalize{false};
@@ -100,6 +102,7 @@ bool DbConnection::update_prepared(
 DbExecuteResult DbConnection::execute_prepared(
     const std::string&, const std::vector<DbValue>&) {
   ++inserts;
+  if (fail_metadata_insert.load()) return {};
   return {true, 0, 1, 1};
 }
 }
@@ -211,11 +214,12 @@ struct Fixture {
     return response;
   }
 
-  std::string read_wire() {
+  std::string read_wire(int descriptor = -1) {
+    if (descriptor == -1) descriptor = peer;
     std::string result;
     char data[8192];
     for (;;) {
-      const ssize_t n = ::recv(peer, data, sizeof data, 0);
+      const ssize_t n = ::recv(descriptor, data, sizeof data, 0);
       if (n > 0) result.append(data, static_cast<std::size_t>(n));
       else if (n == 0 || errno == EAGAIN || errno == EWOULDBLOCK) return result;
       else if (errno != EINTR) throw std::runtime_error("recv failed");
@@ -684,6 +688,88 @@ void run(const std::string& scenario, const std::string& directory) {
     std::ifstream stored(directory + "/" + abc_hash, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(stored)), {});
     check(bytes == "abc", "published object content differs");
+  } else if (scenario == "metadata_failure") {
+    fail_metadata_insert.store(true);
+    fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
+    fixture.await_wire("\n@TLSS UREADY\n");
+    fixture.receive("abc");
+    const auto response = fixture.await_wire("metadata registration failed");
+    check(response.find("UOK") == std::string::npos && !fixture.session->transfer,
+          "failed metadata registration completed the upload");
+    check(std::filesystem::exists(directory + "/" + abc_hash),
+          "failed metadata registration deleted the shared object");
+    check(inserts == 1, "metadata registration was skipped or retried");
+  } else if (scenario == "stale_prepare") {
+    fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"old.bin\"");
+    const auto old = fixture.session->transfer;
+    ++fixture.session->transfer_generation;
+    fixture.drain();
+    check(fixture.read_wire().find("UREADY") == std::string::npos,
+          "stale preparation started a receiver");
+    check(old->phase() == TransferPhase::preparing_upload,
+          "stale callback advanced the old task");
+    old->cancel();
+    fixture.session->transfer.reset();
+    fixture.receive("@TLSS UPLOAD 3 \"new.bin\"\n");
+    fixture.await_wire("\n@TLSS UREADY\n");
+    fixture.receive("abc");
+    fixture.await_wire("\n@TLSS UOK " + abc_hash + "\n");
+    check(inserts == 1, "stale preparation registered a file");
+  } else if (scenario == "upload_cancel") {
+    fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
+    fixture.await_wire("\n@TLSS UREADY\n");
+    fixture.conn->force_close();
+    fixture.until([&] { return fixture.conn->disconnected(); });
+    fixture.service._disk_executor.stop();
+    fixture.drain();
+    check(inserts == 0, "cancelled upload registered metadata");
+    check(std::filesystem::is_empty(directory), "cancelled upload leaked temporary content");
+    check(fixture.read_wire().find("UOK") == std::string::npos,
+          "cancelled upload returned success");
+  } else if (scenario == "task_isolation") {
+    int sockets[2];
+    check(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sockets) == 0,
+          "second socketpair failed");
+    auto second = std::make_shared<TcpConnection>(
+        &fixture.loop, "second", sockets[0], InetAddress(), InetAddress());
+    second->set_connection_cb([&](const TcpConnectionPtr& connection) {
+      fixture.service.on_connection(connection);
+    });
+    second->set_close_cb([&](const TcpConnectionPtr& connection) {
+      fixture.loop.queue_in_loop([connection] { connection->connect_destroyed(); });
+    });
+    second->connect_established();
+    auto session = fixture.service._sessions.at(second.get());
+    session->login_state = LoginState::k_authenticated;
+    session->name = "second_user";
+    session->user_id = 2;
+    fixture.read_wire(sockets[1]);
+    fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"first.bin\"");
+    fixture.service.handle_upload(second, session, "3 \"second.bin\"");
+    std::string second_wire;
+    fixture.until([&] {
+      second_wire += fixture.read_wire(sockets[1]);
+      return second_wire.find("UREADY") != std::string::npos;
+    });
+    fixture.await_wire("UREADY");
+    Buffer body;
+    body.append("abc", 3);
+    fixture.service.on_message(second, &body, TIME::Timestamp());
+    fixture.until([&] {
+      second_wire += fixture.read_wire(sockets[1]);
+      return second_wire.find("UOK") != std::string::npos;
+    });
+    check(!session->transfer && fixture.session->transfer &&
+              fixture.session->transfer->phase() == TransferPhase::receiving_upload,
+          "one connection's completion changed another connection's task");
+    check(inserts == 1, "second upload did not register exactly once");
+    second->force_close();
+    fixture.until([&] { return second->disconnected(); });
+    second->set_connection_cb({});
+    second->set_close_cb({});
+    second->connect_destroyed();
+    second.reset();
+    ::close(sockets[1]);
   } else if (scenario == "download") {
     std::ofstream(directory + "/" + abc_hash, std::ios::binary) << "abc";
     fixture.receive("@TLSS DOWNLOAD \"file.bin\"\n");
@@ -693,7 +779,7 @@ void run(const std::string& scenario, const std::string& directory) {
     fixture.receive("@TLSS ACK\n");
     check(fixture.await_wire("\n@TLSS OK\n").find("\n@TLSS OK\n") != std::string::npos,
           "download ACK did not produce OK");
-    check(fixture.session->transfer.phase == TransferPhase::idle,
+    check(!fixture.session->transfer,
           "download did not return to idle");
   } else if (scenario == "error_frame") {
     fixture.service.transfer_failed(fixture.conn, fixture.session, "not available");
@@ -715,11 +801,15 @@ void run(const std::string& scenario, const std::string& directory) {
       check(receiver->file_.fd >= 0, "cannot open /dev/full");
       return receiver;
     };
-    fixture.session->transfer.writer = Transfer::AsyncReceiver::create(
+    auto task = fixture.service._upload_engine.create(
+        fixture.service.transfer_context(fixture.conn, fixture.session), {3, "broken.bin"},
+        [](TransferEvent) {});
+    fixture.session->transfer = task;
+    task->_writer = Transfer::AsyncReceiver::create(
         fixture.service._disk_executor, fixture.conn, 3, std::move(factory),
         [](Transfer::Receiver&) { return std::string{}; },
         [&] {
-          fixture.session->transfer.phase = TransferPhase::receiving_upload;
+          task->_phase = TransferPhase::receiving_upload;
           ready = true;
         },
         [](std::string) {},

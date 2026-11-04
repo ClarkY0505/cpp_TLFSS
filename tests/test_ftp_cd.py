@@ -12,9 +12,9 @@ class DirectoryLookupTest(unittest.TestCase):
     def setUpClass(cls):
         source = (
             Path(__file__).resolve().parents[1]
-            / "src/ftp/service_engine.cpp"
+            / "src/ftp/metadata_service.cpp"
         ).read_text()
-        function = source.split("StorageEngine::move_dir_by_current_dir", 1)[1]
+        function = source.split("MetadataService::move_dir_by_current_dir", 1)[1]
         queries = re.findall(
             r'query_prepared\(\s*((?:"(?:\\.|[^"\\])*"\s*)+)\s*,',
             function,
