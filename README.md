@@ -17,9 +17,9 @@ TLSS now provides basic single-node file storage capabilities, featuring asynchr
 
 **Currently implemented:** epoll Reactor, asynchronous TCP client (`tlss-cli`), bounded thread pool, MySQL connection pool, PBKDF2 password hashing, user registration/login, virtual directories (`mkdir`, `cd`, `ls`, `pwd`), sharded metadata caching, file upload/download, SHA-256 content-addressed object storage, asynchronous disk IO, and graceful shutdown.
 
-**Supporting subsystems:** monitoring and reliable alarms run through standalone demos; the AVX2/REP MOVSB memory copy library is used by network buffers and has a separate benchmark entry point.
+**Supporting subsystems:** the main service reports business and resource metrics to a separate monitoring collector, with durable reliable alarms; the AVX2/REP MOVSB memory copy library is used by network buffers and has a separate benchmark entry point.
 
-**Next steps:** object/metadata consistency recovery, object reclamation, main-service monitoring, gRPC interfaces, and distributed storage.
+**Next steps:** object/metadata consistency recovery, object reclamation, operational recovery procedures, gRPC interfaces, and distributed storage.
 
 ### Quick Start
 
@@ -57,6 +57,9 @@ See the build instructions, architecture, and implementation notes below.
 - [Module implementation](#module-implementation)
 - [Metadata cache](#metadata-cache)
 - [File transfer and asynchronous disk work](#file-transfer-and-asynchronous-disk-work)
+- [Service monitoring](#service-monitoring)
+- [Monitoring metric reference](#monitoring-metric-reference)
+- [Monitoring commands and query examples](#monitoring-commands-and-query-examples)
 - [Network service lifecycle and threading requirements](#network-service-lifecycle-and-threading-requirements)
 - [Code layout](#code-layout)
 - [Build and run](#build-and-run)
@@ -87,9 +90,9 @@ See the build instructions, architecture, and implementation notes below.
 | MySQL | Connection pool, prepared statements, RAII transactions | In use |
 | Authentication | Signup, password verification, transactional user and root directory creation | In use |
 | Virtual directories | `mkdir / cd / ls / pwd` | In use |
-| Metadata cache | `HashArcCache`, TTLs, directory generation coordination, statistics snapshots | Created by `MetadataService` by default; used by directory operations and download lookups |
+| Metadata cache | `HashArcCache`, TTLs, directory generation coordination, statistics snapshots | Main shares a cache with the service and monitor; directory operations and download lookups use it |
 | Client | `tlss-cli <IPv4> <port>` with interactive commands and file upload/download | Standalone executable |
-| Monitoring | Metrics, policies, CLI, UDP, reliable TCP alarms | Library linked; runs through standalone demos, not started by the main entry point |
+| Monitoring | Business/resource metrics, CLI, UDP, reliable TCP alarms | Main owns the monitor runtime and resource sampler; separate `storage-monitor-collector` receives reports |
 | Memory copy | `TLSS::MEMORY::memcpy` shared library | Called by networking `Buffer::append()` with the Default hint |
 | File contents | SHA-256 objects, upload/download, temporary file publication, asynchronous disk IO | In use; object reclamation and crash consistency repair remain unimplemented |
 | RPC and gateway | Build targets and code skeletons | No business services; all four `.proto` files are empty |
@@ -279,7 +282,7 @@ Consistency and concurrency behavior:
 - Successful `cd` paths currently depend only on TTL because directory deletion, moves, and renames are not implemented. Those operations will require additional invalidation rules.
 - Each `MetadataService` creates its own cache by default. Multiple instances share coordination locks, generations, and statistics only when explicitly given the same `std::shared_ptr<MetadataCache>`. Other processes and direct SQL writes do not invalidate local entries; existing entries rely on TTL refresh. Cross-process strong consistency is not provided.
 
-`MetadataCacheConfig` configures capacities, TTLs, shard count, and listing size limits at C++ construction time. Zero capacity or TTL disables that category; valid TTLs range from 0 to 24 hours. There is no environment variable, configuration file, or CLI tuning interface. `MetadataService::metadata_cache_stats()` exposes `requests / hits / misses / loads / coalesced / admission_skips` for each category; these counters are not yet connected to main-service monitoring or an administrative CLI.
+`MetadataCacheConfig` configures capacities, TTLs, shard count, and listing size limits at C++ construction time. Zero capacity or TTL disables that category; valid TTLs range from 0 to 24 hours. There is no environment variable, configuration file, or CLI tuning interface. `MetadataService::metadata_cache_stats()` exposes `requests / hits / misses / loads / coalesced / admission_skips` for each category. Main-service monitoring publishes aggregated `cache_requests`, `cache_hits`, and `cache_loads`; the complete per-category snapshot remains available through the C++ API.
 
 ### File transfer and asynchronous disk work
 
@@ -365,7 +368,173 @@ If reliable-channel persistence fails, the new local Store value is not committe
 
 Alarm handling includes CRC verification, stream decoding, deduplication by message identity, partial writes, retry backoff, corrupt-file quarantine, restart recovery, and file/directory synchronization. This provides persistent retries and receiver deduplication, not end-to-end exactly-once guarantees for arbitrary external business effects.
 
-The CLI supports `help`, `modules`, `use`, `db_dump`, and `alarm_status`; `db_dump` queries the monitoring Store. `demo-m9-node` and `demo-m9-collector` demonstrate sampling through queries across two processes. The main service does not currently start these components or report metrics automatically.
+The CLI supports `help`, `modules`, `use`, `db_dump`, and `alarm_status`; `db_dump` queries the monitoring Store. The storage collector also provides `service_status` and `stop`. The standalone demos remain available for studying the library separately.
+
+### Service monitoring
+
+[main.cpp](src/main.cpp) owns a [StorageMonitorRuntime](src/observability/storage_monitor_runtime.cpp) with its own Engine thread, separate from the business epoll loops. Business paths update shared atomic counters; the runtime refreshes connection, worker, database pool, disk executor, and cache snapshots every second by default, sends changed numeric metrics over UDP V2, and sends a full snapshot every 10 seconds. Initial zero values are included, and full snapshots retain the original change timestamps. The shared [schema](src/observability/storage_monitor_schema.cpp) covers service, authentication, uploads, downloads, metadata/cache, object storage, worker/database pools, disk execution, resources, and monitor runtime state. The separate [collector](src/observability/collector_main.cpp) registers this schema and accepts exact known numeric metric keys over UDP.
+
+A separate [SystemResourceSampler](src/observability/system_resource_sampler.cpp) thread samples every 5 seconds by default. It uses `statvfs` on `TLSS_STORAGE_ROOT` for filesystem capacity, available space, inode usage, and read-only state; `/proc/meminfo` supplies host memory, and `/proc/self/status` supplies process RSS, peak RSS, and virtual memory. These are host memory readings, without cgroup limit accounting. Published sizes are integer MiB, and percentages are multiplied by 100 (`8500` means 85.00%). Numeric wire values are clamped to `UINT32_MAX`; `overflow=1` indicates that at least one internal counter exceeded that range.
+
+On source failure, the sampler retains the last successful values and marks the source invalid. Check `resource_disk_valid`, `resource_inode_valid`, and `resource_memory_valid` before interpreting readings; an unavailable initial sample can have zero values. Runtime freshness checks also invalidate stale samples. Sustained disk/inode/memory conditions, read-only storage, sampling failure, queue congestion, and database/metadata failures feed reliable alarms. Resource thresholds, recovery thresholds, hold durations, and outbox capacity are C++ settings in [StorageMonitorConfig](inc/observability/storage_monitor_runtime.h), with additional alarm rules in the runtime; they have no environment tuning interface.
+
+Alarm transitions commit to the local Store only after durable outbox persistence. The sender retries TCP delivery; the collector persists its inbox before ACK, and unacknowledged records survive sender restart. Keep `./data/monitor-outbox` and `./data/monitor-inbox` in stable writable storage across restarts; `/tmp` is reserved for experiments. Ordinary UDP metrics are best effort and the periodic full snapshot repairs missing current values. Monitoring configuration/startup failures are logged and degrade monitoring while business startup continues; normal MySQL requirements still apply.
+
+The collector exposes `never_seen`, `online`, or `suspected_unreachable` through `service_status`, using local receipt time of the exact heartbeat key. Its default timeout is 5000 ms, adjustable with `--heartbeat-timeout-ms`; unchanged heartbeat values still refresh receipt time. A timeout suggests lost contact and is not proof that the service has died. This integration supports one storage-service instance per collector: metric keys do not include instance identity, and changing `TLSS_MONITOR_SOURCE_ID` only changes reliable alarm identity. See [Run service monitoring](#run-service-monitoring) for commands and supported environment settings.
+
+#### Monitor thread and collector process
+
+The reporting Engine already runs in a dedicated thread inside the storage process: `main.cpp` calls `monitor.start()`, and `StorageMonitorRuntime` creates a `std::thread` that executes `Engine::run()`. A second resource sampler thread reads disk and memory data. `storage-monitor-collector` is a separate, manually started receiver process that stores current metrics and provides the CLI; the storage service does not fork it automatically.
+
+```text
+storage-service process
+├── Main thread: business EventLoop
+├── Monitor thread: business snapshots, alarm policies, UDP reporting
+├── Resource sampler thread: disk capacity, inodes, host/process memory
+└── Reliable alarm sender and other business threads
+
+storage-monitor-collector process
+└── UDP/TCP receivers, monitoring Store, management CLI (TCP 9310 by default)
+```
+
+#### Monitoring metric reference
+
+The current schema defines 60 numeric metrics and 9 alarm states. Select any module below with `use <module>`, then run `db_dump`. Cumulative counts start with the current storage process; current values and states update on sampling. Engines expose activity, success/failure counts, and alarms rather than individual `running/stopped` fields.
+
+**`service` — Storage service**
+
+| Metric | Meaning |
+| --- | --- |
+| `service_state` | Current service phase: 1 starting, 2 running, 3 stopping, 4 stopped |
+| `connections` | Current connection count |
+| `commands_rejected` | Cumulative commands rejected because task submission failed |
+
+**`auth` — Authentication and signup**
+
+| Metric | Meaning |
+| --- | --- |
+| `login_success` | Cumulative successful logins |
+| `login_invalid` | Cumulative authentication tasks returning invalid credentials |
+| `auth_backend_failures` | Cumulative authentication backend failures and unknown signup outcomes |
+| `signup_success` | Cumulative successful signups |
+| `signup_failed` | Cumulative executed signup tasks returning a non-success result |
+| `auth_queue_timeouts` | Cumulative login/signup tasks timing out while waiting for execution queue admission |
+
+**`upload` — Upload engine**
+
+| Metric | Meaning |
+| --- | --- |
+| `upload_started` | Cumulative started upload tasks |
+| `upload_active` | Current upload tasks without a settled terminal outcome |
+| `upload_committed` | Cumulative uploads with successful object publication and metadata insertion |
+| `upload_failed` | Cumulative failed upload tasks |
+| `upload_cancelled` | Cumulative cancelled upload tasks |
+
+**`download` — Download engine**
+
+| Metric | Meaning |
+| --- | --- |
+| `download_started` | Cumulative started download tasks |
+| `download_active` | Current download tasks without a settled terminal outcome |
+| `download_completed` | Cumulative downloads completed after receiving the client persistence ACK |
+| `download_failed` | Cumulative failed download tasks |
+| `download_cancelled` | Cumulative cancelled download tasks |
+
+**`metadata` — Metadata service and cache**
+
+| Metric | Meaning |
+| --- | --- |
+| `metadata_queries_failed` | Cumulative failed metadata query operations |
+| `metadata_writes_failed` | Cumulative failed metadata write operations |
+| `cache_requests` | Total requests across directory listing, download hash, and cd path caches |
+| `cache_hits` | Total direct hits across the three caches |
+| `cache_loads` | Total actual loads following cache misses |
+
+**`object_storage` — Object storage and verification**
+
+| Metric | Meaning |
+| --- | --- |
+| `object_published` | Cumulative successful object publications, including reuse of existing identical content |
+| `object_publish_failed` | Cumulative failed object publications |
+| `object_open_failed` | Cumulative object open failures, including invalid hashes |
+| `verification_failed` | Verification failures caused by inconsistent existing objects or digest mismatches |
+
+**`worker_pool` — Business worker pool**
+
+| Metric | Meaning |
+| --- | --- |
+| `worker_queue` | Current execution queue size, excluding tasks already executing |
+| `worker_waiting` | Current asynchronous admission wait queue size |
+| `worker_rejected` | Cumulative rejected task submissions |
+| `worker_timeouts` | Cumulative asynchronous admission timeouts |
+
+**`db_pool` — Database connection pool**
+
+| Metric | Meaning |
+| --- | --- |
+| `db_total` | Current pool capacity count, including slots reserved for connections being created |
+| `db_idle` | Current idle connections |
+| `db_borrowed` | Current borrowed connections, including connections undergoing a pre-borrow ping |
+| `db_waiters` | Current callers waiting for an available connection |
+| `db_failures` | Cumulative failed connection borrows |
+
+**`disk_executor` — Async disk executor**
+
+| Metric | Meaning |
+| --- | --- |
+| `disk_active` | Current active file sources and receivers attached to the executor |
+| `disk_rejected` | Cumulative rejected file task attachments or submissions |
+
+**`resources` — Disk and memory resources**
+
+| Metric | Meaning |
+| --- | --- |
+| `resource_disk_total_mib` | Total capacity of the object directory filesystem, MiB |
+| `resource_disk_used_mib` | Used filesystem capacity, MiB |
+| `resource_disk_available_mib` | Filesystem capacity available to ordinary users, MiB |
+| `resource_disk_percent` | Filesystem capacity utilization × 100; 8500 means 85% |
+| `resource_inode_percent` | Inode utilization × 100 |
+| `resource_readonly` | 1 means the filesystem is read-only; 0 means it is not flagged read-only |
+| `resource_disk_valid` | Disk capacity/status validity: 1 valid, 0 unavailable or stale |
+| `resource_inode_valid` | Inode validity: 1 valid, 0 unavailable or stale |
+| `resource_memory_total_mib` | Total host memory, MiB |
+| `resource_memory_available_mib` | Available host memory, MiB |
+| `resource_memory_percent` | Host memory utilization × 100, calculated from MemTotal and MemAvailable |
+| `resource_rss_mib` | Current resident memory of the storage process, MiB |
+| `resource_peak_rss_mib` | Peak resident memory of the storage process, MiB |
+| `resource_virtual_mib` | Virtual address space size of the storage process, MiB |
+| `resource_memory_valid` | Memory validity: 1 valid, 0 unavailable or stale |
+| `resource_sequence` | Resource sample sequence, including startup and orderly shutdown samples |
+
+**`monitor_runtime` — Shared reporting runtime**
+
+| Metric | Meaning |
+| --- | --- |
+| `heartbeat` | Heartbeat sequence incremented on each reporting sample |
+| `uptime_seconds` | Reporting runtime uptime in seconds |
+| `udp_failures` | Cumulative ordinary-metric UDP send failures |
+| `alarm_failures` | Cumulative reliable alarm persistence failures |
+| `overflow` | 1 means at least one internal numeric value exceeded the wire range and was clamped to UINT32_MAX |
+
+Counter boundaries: invalid inputs rejected during authentication dialogue do not necessarily reach an authentication task. Metadata failures include missing resources, invalid arguments, and duplicate names, so they are not all database faults. An upload can be committed and its task cancelled: after disconnect, a finalizer already running on a disk worker may still commit successfully. These upload counters therefore do not form a simple accounting identity. Download completion requires the client's persistence ACK, not merely socket send completion. `object_published` includes identical-content reuse; there is no separate reuse counter.
+
+`worker_queue` excludes executing tasks. `disk_active` counts software file-transfer resources, and `resource_disk_percent` measures capacity utilization; neither measures physical disk IO busy time. RSS represents resident memory; virtual address space is not physical memory usage. Invalid resources may retain older values, so check their corresponding `*_valid` flags. Unknown or missing data must not be interpreted as healthy zero.
+
+#### Monitoring alarm states
+
+Run `use storage_alarms`, then `db_dump`. A numeric value of `1` means active and `0` means normal or recovered. A record may be absent before a valid observation or while its first abnormal condition is awaiting its hold duration. Severity describes the condition; the alarm does not automatically stop the storage service.
+
+| Alarm description | Meaning |
+| --- | --- |
+| `disk capacity high` | Sustained high filesystem capacity utilization |
+| `disk capacity critical` | Sustained critical filesystem capacity utilization |
+| `inode capacity high` | Sustained high inode utilization |
+| `filesystem read only` | Read-only filesystem |
+| `host memory high` | Sustained high host memory utilization |
+| `resource sampling unavailable` | Repeated resource sampling failures or stale samples |
+| `business queue congestion` | Sustained business execution queue congestion |
+| `database borrow failures` | Repeated connection borrow failures across sampling intervals |
+| `metadata write failures` | Repeated metadata write failures across sampling intervals |
 
 ### Memory copy library
 
@@ -397,7 +566,7 @@ This section documents the current usage contract for `TcpServer` and `StorageSe
 See [main.cpp](src/main.cpp) for the entry point and [StorageService](src/ftp/server.cpp) for service coordination.
 
 1. Before creating any worker threads, the **main thread** blocks `SIGINT` and `SIGTERM` through `pthread_sigmask`, then initializes logging. A control thread created later receives shutdown signals synchronously through `sigwait`.
-2. The **main thread** constructs `EventLoop` before constructing the `StorageService` that references it. Service construction creates `TcpServer`, obtains the database connection pool, and configures connection/message callbacks, the IO thread count, and worker queue capacity.
+2. The **main thread** constructs `EventLoop` before constructing the `StorageService` that references it. Service construction creates `TcpServer`, obtains the database connection pool, and configures connection/message callbacks, the IO thread count, and worker queue capacity. Main then constructs the monitor runtime, whose refresh callback references the service, and starts the resource sampler and monitor thread when monitoring is enabled.
 3. The **main thread** calls `StorageService::start()`: it starts the business worker pool and disk executor first, then calls `TcpServer::start()` to start the IO thread pool and begin listening. Configuration must finish before startup; startup must not run concurrently with shutdown or destruction.
 4. After startup completes, a **dedicated control thread** starts waiting for shutdown signals, while the main thread enters `EventLoop::loop()`. The control thread may request shutdown and wait for completion, but the main loop must keep running to process those requests.
 5. During normal operation, the **main loop** accepts connections, assigns IO loops, and maintains `_connections`. Each connection's **owning IO loop** handles reads, writes, connection state, and application callbacks. The **business worker pool** performs authentication and directory operations. The **disk pool** handles file operations and associated metadata callbacks. Results return to IO loops through queued tasks.
@@ -422,11 +591,14 @@ Control thread receives SIGINT / SIGTERM through sigwait()
   → TcpServer::stop_io_threads(): exit and join IO threads
   → Shut down the database connection pool
   → Quit the main EventLoop
-  → Publish the StorageService shutdown result and finish the control thread
+  → Publish the StorageService shutdown result
+  → Stop and join the resource sampler
+  → Take the final monitor snapshot, stop and join the monitor Engine thread
+  → Finish the control thread
 
 Main thread returns from EventLoop::loop()
   → Join the control thread
-  → Destroy StorageService / TcpServer
+  → Destroy the monitor runtime, then StorageService / TcpServer
   → Destroy the main EventLoop
   → Logger::shutdown()
 ```
@@ -518,6 +690,7 @@ cpp_TLFSS/
 │   ├── ftp/                      Sessions, directories, file transfer, disk executor, client
 │   ├── logger/                   spdlog wrapper
 │   ├── monitor/                  Independent monitoring, including demo/ and test/
+│   ├── observability/            Service metrics, resource sampler, runtime, and collector
 │   ├── rpc/                      RPC placeholders
 │   └── gateway/                  Gateway placeholders
 ├── tests/                        Networking, worker pool, transfer, auth, and database tests
@@ -530,17 +703,17 @@ cpp_TLFSS/
 
 | Path | Purpose |
 | --- | --- |
-| `inc/`, `src/` | Headers and implementations grouped under `common`, `auth`, `ftp`, `gateway`, `logger`, `monitor`, and `rpc` |
+| `inc/`, `src/` | Headers and implementations grouped under `common`, `auth`, `ftp`, `gateway`, `logger`, `monitor`, `observability`, and `rpc` |
 | `proto/` | Placeholder files for storage, authentication, monitoring, and gateway protocols; CMake includes code generation steps targeting `build/generated/` |
 | `tests/`, `src/monitor/test/` | Tests for the main service and infrastructure, plus monitoring subsystem tests |
-| `config/`, `sql/` | MySQL connection settings and schema script; `config/config.yaml.example` is empty, and the main program does not read YAML |
+| `config/`, `sql/` | MySQL settings, monitoring shell exports, and schema script; `config/config.yaml.example` is empty, and the main program does not read YAML |
 | `scripts/build.sh` | Wrapper for configuration, compilation, and tests |
 | `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
 | `inc/common/cache/`, `inc/ftp/metadata_cache.h` | Generic sharded LRU/LFU cache and business metadata cache; both are header-only |
 | `src/ftp/` | `metadata_lib` owns metadata; `transfer_lib` provides object, verification, and async disk primitives; `ftp_lib` combines tasks, protocol handling, and the client |
 | `doc/` | Memory copy design report and tutorial, plus local technical notes |
 
-The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_lib`, `transfer_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
+The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_lib`, `transfer_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `observability_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
 
 ## Build and run
 
@@ -588,6 +761,7 @@ Keys are case-sensitive, surrounding whitespace is not trimmed, and unknown keys
 | Object directory | `./data/objects` | Override with `TLSS_STORAGE_ROOT` before startup |
 | Log directory | `./logs` | Relative to the process working directory; fixed in the main program |
 | Metadata cache | Default capacities and TTLs in [Metadata cache](#metadata-cache) | C++ construction arguments; not exposed through main-program configuration |
+| Monitoring and resource sampling | Enabled; 1-second metric refresh, 10-second full snapshots, 5-second resource samples | Environment variables listed in [Run service monitoring](#run-service-monitoring) |
 
 `config/config.yaml.example` is empty and the main program does not load YAML. Installation rules do not adapt the connection pool's configuration lookup path automatically; these instructions use the repository's `bin/` layout.
 
@@ -640,7 +814,94 @@ bye!
 
 The service attempts an orderly shutdown on `SIGINT` or `SIGTERM`. `scripts/build.sh -t Debug` also configures, builds, and tests the project. Use `-n` to skip building and running tests. The `-c` option deletes `build/`, `bin/`, and `lib/`, so check those directories for local files first. For an optimized build, run `cmake --preset release && cmake --build --preset release`. Both presets share `build/`; reconfigure when switching build types.
 
-Monitoring demos are placed in `bin/dome/`. For example, `./bin/dome/demo-m9-policy` demonstrates three monitoring policies. `demo-m9-collector` and `demo-m9-node` run separately: by default, the collector listens on local UDP `9300` for metrics, TCP `9400` for alarms, and TCP `9310` for its CLI. The node requires a module, source ID, outbox directory, and CLI port. See `src/monitor/demo/` for details.
+### Run service monitoring
+
+After preparing MySQL as above, run these commands from the repository root in separate terminals. The collector itself needs no MySQL:
+
+```bash
+# Terminal 1: independent receiver with persistent inbox.
+./bin/storage-monitor-collector --bind 127.0.0.1 --metrics-port 9300 \
+    --alarms-port 9400 --cli-port 9310 --inbox ./data/monitor-inbox
+
+# Terminal 2: optional environment overrides, then the business service.
+source config/monitor.env.example
+./bin/storage-service
+
+# Terminal 3: collector management CLI.
+nc 127.0.0.1 9310
+```
+
+#### Monitoring commands and query examples
+
+Enter these commands in the collector CLI opened with `nc 127.0.0.1 9310`, rather than in the business `tlss-cli` or shell. Seven commands are registered; `use all` is a form of `use`.
+
+| Command | Purpose |
+| --- | --- |
+| `help` | List registered commands |
+| `modules` | List module names and IDs |
+| `use <module>` | Select a module for this CLI session; see the metric reference for names |
+| `use all` | Restore queries across all modules |
+| `db_dump` | Dump selected monitoring records; this queries the monitoring Store, not MySQL |
+| `service_status` | Show storage heartbeat state: never_seen, online, or suspected_unreachable |
+| `alarm_status` | Show collector alarm-channel connections, received records, deduplication, persistence failures, and related statistics; this is not the alarm state list |
+| `stop` | Stop the collector while the storage service keeps running; finish queries before using it |
+
+Select an engine's module before querying, for example:
+
+```text
+help
+modules
+use service
+db_dump
+use upload
+db_dump
+use download
+db_dump
+use metadata
+db_dump
+use object_storage
+db_dump
+```
+
+You can also select `auth`, `worker_pool`, `db_pool`, `disk_executor`, or `monitor_runtime`. Module selection belongs to the current CLI session. `db_dump` is a single snapshot query; run it again to see subsequent updates.
+
+Inspect disk, memory, and alarms:
+
+```text
+use resources
+db_dump
+use storage_alarms
+db_dump
+use all
+service_status
+alarm_status
+```
+
+Check `resource_disk_valid=1` before interpreting disk data, and `resource_inode_valid=1` for inode data. Capacity is shown by `resource_disk_total_mib / resource_disk_used_mib / resource_disk_available_mib`; utilization by `resource_disk_percent`; read-only state by `resource_readonly`. Sampling targets the object directory's filesystem, defaulting to `./data/objects` without `TLSS_STORAGE_ROOT`. Missing directories or sampling errors may make it temporarily invalid. Check `resource_memory_valid=1` before reading host available memory, host utilization, and process RSS.
+
+Defaults are a 1-second metric refresh, 5-second resource sampling, and 10-second full ordinary-metric retransmission. After collector restart, allow the next full snapshot to restore current values. For `never_seen`, check that storage is running, monitoring is enabled, destination ports match the collector, and service logs contain no monitoring startup error. `suspected_unreachable` means heartbeat timeout. A module list without metric records means registration completed but sender data may not have arrived yet.
+
+The collector prints `READY metrics=<port> alarms=<port> cli=<port>` when initialized. Ports may be `0` for ephemeral test listeners; service destination ports must be the actual nonzero bound ports. `--help` lists collector options without initializing resources. Stop the business service with `SIGINT`/`SIGTERM`; business shutdown completes before sampler shutdown and the monitor's final snapshot and thread join. The collector accepts either signal or its CLI `stop` command. Restart both with their original outbox/inbox paths to retain reliable alarm recovery state.
+
+Only these monitoring environment settings are implemented, parsed by [main.cpp](src/main.cpp) and `monitor_config_from_environment()`; [monitor.env.example](config/monitor.env.example) contains shell exports:
+
+| Variable | Default | Accepted value / meaning |
+| --- | --- | --- |
+| `TLSS_MONITOR_ENABLED` | `1` | Exactly `0` or `1`; `0` disables monitor and resource threads |
+| `TLSS_MONITOR_HOST` | `127.0.0.1` | Collector IPv4 address |
+| `TLSS_MONITOR_METRICS_PORT` | `9300` | UDP destination, `1`–`65535` |
+| `TLSS_MONITOR_ALARMS_PORT` | `9400` | Reliable TCP destination, `1`–`65535` |
+| `TLSS_MONITOR_SOURCE_ID` | `1` | Stable reliable-alarm source ID, `1`–`UINT64_MAX` |
+| `TLSS_MONITOR_OUTBOX` | `./data/monitor-outbox` | Persistent writable sender directory |
+| `TLSS_MONITOR_INTERVAL_MS` | `1000` | Metric refresh interval, `1`–`3600000` ms |
+| `TLSS_MONITOR_SNAPSHOT_MS` | `10000` | Full snapshot interval, `1`–`3600000` ms |
+| `TLSS_RESOURCE_INTERVAL_MS` | `5000` | Resource sampler interval, `1`–`3600000` ms |
+
+The resource stale limit is `max(15000 ms, 3 × resource interval)`. If the metric refresh interval approaches the collector's heartbeat timeout, increase `--heartbeat-timeout-ms` accordingly. `TLSS_STORAGE_ROOT` also selects the filesystem sampled for capacity; it is documented above. Collector flags configure its listeners/inbox separately. There is no service `--config` option, YAML monitor configuration, or environment variable for alarm thresholds.
+
+### Supplemental monitoring demos
+
+Monitoring demos are placed in `bin/dome/`. For example, `./bin/dome/demo-m9-policy` demonstrates three monitoring policies. `demo-m9-collector` and `demo-m9-node` run separately: by default, the demo collector listens on local UDP `9300` for metrics, TCP `9400` for alarms, and TCP `9310` for its CLI. Stop the storage collector first to free these ports. The demo node requires a module, source ID, outbox directory, and CLI port. See `src/monitor/demo/` for details.
 
 Run the following in three separate terminals. The sample data directories under `/tmp` can be retained for process restart recovery experiments, but are not intended for long-term persistence. Use distinct source IDs, outbox directories, and CLI ports for different sending nodes.
 
@@ -671,7 +932,7 @@ The program also supports `hot / runtime` modes. Only `runtime` accepts an optio
 
 ## Tests and where to start reading
 
-`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) currently registers object storage and verification, signup transaction boundaries, metadata caching, memory copy linking, TCP shutdown, asynchronous worker submission, 24 file transfer scenarios, and the directory SQL test when Python 3 is found. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
+`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) registers object storage and verification, signup transaction boundaries, metadata caching, memory copy linking, TCP shutdown, asynchronous worker submission, file transfer scenarios, atomic storage metrics, resource sampling, and the storage monitor runtime. Python 3 enables directory SQL and storage collector process smoke tests. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
 
 | Area | Coverage and boundaries |
 | --- | --- |
@@ -683,7 +944,7 @@ The program also supports `hot / runtime` modes. Only `runtime` accepts an optio
 | File transfer | Real server/client handlers, chunked IO, hashes and publication, error frames, backpressure, cold-file waits, cancellation, stale callbacks, and shutdown; database/authentication substitutes are used, not real MySQL end-to-end validation |
 | Interactive client | `test_ftp_client.py` uses a pseudoterminal and test server; currently not registered with CTest |
 | Authentication and database | Registered `signup_transaction_boundary_test` uses database substitutes with the real repository/root creation to verify a shared transaction, rollback, and unknown commit outcomes. Other service, repository, signup, transaction, and prepared-statement test sources remain unregistered; some require a real test database |
-| Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests |
+| Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests; storage metrics, resource sampling, runtime schema/thresholds/lifecycle, and collector process smoke checks |
 | Memory copy | Linking/basic correctness in CTest; deeper checks and benchmarks are spread across benchmark code and dedicated scripts |
 
 To run individual built regression groups:
@@ -693,6 +954,7 @@ ctest --preset debug -R '^metadata_cache_'
 ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
 ctest --preset debug -R '^monitor_'
+ctest --preset debug -R '^(storage_metrics_test|system_resource_sampler_test|storage_monitor_.*|storage_collector_smoke)$'
 ```
 
 Networking, transfer, and some monitoring tests create local TCP/UDP sockets; demo smoke tests also use fixed ports. The environment must allow local listeners, with those ports free. These regression groups do not require a real MySQL server and do not replace end-to-end validation with the real database and interactive client.
@@ -709,14 +971,14 @@ Suggested source reading order:
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`: database operations for signup, login, and virtual directories.
 5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`: hits, generation invalidation, load coalescing, and sharded capacities.
 6. Start with `src/ftp/transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp`: task state, publication, verification, async adapters, and sending.
-7. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`: the independent monitoring example.
+7. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`: integrated monitoring; `src/monitor/demo/` provides independent library examples.
 8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
 9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
 
 ## Current limitations and remaining work
 
 - Single-node uploads/downloads and content-addressed persistence are implemented. Resumable transfers, overwrite updates, file deletion, and object garbage collection are not. Failures between object publication and MySQL insertion can leave unreferenced objects; crash recovery for temporary files and metadata consistency is not implemented.
-- The main service does not initialize monitoring. Connection counts, worker queues, and database pool metrics are not automatically reported.
+- Service monitoring supports one storage-service instance per collector and stores current values rather than historical time series. Host memory sampling does not account for cgroup limits.
 - Metadata cache coordination covers callers explicitly sharing one cache instance. Other processes, independent instances, and direct SQL writes rely on TTL refresh. Directory deletion, moves, and renames will require additional invalidation rules.
 - RPC and gateway code are placeholders; `.proto` files and the YAML example are empty. Ports, thread counts, and other settings do not yet share a unified configuration entry point.
 - Business TCP connections do not use TLS. Password hashing protects stored credentials, not transport. The client still echoes password input.
@@ -734,7 +996,7 @@ The following is a proposed roadmap for the current code, not a list of delivere
 | 2. gRPC entry point | Authentication, directory listing, and directory creation sharing TCP business logic | Both entry points enforce the same permissions and results; validate deadlines, cancellation, duplicate writes, and orderly shutdown |
 | 3. Storage consistency and recovery | Build on MetadataService and ObjectStorageEngine; add crash recovery, orphan reclamation, and retry semantics | Metadata failure after publication, process exits, duplicate requests, and interrupted transfers have verifiable repair or cleanup behavior |
 | 4. Kafka events | Transactional Outbox, publisher, and one audit or indexing consumer | Events survive broker outages and publish after recovery; duplicate consumption does not duplicate business effects |
-| 5. Operations and deployment | Integrate service monitoring and split services when independent scaling or failure isolation requires it | Backlogs, failures, and resource usage are observable; deployment and recovery procedures can be validated |
+| 5. Operations and deployment | Extend monitoring to new interfaces, validate recovery procedures, and split services when independent scaling or failure isolation requires it | Backlogs, failures, and resource usage are observable; deployment and recovery procedures can be validated |
 
 Monitoring can progress alongside these stages, particularly for RPC latency, rejected tasks, database acquisition failures, outbox backlog, and consumer failures. Stages are defined by capabilities and verification, not fixed development dates.
 

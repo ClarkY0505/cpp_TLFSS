@@ -17,9 +17,9 @@ TLSS（Toy-Level File Storage Service）是我用于探索 Linux 系统编程、
 
 **已实现功能：** epoll Reactor、异步 TCP 客户端（`tlss-cli`）、有界线程池、MySQL 连接池、基于 PBKDF2 的密码哈希、用户注册/登录、虚拟目录操作（`mkdir`、`cd`、`ls`、`pwd`）、分片元数据缓存、文件上传/下载、SHA-256 内容寻址对象存储、异步磁盘读写以及优雅停机（graceful shutdown）。
 
-**配套子系统：** 监控与可靠告警通过独立 demo 运行；AVX2/REP MOVSB 内存拷贝库已接入网络缓冲区，并保留独立基准入口。
+**配套子系统：** 主服务向独立 Collector 上报业务与资源指标，并接入持久化可靠告警；AVX2/REP MOVSB 内存拷贝库已接入网络缓冲区，并保留独立基准入口。
 
-**后续方向：** 对象与元数据一致性恢复、对象回收、主服务监控接入、gRPC 接口以及分布式存储。
+**后续方向：** 对象与元数据一致性恢复、对象回收、运行恢复流程、gRPC 接口以及分布式存储。
 
 ### 快速入门
 
@@ -57,6 +57,9 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 - [模块实现](#模块实现)
 - [元数据缓存](#元数据缓存)
 - [文件传输与异步磁盘任务](#文件传输与异步磁盘任务)
+- [主服务监控](#主服务监控)
+- [监控指标字典](#监控指标字典)
+- [监控命令与查询示例](#监控命令与查询示例)
 - [网络服务生命周期与线程约束](#网络服务生命周期与线程约束)
 - [代码结构](#代码结构)
 - [构建与运行](#构建与运行)
@@ -87,9 +90,9 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 | MySQL | 连接池、预处理语句、RAII 事务 | 已使用 |
 | 认证 | 注册、密码校验、用户与根目录事务创建 | 已使用 |
 | 虚拟目录 | `mkdir / cd / ls / pwd` | 已使用 |
-| 元数据缓存 | `HashArcCache`、TTL、目录版本协调、统计快照 | 默认由 `MetadataService` 创建，目录操作和下载查询已使用 |
+| 元数据缓存 | `HashArcCache`、TTL、目录版本协调、统计快照 | 主入口显式共享缓存供服务和监控使用，目录操作和下载查询已接入 |
 | 客户端 | `tlss-cli <IPv4> <port>`，支持交互命令和文件上传/下载 | 独立可执行程序 |
-| 监控 | 指标、策略、CLI、UDP、可靠 TCP 告警 | 库已链接，通过独立 demo 运行；主入口未启动 |
+| 监控 | 业务与资源指标、CLI、UDP、可靠 TCP 告警 | 主入口持有监控运行时与资源采样器，独立 `storage-monitor-collector` 接收上报 |
 | 内存拷贝 | `TLSS::MEMORY::memcpy` 动态库 | 已被网络 `Buffer::append()` 调用，使用 Default 提示 |
 | 文件内容 | SHA-256 对象、上传/下载、临时文件发布、异步磁盘读写 | 已接入；尚无对象回收和崩溃一致性修复 |
 | RPC、网关 | 构建目标和代码骨架 | 无业务服务实现，四份 `.proto` 为空 |
@@ -279,7 +282,7 @@ signup → 用户名 → 密码 → 确认密码 → registering
 - 目前没有目录删除、移动、重命名，所以成功的 `cd` 路径仅依赖 TTL。未来增加这些写操作时需要扩展失效规则。
 - 每个 `MetadataService` 默认拥有独立缓存；多个实例只有显式共享同一个 `std::shared_ptr<MetadataCache>` 才共享协调锁、版本和统计。其他进程或直接 SQL 修改不会触发本地失效，已有条目依赖 TTL 刷新；当前不保证跨进程强一致性。
 
-`MetadataCacheConfig` 可在 C++ 构造时调整容量、TTL、分片数和目录列表大小限制；容量或 TTL 为零可关闭对应类别，TTL 合法范围为 0–24 小时。目前没有环境变量、配置文件或 CLI 调参入口。`MetadataService::metadata_cache_stats()` 返回各类的 `requests / hits / misses / loads / coalesced / admission_skips`，统计尚未接入主服务监控或管理 CLI。
+`MetadataCacheConfig` 可在 C++ 构造时调整容量、TTL、分片数和目录列表大小限制；容量或 TTL 为零可关闭对应类别，TTL 合法范围为 0–24 小时。目前没有环境变量、配置文件或 CLI 调参入口。`MetadataService::metadata_cache_stats()` 返回各类的 `requests / hits / misses / loads / coalesced / admission_skips`。主服务监控上报汇总的 `cache_requests`、`cache_hits` 和 `cache_loads`；完整分类快照仍通过 C++ API 获取。
 
 ### 文件传输与异步磁盘任务
 
@@ -365,7 +368,173 @@ report_error → outbox 持久化 → 本地 Store 提交
 
 告警实现包含 CRC 校验、流式解码、消息身份去重、短写处理、退避重试、损坏文件隔离、重启恢复，以及文件和目录同步。这是持久化重试与接收端去重机制，不代表任意外部业务副作用均具备端到端 exactly-once 保证。
 
-CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `db_dump` 查询监控 Store。`demo-m9-node` 与 `demo-m9-collector` 展示采样到查询的双进程链路，目前主服务没有自动启动或上报这些指标。
+CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `db_dump` 查询监控 Store。存储 Collector 还提供 `service_status` 和 `stop`。独立 demo 继续保留，便于单独学习监控库。
+
+### 主服务监控
+
+[main.cpp](src/main.cpp) 持有 [StorageMonitorRuntime](src/observability/storage_monitor_runtime.cpp)，通过独立 Engine 线程运行监控，与业务 epoll loop 分开。业务路径更新共享原子计数器；运行时默认每秒刷新连接、业务队列、数据库池、磁盘执行器和缓存快照，通过 UDP V2 发布变化后的数值指标，每 10 秒发送完整快照。初始零值也会上报，完整快照保留原始变化时间。[共用 schema](src/observability/storage_monitor_schema.cpp) 覆盖服务、认证、上传、下载、元数据与缓存、对象存储、业务与数据库池、磁盘执行器、资源和监控自身状态。独立 [Collector](src/observability/collector_main.cpp) 注册同一 schema，UDP 仅接收完整 key 匹配的已知数值指标。
+
+独立的 [SystemResourceSampler](src/observability/system_resource_sampler.cpp) 线程默认每 5 秒采样。它对 `TLSS_STORAGE_ROOT` 使用 `statvfs` 获取文件系统容量、可用空间、inode 占用与只读状态，从 `/proc/meminfo` 读取主机内存，从 `/proc/self/status` 读取进程 RSS、峰值 RSS 和虚拟内存。主机内存读数没有按 cgroup 限额调整。上报容量单位是整数 MiB，百分比乘以 100（`8500` 表示 85.00%）。数值线协议限制为 `UINT32_MAX`，超出时截到上限，并用 `overflow=1` 表示至少一个内部计数器超出范围。
+
+采样源失败时保留上一次成功读数，并将该源标为无效。解释数据前应检查 `resource_disk_valid`、`resource_inode_valid` 和 `resource_memory_valid`；从未成功采样时可能出现数值为零但无效的记录。运行时也会将过期样本标为无效。持续磁盘、inode、内存超阈值，以及只读存储、采样失败、队列拥塞、数据库或元数据失败会进入可靠告警通道。资源触发与恢复阈值、持续时间和 outbox 容量在 [StorageMonitorConfig](inc/observability/storage_monitor_runtime.h) 中配置，其他告警规则见运行时实现；没有对应的环境调参入口。
+
+告警状态转换先持久化 outbox，再提交本地 Store；发送端通过 TCP 重试，Collector 持久化 inbox 后才 ACK，未确认记录在发送端重启后保留。正常运行请将 `./data/monitor-outbox` 和 `./data/monitor-inbox` 放在稳定可写的存储中，并跨重启保留；`/tmp` 仅用于实验。普通 UDP 指标尽力发送，周期完整快照用于补齐丢失的当前值。监控配置或启动失败会记录日志并降级监控，业务仍继续启动；服务正常使用所需的 MySQL 条件不变。
+
+Collector 的 `service_status` 按完整 heartbeat key 的本地接收时间返回 `never_seen`、`online` 或 `suspected_unreachable`；默认超时 5000 毫秒，可用 `--heartbeat-timeout-ms` 调整，数值未变化的心跳仍刷新接收时间。超时表示疑似失联，不能证明服务已经死亡。当前集成限定一个 Collector 对应一个 storage-service 实例：指标 key 不包含实例身份，修改 `TLSS_MONITOR_SOURCE_ID` 只改变可靠告警身份。启动命令和支持的环境变量见[运行主服务监控](#运行主服务监控)。
+
+#### 监控线程与 Collector 进程
+
+存储进程内的上报 Engine 已运行在独立线程中：`main.cpp` 调用 `monitor.start()`，由 `StorageMonitorRuntime` 内部创建 `std::thread` 执行 `Engine::run()`。另一个资源采样线程负责磁盘与内存查询。`storage-monitor-collector` 是单独手动启动的接收进程，负责收集、保存当前指标并提供 CLI；存储服务不会通过 fork 自动启动它。
+
+```text
+storage-service 进程
+├── 主线程：业务 EventLoop
+├── 监控线程：业务指标采样、告警策略、UDP 上报
+├── 资源采样线程：磁盘容量、inode、整机和进程内存
+└── 可靠告警发送线程及其他业务线程
+
+storage-monitor-collector 进程
+└── UDP/TCP 接收、监控 Store、管理 CLI（默认 TCP 9310）
+```
+
+#### 监控指标字典
+
+当前 schema 包含 60 个数值指标和 9 个告警状态。以下模块名可以直接用于 `use <模块名>`，然后用 `db_dump` 查看。累计次数从存储进程本次启动开始计算；当前量与状态会随采样更新。各引擎主要通过活动量、成功/失败计数和告警观察状态，目前没有各自独立的 `running/stopped` 字段。
+
+**`service` — 存储服务**
+
+| 指标 | 含义 |
+| --- | --- |
+| `service_state` | 当前服务阶段：1 启动中、2 运行中、3 停机中、4 已停止 |
+| `connections` | 当前连接数量 |
+| `commands_rejected` | 因任务提交失败而拒绝的命令累计次数 |
+
+**`auth` — 认证与注册**
+
+| 指标 | 含义 |
+| --- | --- |
+| `login_success` | 登录成功累计次数 |
+| `login_invalid` | 认证任务判定凭据错误的累计次数 |
+| `auth_backend_failures` | 认证后端故障及注册结果未知等累计次数 |
+| `signup_success` | 注册成功累计次数 |
+| `signup_failed` | 已执行注册任务返回非成功结果的累计次数 |
+| `auth_queue_timeouts` | 登录或注册任务等待进入执行队列时超时的累计次数 |
+
+**`upload` — 上传引擎**
+
+| 指标 | 含义 |
+| --- | --- |
+| `upload_started` | 已启动上传任务累计数量 |
+| `upload_active` | 当前尚未结算终态的上传任务数 |
+| `upload_committed` | 对象发布且元数据登记成功的累计数量 |
+| `upload_failed` | 上传任务失败累计数量 |
+| `upload_cancelled` | 上传任务取消累计数量 |
+
+**`download` — 下载引擎**
+
+| 指标 | 含义 |
+| --- | --- |
+| `download_started` | 已启动下载任务累计数量 |
+| `download_active` | 当前尚未结算终态的下载任务数 |
+| `download_completed` | 收到客户端持久化 ACK 的完成累计数量 |
+| `download_failed` | 下载任务失败累计数量 |
+| `download_cancelled` | 下载任务取消累计数量 |
+
+**`metadata` — 元数据服务与缓存**
+
+| 指标 | 含义 |
+| --- | --- |
+| `metadata_queries_failed` | 元数据查询操作失败累计次数 |
+| `metadata_writes_failed` | 元数据写入操作失败累计次数 |
+| `cache_requests` | 目录列表、下载哈希、cd 路径三类缓存的请求总次数 |
+| `cache_hits` | 三类缓存直接命中的总次数 |
+| `cache_loads` | 缓存未命中后实际执行加载的总次数 |
+
+**`object_storage` — 对象存储与校验**
+
+| 指标 | 含义 |
+| --- | --- |
+| `object_published` | 对象发布成功累计次数，包含已有同内容对象复用 |
+| `object_publish_failed` | 对象发布失败累计次数 |
+| `object_open_failed` | 打开对象失败累计次数，包含无效哈希 |
+| `verification_failed` | 已有对象内容不一致或摘要不匹配的校验失败次数 |
+
+**`worker_pool` — 业务线程池**
+
+| 指标 | 含义 |
+| --- | --- |
+| `worker_queue` | 当前执行队列中等待工作线程取走的任务数 |
+| `worker_waiting` | 当前异步等待队列中的任务数 |
+| `worker_rejected` | 任务提交被拒绝的累计次数 |
+| `worker_timeouts` | 异步等待入队超时的累计次数 |
+
+**`db_pool` — 数据库连接池**
+
+| 指标 | 含义 |
+| --- | --- |
+| `db_total` | 当前池总容量计数，包含正在创建的连接名额 |
+| `db_idle` | 当前空闲连接数 |
+| `db_borrowed` | 当前借出连接数，包含正在借出前 ping 的连接 |
+| `db_waiters` | 当前等待可用连接的调用数 |
+| `db_failures` | 借用连接失败累计次数 |
+
+**`disk_executor` — 异步磁盘执行器**
+
+| 指标 | 含义 |
+| --- | --- |
+| `disk_active` | 当前执行器挂接的活动文件源和接收器数量 |
+| `disk_rejected` | 文件任务挂接或提交被拒绝的累计次数 |
+
+**`resources` — 磁盘与内存资源**
+
+| 指标 | 含义 |
+| --- | --- |
+| `resource_disk_total_mib` | 对象目录所在文件系统的总容量，MiB |
+| `resource_disk_used_mib` | 文件系统已使用容量，MiB |
+| `resource_disk_available_mib` | 普通用户可用容量，MiB |
+| `resource_disk_percent` | 磁盘容量使用率 × 100；8500 表示 85% |
+| `resource_inode_percent` | inode 使用率 × 100 |
+| `resource_readonly` | 1 表示文件系统只读；0 表示未标记为只读 |
+| `resource_disk_valid` | 磁盘容量和状态读数是否有效：1 有效，0 无效或过期 |
+| `resource_inode_valid` | inode 读数是否有效：1 有效，0 不可用或过期 |
+| `resource_memory_total_mib` | 整机总内存，MiB |
+| `resource_memory_available_mib` | 整机可用内存，MiB |
+| `resource_memory_percent` | 整机内存使用率 × 100，按 MemTotal 与 MemAvailable 计算 |
+| `resource_rss_mib` | 存储进程当前常驻物理内存，MiB |
+| `resource_peak_rss_mib` | 存储进程常驻内存峰值，MiB |
+| `resource_virtual_mib` | 存储进程虚拟地址空间大小，MiB |
+| `resource_memory_valid` | 内存读数是否有效：1 有效，0 无效或过期 |
+| `resource_sequence` | 资源采样序号；包括启动和正常停机时的采样 |
+
+**`monitor_runtime` — 共享上报运行时**
+
+| 指标 | 含义 |
+| --- | --- |
+| `heartbeat` | 每次上报采样递增的心跳序号 |
+| `uptime_seconds` | 上报运行时已运行秒数 |
+| `udp_failures` | 普通指标 UDP 发送失败累计次数 |
+| `alarm_failures` | 可靠告警持久化失败累计次数 |
+| `overflow` | 1 表示至少一个内部数值超过线协议范围并被截到 UINT32_MAX |
+
+累计量的计数边界：认证交互阶段直接拒绝的非法输入不一定进入认证任务；元数据失败包含资源不存在、参数无效、重名等业务失败，并非都表示数据库故障。上传已提交与任务取消可能同时出现：连接断开后，已进入磁盘线程的最终登记仍可能成功，因此不能把上传各项简单相加核对。下载完成以客户端持久化 ACK 为准，不以 socket 发送完成为准。`object_published` 包含同内容复用，目前没有独立的对象复用次数指标。
+
+`worker_queue` 不包含正在执行的任务。`disk_active` 表示软件文件传输资源数量，`resource_disk_percent` 表示容量使用率；两者都不是物理磁盘 IO 忙碌率。RSS 表示实际常驻内存，虚拟地址空间大小不能直接当作物理内存占用。资源无效时可能保留旧值，必须结合各自的 `*_valid` 标志读取；未知或缺失数据不应解释为健康零值。
+
+#### 监控告警状态
+
+用 `use storage_alarms` 和 `db_dump` 查看。数值 `1` 表示触发，`0` 表示正常或恢复；尚未获得有效观测或首次异常仍在等待持续时间时，记录可能尚不存在。级别用于描述严重程度，告警本身不会自动停止存储服务。
+
+| 告警描述 | 含义 |
+| --- | --- |
+| `disk capacity high` | 磁盘容量使用率持续偏高 |
+| `disk capacity critical` | 磁盘容量使用率持续达到严重阈值 |
+| `inode capacity high` | inode 使用率持续偏高 |
+| `filesystem read only` | 文件系统只读 |
+| `host memory high` | 整机内存使用率持续偏高 |
+| `resource sampling unavailable` | 资源连续采样失败或数据过期 |
+| `business queue congestion` | 业务执行队列持续拥塞 |
+| `database borrow failures` | 持续出现数据库连接借用失败 |
+| `metadata write failures` | 持续出现元数据写入失败 |
 
 ### 内存拷贝库
 
@@ -397,7 +566,7 @@ CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `
 当前入口见 [main.cpp](src/main.cpp)，服务编排见 [StorageService](src/ftp/server.cpp)。
 
 1. **主线程**在创建工作线程前，通过 `pthread_sigmask` 阻塞 `SIGINT` / `SIGTERM`，然后初始化日志。退出信号由后续控制线程通过 `sigwait` 同步接收。
-2. **主线程**先构造 `EventLoop`，再构造引用它的 `StorageService`。服务构造期间创建 `TcpServer`、获取数据库连接池，并设置连接/消息回调、IO 线程数及业务队列容量。
+2. **主线程**先构造 `EventLoop`，再构造引用它的 `StorageService`。服务构造期间创建 `TcpServer`、获取数据库连接池，并设置连接/消息回调、IO 线程数及业务队列容量。随后构造持有服务快照回调的监控运行时，监控启用时启动资源采样器与监控线程。
 3. **主线程**调用 `StorageService::start()`：先启动业务线程池和磁盘执行器，再调用 `TcpServer::start()` 启动 IO 线程池并开放监听。配置必须先于启动完成；启动不能与停机或析构并发。
 4. 启动完成后创建**独立控制线程**，让它等待退出信号；主线程进入 `EventLoop::loop()`。控制线程可以提交停机请求并等待，但主 loop 必须继续运行以处理这些请求。
 5. 正常运行时，**主 loop**接受连接、分配 IO loop、维护 `_connections`；连接所属的 **IO loop**处理读写、连接状态和业务回调；**业务线程池**执行认证和目录等操作，**磁盘线程池**执行文件操作及相关元数据回调；结果通过事件循环任务返回 IO loop。
@@ -422,11 +591,14 @@ IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工�
   → TcpServer::stop_io_threads()，退出并 join IO 线程
   → 数据库连接池 shutdown()
   → 主 EventLoop::quit()
-  → 发布 StorageService 停机结果，控制线程结束
+  → 发布 StorageService 停机结果
+  → 停止并 join 资源采样器
+  → 完成监控最后一轮快照，停止并 join 监控 Engine 线程
+  → 控制线程结束
 
 主线程 EventLoop::loop() 返回
   → join 控制线程
-  → 析构 StorageService / TcpServer
+  → 先析构监控运行时，再析构 StorageService / TcpServer
   → 析构主 EventLoop
   → Logger::shutdown()
 ```
@@ -518,6 +690,7 @@ cpp_TLFSS/
 │   ├── ftp/                      会话、目录与文件传输、磁盘执行器、客户端
 │   ├── logger/                   spdlog 封装
 │   ├── monitor/                  独立监控系统，含 demo/ 与 test/
+│   ├── observability/            业务指标、资源采样器、监控运行时与 Collector
 │   ├── rpc/                      RPC 占位
 │   └── gateway/                  网关占位
 ├── tests/                        网络、线程池、传输、认证及数据库等测试
@@ -530,17 +703,17 @@ cpp_TLFSS/
 
 | 路径 | 用途 |
 | --- | --- |
-| `inc/`、`src/` | 按 `common`、`auth`、`ftp`、`gateway`、`logger`、`monitor`、`rpc` 分组的头文件与实现 |
+| `inc/`、`src/` | 按 `common`、`auth`、`ftp`、`gateway`、`logger`、`monitor`、`observability`、`rpc` 分组的头文件与实现 |
 | `proto/` | 存储、认证、监控、网关的协议占位文件；CMake 配置了向 `build/generated/` 生成代码的步骤 |
 | `tests/`、`src/monitor/test/` | 主服务/基础模块测试，以及监控子系统测试 |
-| `config/`、`sql/` | MySQL 连接配置和建表脚本；`config/config.yaml.example` 目前为空，主程序不读取 YAML |
+| `config/`、`sql/` | MySQL 连接配置、监控 shell exports 和建表脚本；`config/config.yaml.example` 目前为空，主程序不读取 YAML |
 | `scripts/build.sh` | 配置、编译、测试的封装脚本 |
 | `third/`、`third_party/` | 仓库内依赖与上游子模块；不要提交其构建产物 |
 | `inc/common/cache/`、`inc/ftp/metadata_cache.h` | 通用分片 LRU/LFU 缓存与业务元数据缓存，均为头文件实现 |
 | `src/ftp/` | `metadata_lib` 管理元数据；`transfer_lib` 提供对象、校验和异步磁盘原语；`ftp_lib` 组合任务、协议与客户端 |
 | `doc/` | 内存拷贝子系统的设计报告与导读，以及本地技术笔记 |
 
-顶层 CMake 组织 `common_lib`、`auth_lib`、`metadata_lib`、`transfer_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
+顶层 CMake 组织 `common_lib`、`auth_lib`、`metadata_lib`、`transfer_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`observability_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
 
 ## 构建与运行
 
@@ -588,6 +761,7 @@ mysql -u root -p < sql/init_tlss_db.sql
 | 对象目录 | `./data/objects` | 启动前设置 `TLSS_STORAGE_ROOT` 可覆盖 |
 | 日志目录 | `./logs` | 相对于进程工作目录，主程序中固定 |
 | 元数据缓存 | 默认容量和 TTL 见[元数据缓存](#元数据缓存) | C++ 构造参数，未暴露给主程序配置 |
+| 监控与资源采样 | 默认启用；每秒刷新指标、每 10 秒完整快照、每 5 秒资源采样 | 环境变量见[运行主服务监控](#运行主服务监控) |
 
 `config/config.yaml.example` 为空，主程序不加载 YAML；安装规则也不会自动适配连接池的配置查找路径。当前运行步骤以仓库内 `bin/` 布局为准。
 
@@ -640,7 +814,94 @@ bye!
 
 服务收到 `SIGINT` 或 `SIGTERM` 后会尝试有序停机。`scripts/build.sh -t Debug` 也可完成配置、构建和测试；`-n` 不构建或运行测试，`-c` 会清理 `build/`、`bin/`、`lib/`，使用前请确认这些目录中的本地文件可以删除。优化构建使用 `cmake --preset release && cmake --build --preset release`。两个 preset 共用 `build/`，切换构建类型时需要重新配置。
 
-监控演示程序输出到 `bin/dome/`，例如 `./bin/dome/demo-m9-policy` 可单独演示三种监控策略。`demo-m9-collector` 和 `demo-m9-node` 是独立示例，前者默认监听本机 UDP `9300`（指标）、TCP `9400`（告警）和 TCP `9310`（CLI）；后者需要指定模块、源 ID、outbox 目录和 CLI 端口。详情见 `src/monitor/demo/`。
+### 运行主服务监控
+
+按上文准备好 MySQL 后，从仓库根目录在不同终端运行以下命令。Collector 本身不需要 MySQL：
+
+```bash
+# 终端 1：独立接收端，保留持久化 inbox。
+./bin/storage-monitor-collector --bind 127.0.0.1 --metrics-port 9300 \
+    --alarms-port 9400 --cli-port 9310 --inbox ./data/monitor-inbox
+
+# 终端 2：按需设置环境变量，再启动业务服务。
+source config/monitor.env.example
+./bin/storage-service
+
+# 终端 3：Collector 管理 CLI。
+nc 127.0.0.1 9310
+```
+
+#### 监控命令与查询示例
+
+以下命令输入在 `nc 127.0.0.1 9310` 建立的 Collector CLI 中，不是在业务客户端 `tlss-cli` 或 shell 中输入。当前注册 7 个命令，`use all` 是 `use` 的一种用法。
+
+| 命令 | 作用 |
+| --- | --- |
+| `help` | 查看已注册命令 |
+| `modules` | 查看模块名与模块 ID |
+| `use <模块名>` | 为当前 CLI 会话选择模块；模块名见指标字典 |
+| `use all` | 恢复查询全部模块 |
+| `db_dump` | 输出当前选中模块的监控记录；查询的是监控 Store，不是 MySQL |
+| `service_status` | 查看存储服务心跳：never_seen、online 或 suspected_unreachable |
+| `alarm_status` | 查看 Collector 可靠告警通道的连接、接收、去重、持久化失败等统计；不是告警状态列表 |
+| `stop` | 停止 Collector，存储服务继续运行；使用前先完成查询 |
+
+查看某个引擎时，先切换模块，再查询，例如：
+
+```text
+help
+modules
+use service
+db_dump
+use upload
+db_dump
+use download
+db_dump
+use metadata
+db_dump
+use object_storage
+db_dump
+```
+
+同样可以选择 `auth`、`worker_pool`、`db_pool`、`disk_executor` 或 `monitor_runtime`。`use` 的选择仅作用于当前 CLI 会话；`db_dump` 是一次快照查询，需要再次输入才能看到后续更新。
+
+查看磁盘、内存和告警：
+
+```text
+use resources
+db_dump
+use storage_alarms
+db_dump
+use all
+service_status
+alarm_status
+```
+
+读取磁盘前先确认 `resource_disk_valid=1`，inode 另需 `resource_inode_valid=1`；容量看 `resource_disk_total_mib / resource_disk_used_mib / resource_disk_available_mib`，使用率看 `resource_disk_percent`，只读状态看 `resource_readonly`。磁盘采样对应对象目录所在文件系统，未设置 `TLSS_STORAGE_ROOT` 时是 `./data/objects`。目录尚未创建或采样失败时可能暂时无效。内存先确认 `resource_memory_valid=1`，再读取整机可用内存、使用率和进程 RSS。
+
+默认指标每秒刷新、资源每 5 秒采样、完整普通指标每 10 秒重发；Collector 重启后等待下一轮快照恢复当前值。若 `service_status` 为 `never_seen`，先确认存储服务正在运行、监控已启用、目标端口与 Collector 一致，并检查服务日志中的监控启动错误；`suspected_unreachable` 表示心跳超时。只有模块列表而没有指标时，模块注册已完成，但可能尚未收到发送端数据。
+
+Collector 初始化后输出 `READY metrics=<port> alarms=<port> cli=<port>`。端口可设为 `0` 供测试分配临时监听端口；业务发送端应使用实际绑定的非零端口。`--help` 显示 Collector 参数且不初始化资源。业务服务通过 `SIGINT`/`SIGTERM` 停止，业务停机完成后停止采样器，再完成监控最后一轮快照与线程回收。Collector 支持同样的退出信号或 CLI `stop` 命令。重启时复用原有 outbox/inbox 路径，以保留可靠告警恢复状态。
+
+以下是实际实现的监控环境变量，由 [main.cpp](src/main.cpp) 和 `monitor_config_from_environment()` 解析；[monitor.env.example](config/monitor.env.example) 提供 shell export 示例：
+
+| 变量 | 默认值 | 合法取值与作用 |
+| --- | --- | --- |
+| `TLSS_MONITOR_ENABLED` | `1` | 仅 `0` 或 `1`；`0` 禁用监控与资源线程 |
+| `TLSS_MONITOR_HOST` | `127.0.0.1` | Collector IPv4 地址 |
+| `TLSS_MONITOR_METRICS_PORT` | `9300` | UDP 目标端口，`1`–`65535` |
+| `TLSS_MONITOR_ALARMS_PORT` | `9400` | 可靠 TCP 目标端口，`1`–`65535` |
+| `TLSS_MONITOR_SOURCE_ID` | `1` | 稳定的可靠告警源 ID，`1`–`UINT64_MAX` |
+| `TLSS_MONITOR_OUTBOX` | `./data/monitor-outbox` | 持久化且可写的发送端目录 |
+| `TLSS_MONITOR_INTERVAL_MS` | `1000` | 指标刷新间隔，`1`–`3600000` 毫秒 |
+| `TLSS_MONITOR_SNAPSHOT_MS` | `10000` | 完整快照间隔，`1`–`3600000` 毫秒 |
+| `TLSS_RESOURCE_INTERVAL_MS` | `5000` | 资源采样间隔，`1`–`3600000` 毫秒 |
+
+资源过期限制为 `max(15000 毫秒, 3 × 资源采样间隔)`。指标刷新间隔接近 Collector 心跳超时时，应同步增大 `--heartbeat-timeout-ms`。上文的 `TLSS_STORAGE_ROOT` 同时选择容量采样所在的文件系统。Collector 的监听端口与 inbox 通过自己的参数配置。主服务没有 `--config` 参数、YAML 监控配置或告警阈值环境变量。
+
+### 补充监控示例
+
+监控演示程序输出到 `bin/dome/`，例如 `./bin/dome/demo-m9-policy` 可单独演示三种监控策略。`demo-m9-collector` 和 `demo-m9-node` 是独立示例，前者默认监听本机 UDP `9300`（指标）、TCP `9400`（告警）和 TCP `9310`（CLI）；请先停止存储 Collector 释放这些端口。后者需要指定模块、源 ID、outbox 目录和 CLI 端口。详情见 `src/monitor/demo/`。
 
 分别在三个终端运行以下命令。示例数据目录位于 `/tmp`，可保留用于进程重启恢复实验；它不是长期持久化目录。不同发送节点应使用不同源 ID、outbox 和 CLI 端口。
 
@@ -671,7 +932,7 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 
 ## 测试与开发入口
 
-`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 当前注册对象存储与校验、注册事务边界、元数据缓存、内存拷贝链接、TCP 停机、线程池异步提交、24 个文件传输场景，以及找到 Python 3 时的目录 SQL 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
+`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 注册对象存储与校验、注册事务边界、元数据缓存、内存拷贝链接、TCP 停机、线程池异步提交、文件传输场景、业务原子指标、资源采样与主服务监控运行时。找到 Python 3 时注册目录 SQL 和存储 Collector 进程 smoke 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
 
 | 范围 | 验证内容与边界 |
 | --- | --- |
@@ -683,7 +944,7 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 | 文件传输 | 实际服务端/客户端处理器、分块收发、哈希与发布、错误帧、背压、冷文件等待、取消、旧回调和停机；使用数据库/认证替代实现，不是真实 MySQL 端到端测试 |
 | 交互客户端 | `test_ftp_client.py` 使用伪终端与测试服务端交互，目前未注册到 CTest |
 | 认证和数据库 | 已注册 `signup_transaction_boundary_test`，以数据库替代实现验证真实仓储和根目录创建共用事务、回滚及提交结果未知；其余认证服务、仓储、注册、事务和预处理语句测试源码尚未注册，部分要求真实测试数据库 |
-| 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke |
+| 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke；业务指标、资源采样、运行时 schema/阈值/生命周期与 Collector 进程 smoke |
 | 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
 
 可按需运行已构建的回归组：
@@ -693,6 +954,7 @@ ctest --preset debug -R '^metadata_cache_'
 ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
 ctest --preset debug -R '^monitor_'
+ctest --preset debug -R '^(storage_metrics_test|system_resource_sampler_test|storage_monitor_.*|storage_collector_smoke)$'
 ```
 
 网络、传输和部分监控测试会创建本机 TCP/UDP 套接字，demo smoke 还会使用固定端口；运行环境需允许本机监听，并避免已有进程占用相应端口。这些回归组无需启动真实 MySQL，不能替代真实数据库和交互客户端的端到端验证。
@@ -709,14 +971,14 @@ ctest --preset debug -R '^monitor_'
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`：追踪注册、登录与虚拟目录的数据库操作。
 5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`：理解缓存命中、版本失效、加载合并与分片容量。
 6. 从 `src/ftp/transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp`：追踪任务状态、发布、校验、异步适配与发送。
-7. `src/monitor/demo/demo-m9-node.cpp` → `src/monitor/engine.cpp` → `src/monitor/monitor_reporter.cpp` → `src/monitor/demo/demo-m9-collector.cpp`：追踪独立监控示例。
+7. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`：追踪主服务监控；`src/monitor/demo/` 提供独立库示例。
 8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
 9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
 
 ## 当前限制与待收尾事项
 
 - 已实现单机上传/下载和内容寻址落盘；尚无断点续传、覆盖更新、文件删除和对象垃圾回收。对象发布与 MySQL 登记之间的故障可能留下无引用对象，崩溃后的临时文件清理与一致性修复尚未实现。
-- 监控库未在主服务中初始化；连接数、业务队列、数据库池等指标尚未自动接入。
+- 主服务监控限定一个 Collector 对应一个 storage-service 实例，仅保存当前值，没有历史时序存储；主机内存采样尚未按 cgroup 限额调整。
 - 元数据缓存只协调显式共享同一缓存实例的调用者；跨进程、独立实例及直接 SQL 写入依赖 TTL 刷新。后续目录删除、移动与重命名还需补齐失效规则。
 - RPC/网关为占位，`.proto` 和 YAML 配置示例为空；端口、线程数量等尚无统一配置入口。
 - TCP 业务连接未启用 TLS；密码哈希保护的是存储凭据，不能替代传输保护。客户端尚未关闭密码输入回显。
@@ -734,7 +996,7 @@ ctest --preset debug -R '^monitor_'
 | 2. gRPC 入口 | 认证、列目录、创建目录；与 TCP 共享业务实现 | 两种入口的权限与结果一致；验证 deadline、取消、重复写请求和有序退出 |
 | 3. 存储一致性与恢复 | 基于已拆分的 MetadataService、ObjectStorageEngine，补齐崩溃恢复、孤儿对象回收与重试语义 | 对象发布后元数据失败、进程退出、重复请求和中断传输都有可验证的修复或清理行为 |
 | 4. Kafka 事件链路 | 事务 Outbox、发布器、一个审计或索引消费者 | broker 不可用时事件保留；恢复后可补发；重复消费不会重复产生业务效果 |
-| 5. 运行与部署演进 | 接入主服务监控，根据独立扩容和故障隔离需求拆服务 | 积压、失败和资源占用可观测；部署和恢复流程可验证 |
+| 5. 运行与部署演进 | 为新增入口补充监控、验证恢复流程，根据独立扩容和故障隔离需求拆服务 | 积压、失败和资源占用可观测；部署和恢复流程可验证 |
 
 监控接入可以随各阶段推进，尤其应覆盖 RPC 延迟、任务拒绝、数据库借用失败、outbox 积压和消费失败。阶段以能力和验证结果划分，不以固定开发天数划分。
 
