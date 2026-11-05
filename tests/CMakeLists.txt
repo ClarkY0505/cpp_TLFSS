@@ -63,10 +63,23 @@ foreach(scenario IN ITEMS
         commit_hash upload download error_frame busy_reply receive_error
         control_limit source_type source_fifo upload_chunked client_download shutdown_wait
         cold_send source_cancel stale_read source_eof client_upload empty_send reader_error legacy_send
-        metadata_failure stale_prepare upload_cancel task_isolation)
+        metadata_failure stale_prepare upload_cancel task_isolation
+        metrics_auth metrics_snapshots metrics_stale_commit metrics_pool metrics_storage)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
+
+add_executable(test_write_scheduler test_write_scheduler.cpp)
+add_dependencies(test_write_scheduler prepare_runtime_directories)
+target_link_libraries(test_write_scheduler PRIVATE common_lib)
+add_test(NAME write_scheduler_test COMMAND test_write_scheduler)
+set_tests_properties(write_scheduler_test PROPERTIES TIMEOUT 15)
+
+add_executable(test_tcp_write_scheduler test_tcp_write_scheduler.cpp)
+add_dependencies(test_tcp_write_scheduler prepare_runtime_directories)
+target_link_libraries(test_tcp_write_scheduler PRIVATE common_lib)
+add_test(NAME tcp_write_scheduler_test COMMAND test_tcp_write_scheduler)
+set_tests_properties(tcp_write_scheduler_test PROPERTIES TIMEOUT 15)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
@@ -93,4 +106,30 @@ if(GTest_FOUND)
         GTest::Main
     )
     add_test(NAME monitor_timer_test COMMAND test_monitor_timer)
+endif()
+
+# Production observability components; no real database is required.
+add_executable(test_storage_metrics test_storage_metrics.cpp)
+target_link_libraries(test_storage_metrics PRIVATE Threads::Threads)
+add_dependencies(test_storage_metrics prepare_runtime_directories)
+add_test(NAME storage_metrics_test COMMAND test_storage_metrics)
+
+add_executable(test_system_resource_sampler test_system_resource_sampler.cpp)
+target_link_libraries(test_system_resource_sampler PRIVATE observability_lib)
+add_dependencies(test_system_resource_sampler prepare_runtime_directories)
+add_test(NAME system_resource_sampler_test COMMAND test_system_resource_sampler)
+set_tests_properties(system_resource_sampler_test PROPERTIES TIMEOUT 15)
+
+add_executable(test_storage_monitor_runtime test_storage_monitor_runtime.cpp)
+target_link_libraries(test_storage_monitor_runtime PRIVATE observability_lib)
+add_dependencies(test_storage_monitor_runtime prepare_runtime_directories)
+foreach(scenario IN ITEMS thresholds schema lifecycle resources transport configuration self_stop)
+    add_test(NAME storage_monitor_${scenario} COMMAND test_storage_monitor_runtime ${scenario})
+    set_tests_properties(storage_monitor_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+if(Python3_Interpreter_FOUND)
+    add_test(NAME storage_collector_smoke
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_storage_collector.py
+                $<TARGET_FILE:storage-monitor-collector>)
+    set_tests_properties(storage_collector_smoke PROPERTIES TIMEOUT 30)
 endif()

@@ -62,6 +62,35 @@ extern "C" ssize_t pread(int fd, void* data, size_t count, off_t offset) {
 // 处理函数、文件接收器、客户端解析器和存储引擎。
 namespace {
 std::atomic<int> inserts{0};
+std::atomic<int> auth_status{2};
+std::atomic<int> signup_status{4};
+struct CommitGate {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool enabled = false;
+  bool entered = false;
+  bool released = false;
+  void wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    if (!enabled)
+      return;
+    entered = true;
+    changed.notify_all();
+    changed.wait(lock, [&] {
+      return released;
+    });
+  }
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = true;
+    changed.notify_all();
+  }
+} commit_gate;
+struct CommitRelease {
+  ~CommitRelease() {
+    commit_gate.release();
+  }
+};
 std::atomic<bool> fail_metadata_insert{false};
 std::atomic<bool> database_shutdown_called{false};
 std::atomic<bool> finalizer_active{false};
@@ -115,6 +144,7 @@ bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue
 }
 DbExecuteResult DbConnection::execute_prepared(const std::string&, const std::vector<DbValue>&) {
   ++inserts;
+  commit_gate.wait();
   if (fail_metadata_insert.load())
     return {};
   return {true, 0, 1, 1};
@@ -133,10 +163,10 @@ UserCreateResult MySqlUserRepository::create_user_with_root(const std::string&,
 AuthService::AuthService(UserRepository& users)
     : users_(users) {}
 AuthResult AuthService::authenticate(const LoginRequest&) const {
-  return {};
+  return {static_cast<AuthStatus>(auth_status.load()), 1, "test_user"};
 }
 SignupResult AuthService::signup(const SignupRequest&) const {
-  return {};
+  return {static_cast<SignupStatus>(signup_status.load()), 1, "test_user"};
 }
 bool AuthService::valid_signup_username(std::string_view) noexcept {
   return true;
@@ -168,14 +198,16 @@ struct TemporaryDirectory {
 
 struct Fixture {
   EventLoop loop;
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics =
+      std::make_shared<OBSERVABILITY::StorageMetrics>();
   StorageService service;
   TcpConnectionPtr conn;
   std::shared_ptr<ConnectionSession> session;
   int peer = -1;
 
-  Fixture()
-      : service(&loop, InetAddress(0), "regression", 0, 0, 32) {
-    service._th_pool.start(0);
+  explicit Fixture(int workers = 0)
+      : service(&loop, InetAddress(0), "regression", 0, workers, 32, metrics) {
+    service._th_pool.start(workers);
     service._disk_executor.start(2);
     int sockets[2];
     check(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sockets) == 0,
@@ -402,8 +434,6 @@ void check_cold_send(Fixture& fixture, const std::string& directory, bool cancel
   check(opened_in_worker.load(), "source was opened in the EventLoop");
   check(cold_io.largest_read.load() <= TcpConnection::kAsyncFileChunk,
         "file read exceeded the bounded chunk size");
-  check(fixture.conn->_pending_memory_bytes == 0 && fixture.conn->_pending_files == 0,
-        "file send leaked queue accounting");
   if (cancel) {
     check(completion_error == std::errc::operation_canceled,
           "executor cancellation did not fail the waiting send");
@@ -437,7 +467,7 @@ void check_stale_read(Fixture& fixture) {
   });
   reads[0]({}, "BAD");
   fixture.drain();
-  check(fixture.conn->_writes.front().read_pending, "stale completion replaced the next file read");
+  check(completed == 1 && reads.size() == 2, "stale completion completed the next file");
   reads[1]({}, "xyz");
   std::string wire;
   fixture.until([&] {
@@ -703,6 +733,81 @@ void check_shutdown_waits(const std::string& directory) {
 }
 
 void run(const std::string& scenario, const std::string& directory) {
+  if (scenario == "metrics_pool") {
+    BASE::ThreadPool pool("metrics-regression");
+    pool.set_max_queue_size(1);
+    pool.set_max_wait_queue_size(1);
+    pool.start(1);
+    std::promise<void> entered, release, expired;
+    auto entered_future = entered.get_future();
+    auto release_future = release.get_future().share();
+    auto expired_future = expired.get_future();
+    pool.try_run([&] {
+      entered.set_value();
+      release_future.wait();
+    });
+    const bool entered_ok =
+        entered_future.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    const bool queued = pool.try_run([] {
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    const bool waiting = pool.submit_async(
+        [] {
+        },
+        deadline,
+        [&] {
+          expired.set_value();
+        });
+    const auto initial = pool.snapshot();
+    const bool rejected = !pool.submit_async(
+        [] {
+        },
+        deadline, {});
+    const bool expired_ok =
+        expired_future.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    const auto final = pool.snapshot();
+    release.set_value();
+    pool.stop();
+    check(entered_ok && queued && waiting && rejected && expired_ok,
+          "pool metrics regression did not exercise queue, waiter and timeout boundaries");
+    check(initial.queued == 1 && initial.waiting == 1 && final.waiting == 0 &&
+              final.rejected == 1 && final.timeouts == 1,
+          "pool snapshot lost queue pressure, rejection or an expired waiter");
+    return;
+  }
+  if (scenario == "metrics_storage") {
+    using OBSERVABILITY::Metric;
+    auto metrics = std::make_shared<OBSERVABILITY::StorageMetrics>();
+    ObjectStorageEngine objects;
+    objects.set_metrics(metrics);
+    std::ofstream(directory + "/" + abc_hash, std::ios::binary) << "bad";
+    auto writer = objects.create_temporary(3);
+    writer->append("abc", 3);
+    bool publish_failed = false, open_failed = false;
+    try {
+      objects.publish(*writer);
+    } catch (...) {
+      publish_failed = true;
+    }
+    try {
+      objects.open_read("invalid");
+    } catch (...) {
+      open_failed = true;
+    }
+    check(publish_failed && open_failed && metrics->get(Metric::object_publish_failed) == 1 &&
+              metrics->get(Metric::verification_failed) == 1 &&
+              metrics->get(Metric::object_open_failed) == 1 &&
+              metrics->get(Metric::object_published) == 0,
+          "object failure counters missed corrupt content or counted failed publish as success");
+    writer.reset();
+    std::filesystem::remove(directory + "/" + abc_hash);
+    writer = objects.create_temporary(3);
+    writer->append("abc", 3);
+    objects.publish(*writer);
+    check(metrics->get(Metric::object_published) == 1 && objects.open_read(abc_hash)->size == 3,
+          "successful object publication did not update its counter");
+    return;
+  }
   if (scenario == "source_type") {
     bool rejected = false;
     try {
@@ -743,7 +848,7 @@ void run(const std::string& scenario, const std::string& directory) {
     return;
   }
 
-  Fixture fixture;
+  Fixture fixture(scenario == "metrics_auth" ? 1 : 0);
   if (scenario == "cold_send" || scenario == "source_cancel") {
     check_cold_send(fixture, directory, scenario == "source_cancel");
     return;
@@ -768,7 +873,104 @@ void run(const std::string& scenario, const std::string& directory) {
     check_reader_edge(fixture, scenario == "empty_send");
     return;
   }
-  if (scenario == "upload") {
+  if (scenario == "metrics_auth") {
+    using OBSERVABILITY::Metric;
+    for (int status = 0; status < 3; ++status) {
+      auth_status.store(status);
+      fixture.session->pending_username = "test_user";
+      fixture.session->login_state = LoginState::k_await_password;
+      fixture.service.handle_auth_command(fixture.conn, fixture.session, "password");
+      // Invalidate only the completion; backend work must still be observed.
+      ++fixture.session->auth_attempt;
+      const auto metric = status == 0   ? Metric::login_success
+                          : status == 1 ? Metric::login_invalid
+                                        : Metric::auth_backend_failures;
+      fixture.until([&] {
+        return fixture.metrics->get(metric) == 1;
+      });
+      fixture.drain();
+      check(fixture.session->login_state == LoginState::k_verifying,
+            "stale authentication completion modified the session");
+    }
+    for (int status : {0, 3}) {
+      signup_status.store(status);
+      fixture.session->pending_username = "test_user";
+      fixture.session->signup_password = "password";
+      fixture.session->login_state = LoginState::k_signup_confirm;
+      fixture.service.handle_signup_command(fixture.conn, fixture.session, "password");
+      ++fixture.session->auth_attempt;
+      const auto metric = status == 0 ? Metric::signup_success : Metric::signup_failed;
+      fixture.until([&] {
+        return fixture.metrics->get(metric) == 1;
+      });
+      fixture.drain();
+    }
+    check(fixture.metrics->get(Metric::auth_backend_failures) == 1,
+          "credential and signup rejection incorrectly counted backend failures");
+  } else if (scenario == "metrics_snapshots") {
+    using OBSERVABILITY::Metric;
+    fixture.service.on_connection(fixture.conn);
+    check(fixture.metrics->get(Metric::connections) == 1,
+          "duplicate connection callback incremented the gauge");
+    fixture.service._metadata_service.find_download_hash("test_user", "/", "file.bin");
+    fixture.service._metadata_service.find_download_hash("test_user", "/", "file.bin");
+    fixture.service.sample_metrics();
+    check(fixture.metrics->get(Metric::cache_requests) == 2 &&
+              fixture.metrics->get(Metric::cache_hits) == 1 &&
+              fixture.metrics->get(Metric::cache_loads) == 1,
+          "cache counters were not sampled from the shared cache");
+    fixture.service._th_pool.stop();
+    fixture.service.handle_ls(fixture.conn, fixture.session);
+    fixture.service._disk_executor.stop();
+    check(!fixture.service._disk_executor.post(
+              [] {
+              },
+              false),
+          "stopped disk executor accepted work");
+    fixture.service.sample_metrics();
+    check(fixture.metrics->get(Metric::worker_rejected) == 1 &&
+              fixture.metrics->get(Metric::commands_rejected) == 1 &&
+              fixture.metrics->get(Metric::disk_rejected) == 1 &&
+              fixture.metrics->get(Metric::disk_active) == 0,
+          "resource snapshots lost queue rejections or active transfers");
+    fixture.conn->force_close();
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    fixture.service.on_connection(fixture.conn);
+    check(fixture.metrics->get(Metric::connections) == 0,
+          "duplicate disconnect callback underflowed the gauge");
+  } else if (scenario == "metrics_stale_commit") {
+    using OBSERVABILITY::Metric;
+    CommitRelease unblock_on_exit;
+    {
+      std::lock_guard<std::mutex> lock(commit_gate.mutex);
+      commit_gate.enabled = true;
+    }
+    fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
+    fixture.await_wire("\n@TLSS UREADY\n");
+    fixture.receive("abc");
+    fixture.until([&] {
+      std::lock_guard<std::mutex> lock(commit_gate.mutex);
+      return commit_gate.entered;
+    });
+    fixture.conn->force_close();
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    fixture.session->transfer->cancel();
+    fixture.session->transfer.reset();
+    commit_gate.release();
+    fixture.service._disk_executor.stop();
+    fixture.drain();
+    check(fixture.metrics->get(Metric::upload_committed) == 1 &&
+              fixture.metrics->get(Metric::upload_cancelled) == 1 &&
+              fixture.metrics->get(Metric::upload_active) == 0 &&
+              fixture.metrics->get(Metric::upload_failed) == 0,
+          "disconnected task lost durable commit or counted a terminal outcome twice");
+    check(fixture.read_wire().find("UOK") == std::string::npos,
+          "stale committed upload emitted a success callback");
+  } else if (scenario == "upload") {
     fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
     check(fixture.await_wire("\n@TLSS UREADY\n").find("\n@TLSS UREADY\n") != std::string::npos,
           "successful upload preparation did not produce UREADY");
@@ -777,6 +979,11 @@ void run(const std::string& scenario, const std::string& directory) {
                   .find("\n@TLSS UOK " + abc_hash + "\n") != std::string::npos,
           "completed upload did not produce UOK");
     check(inserts == 1, "upload did not register metadata");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::upload_started) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_committed) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_cancelled) == 0,
+          "upload metrics did not record exactly one completed transfer");
     std::ifstream stored(directory + "/" + abc_hash, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(stored)), {});
     check(bytes == "abc", "published object content differs");
@@ -791,6 +998,12 @@ void run(const std::string& scenario, const std::string& directory) {
     check(std::filesystem::exists(directory + "/" + abc_hash),
           "failed metadata registration deleted the shared object");
     check(inserts == 1, "metadata registration was skipped or retried");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::upload_committed) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_failed) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_cancelled) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 1,
+          "failed metadata commit was counted as success, cancellation or twice");
   } else if (scenario == "stale_prepare") {
     fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"old.bin\"");
     const auto old = fixture.session->transfer;
@@ -806,6 +1019,12 @@ void run(const std::string& scenario, const std::string& directory) {
     fixture.receive("abc");
     fixture.await_wire("\n@TLSS UOK " + abc_hash + "\n");
     check(inserts == 1, "stale preparation registered a file");
+    old->cancel();
+    check(fixture.metrics->get(OBSERVABILITY::Metric::upload_started) == 2 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_cancelled) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_committed) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0,
+          "stale upload cancellation did not close its metrics exactly once");
   } else if (scenario == "upload_cancel") {
     fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
     fixture.await_wire("\n@TLSS UREADY\n");
@@ -816,6 +1035,10 @@ void run(const std::string& scenario, const std::string& directory) {
     fixture.service._disk_executor.stop();
     fixture.drain();
     check(inserts == 0, "cancelled upload registered metadata");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::upload_cancelled) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::connections) == 0,
+          "disconnect failed to record cancellation and connection removal");
     check(std::filesystem::is_empty(directory), "cancelled upload leaked temporary content");
     check(fixture.read_wire().find("UOK") == std::string::npos,
           "cancelled upload returned success");
@@ -873,10 +1096,17 @@ void run(const std::string& scenario, const std::string& directory) {
     const std::string response = fixture.await_wire("\n@TLSS DONE\n");
     check(response.find("\n@TLSS DATA 3 " + abc_hash + "\nabc\n@TLSS DONE\n") != std::string::npos,
           "download header, body or DONE is missing or out of order");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::download_completed) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::download_active) == 1,
+          "download completed before client ACK");
     fixture.receive("@TLSS ACK\n");
     check(fixture.await_wire("\n@TLSS OK\n").find("\n@TLSS OK\n") != std::string::npos,
           "download ACK did not produce OK");
     check(!fixture.session->transfer, "download did not return to idle");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::download_completed) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::download_active) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::download_cancelled) == 0,
+          "download ACK metrics were missing or destructor counted cancellation");
   } else if (scenario == "error_frame") {
     fixture.service.transfer_failed(fixture.conn, fixture.session, "not available");
     check(fixture.await_wire("\n@TLSS ERROR \"not available\"\n")
