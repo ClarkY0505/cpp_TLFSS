@@ -1,10 +1,11 @@
+#include "common/net/poller.h"
 #include "common/net/channel.h"
 #include "common/net/event_loop.h"
 #include "common/net/net_logger.h"
-#include "common/net/poller.h"
 
 namespace TLSS::NET {
-Poller::Poller(EventLoop* loop) : _owner_loop(loop) {}
+Poller::Poller(EventLoop* loop)
+    : _owner_loop(loop) {}
 
 Poller::~Poller() = default;
 

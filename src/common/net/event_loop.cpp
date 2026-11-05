@@ -1,6 +1,6 @@
+#include "common/net/event_loop.h"
 #include "common/base/current_thread.h"
 #include "common/net/channel.h"
-#include "common/net/event_loop.h"
 #include "common/net/net_logger.h"
 #include "common/net/poller.h"
 

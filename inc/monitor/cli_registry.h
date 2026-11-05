@@ -19,15 +19,15 @@ namespace TLSSMON {
  * Registry 可以被多个线程同时注册、查询和调用。
  */
 class CliRegistry final {
-public:
+ public:
   CliRegistry() = default;
   ~CliRegistry() = default;
 
-  CliRegistry(const CliRegistry &) = delete;
-  CliRegistry &operator=(const CliRegistry &) = delete;
+  CliRegistry(const CliRegistry&) = delete;
+  CliRegistry& operator=(const CliRegistry&) = delete;
 
-  CliRegistry(CliRegistry &&) = delete;
-  CliRegistry &operator=(CliRegistry &&) = delete;
+  CliRegistry(CliRegistry&&) = delete;
+  CliRegistry& operator=(CliRegistry&&) = delete;
 
   /**
    * @brief 注册一个命令。
@@ -39,8 +39,7 @@ public:
    * @param handler 命令处理函数。
    * @return 命令注册状态，包含名称、Handler 或重复命令错误。
    */
-  CliRegisterStatus register_command(std::string name, std::string help,
-                                     CliHandler handler);
+  CliRegisterStatus register_command(std::string name, std::string help, CliHandler handler);
   /**
    * @brief 注册可访问客户端会话状态的命令。
    * @note Handler 在分派时收到对应连接的 CliSessionContext。
@@ -49,8 +48,7 @@ public:
    * @param handler 命令处理函数。
    * @return 命令注册状态，包含名称、Handler 或重复命令错误。
    */
-  CliRegisterStatus register_command(std::string name, std::string help,
-                                     CliSessionHandler handler);
+  CliRegisterStatus register_command(std::string name, std::string help, CliSessionHandler handler);
 
   /**
    * @brief 解析一条完整命令行，并同步执行匹配的 Handler。
@@ -69,8 +67,7 @@ public:
    * @param context 当前客户端独立的会话状态。
    * @return 分派状态以及 Handler 产生的输出文本。
    */
-  CliDispatchResult dispatch(std::string_view line,
-                             CliSessionContext &context) const;
+  CliDispatchResult dispatch(std::string_view line, CliSessionContext& context) const;
 
   /**
    * @brief 返回已注册命令的独立快照。
@@ -80,7 +77,7 @@ public:
    */
   std::vector<CliCommandInfo> commands() const;
 
-private:
+ private:
   struct Command final {
     std::string _help;
     CliSessionHandler _handler;
@@ -89,5 +86,5 @@ private:
   mutable std::mutex _mutex;
   std::map<std::string, Command> _commands;
 };
-} // namespace TLSSMON
-#endif // __CLI_REGISTRY_H__
+}  // namespace TLSSMON
+#endif  // __CLI_REGISTRY_H__

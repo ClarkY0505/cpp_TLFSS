@@ -1,5 +1,9 @@
 #include "cli_server.h"
 
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -9,13 +13,9 @@
 #include <cstdint>
 #include <future>
 #include <iostream>
-#include <netinet/in.h>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -27,17 +27,21 @@ using namespace std::chrono_literals;
 constexpr std::string_view DEFAULT_PROMPT{"[monitor]> "};
 
 class ScopedFd final {
-public:
-  explicit ScopedFd(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit ScopedFd(int fd = -1) noexcept
+      : _fd(fd) {}
 
-  ~ScopedFd() { reset(); }
+  ~ScopedFd() {
+    reset();
+  }
 
-  ScopedFd(const ScopedFd &) = delete;
-  ScopedFd &operator=(const ScopedFd &) = delete;
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
 
-  ScopedFd(ScopedFd &&other) noexcept : _fd(other.release()) {}
+  ScopedFd(ScopedFd&& other) noexcept
+      : _fd(other.release()) {}
 
-  ScopedFd &operator=(ScopedFd &&other) noexcept {
+  ScopedFd& operator=(ScopedFd&& other) noexcept {
     if (this != &other) {
       reset(other.release());
     }
@@ -45,7 +49,9 @@ public:
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
   int release() noexcept {
     const int fd = _fd;
@@ -61,12 +67,11 @@ public:
     _fd = fd;
   }
 
-private:
+ private:
   int _fd{-1};
 };
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (std::chrono::steady_clock::now() < deadline) {
@@ -89,8 +94,8 @@ ScopedFd connect_loopback(std::uint16_t port) {
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(port);
 
-  assert(::connect(client.get(), reinterpret_cast<const sockaddr *>(&address),
-                   sizeof(address)) == 0);
+  assert(::connect(client.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) ==
+         0);
 
   return client;
 }
@@ -99,8 +104,7 @@ bool send_bytes(int fd, std::string_view data) {
   std::size_t offset = 0U;
 
   while (offset < data.size()) {
-    const ssize_t sent =
-        ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+    const ssize_t sent = ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
 
     if (sent > 0) {
       offset += static_cast<std::size_t>(sent);
@@ -117,8 +121,7 @@ bool send_bytes(int fd, std::string_view data) {
   return true;
 }
 
-bool receive_exact(int fd, std::string_view expected,
-                   std::chrono::milliseconds timeout = 2s) {
+bool receive_exact(int fd, std::string_view expected, std::chrono::milliseconds timeout = 2s) {
   std::string received;
   received.reserve(expected.size());
   const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -129,8 +132,7 @@ bool receive_exact(int fd, std::string_view expected,
       return false;
     }
 
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
 
     pollfd descriptor{};
     descriptor.fd = fd;
@@ -138,12 +140,10 @@ bool receive_exact(int fd, std::string_view expected,
 
     int poll_result;
     do {
-      poll_result =
-          ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
+      poll_result = ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
     } while (poll_result < 0 && errno == EINTR);
 
-    if (poll_result <= 0 ||
-        (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+    if (poll_result <= 0 || (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
       return false;
     }
 
@@ -168,8 +168,7 @@ bool receive_exact(int fd, std::string_view expected,
 }
 
 /* 建立一个已被服务端接纳、且初始提示符已经消费完毕的连接。 */
-ScopedFd connect_cli(std::uint16_t port,
-                     std::chrono::milliseconds timeout = 2s) {
+ScopedFd connect_cli(std::uint16_t port, std::chrono::milliseconds timeout = 2s) {
   ScopedFd client = connect_loopback(port);
   assert(receive_exact(client.get(), DEFAULT_PROMPT, timeout));
   return client;
@@ -188,8 +187,7 @@ bool has_no_input(int fd, std::chrono::milliseconds timeout) {
   return result == 0;
 }
 
-bool wait_for_peer_close(int fd,
-                         std::chrono::milliseconds timeout = 2s) {
+bool wait_for_peer_close(int fd, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (std::chrono::steady_clock::now() < deadline) {
@@ -232,15 +230,14 @@ bool wait_for_peer_close(int fd,
 }
 
 class RunningCliServer final {
-public:
+ public:
   explicit RunningCliServer(std::size_t max_clients = CLI_MAX_CLIENTS)
-      : _engine(MonConfig{"cli-session-test", 0U, 1U}),
-        _server(_engine, _registry, CliServerConfig{0U, max_clients}) {
+      : _engine(MonConfig{"cli-session-test", 0U, 1U})
+      , _server(_engine, _registry, CliServerConfig{0U, max_clients}) {
     assert(_engine.init() == ENGINESTATE::SUCCESSFUL);
-    assert(_registry.register_command(
-               "ping", "return pong",
-               [](const CliArguments &) { return std::string{"pong\n"}; }) ==
-           CliRegisterStatus::SUCCESS);
+    assert(_registry.register_command("ping", "return pong", [](const CliArguments&) {
+      return std::string{"pong\n"};
+    }) == CliRegisterStatus::SUCCESS);
     assert(_server.start());
 
     _run_future = _run_promise.get_future();
@@ -263,18 +260,26 @@ public:
     _server.close();
   }
 
-  RunningCliServer(const RunningCliServer &) = delete;
-  RunningCliServer &operator=(const RunningCliServer &) = delete;
+  RunningCliServer(const RunningCliServer&) = delete;
+  RunningCliServer& operator=(const RunningCliServer&) = delete;
 
-  std::uint16_t port() const noexcept { return _server.bound_port(); }
+  std::uint16_t port() const noexcept {
+    return _server.bound_port();
+  }
 
-  CliRegistry &registry() noexcept { return _registry; }
+  CliRegistry& registry() noexcept {
+    return _registry;
+  }
 
-  Engine &engine() noexcept { return _engine; }
+  Engine& engine() noexcept {
+    return _engine;
+  }
 
-  CliServer &server() noexcept { return _server; }
+  CliServer& server() noexcept {
+    return _server;
+  }
 
-private:
+ private:
   Engine _engine;
   CliRegistry _registry;
   CliServer _server;
@@ -334,12 +339,10 @@ void test_unfinished_last_line_is_not_executed() {
   RunningCliServer server;
   std::atomic<unsigned int> calls{0U};
 
-  assert(server.registry().register_command(
-             "mark", "count calls",
-             [&calls](const CliArguments &) {
-               calls.fetch_add(1U, std::memory_order_relaxed);
-               return std::string{"marked\n"};
-             }) == CliRegisterStatus::SUCCESS);
+  assert(server.registry().register_command("mark", "count calls", [&calls](const CliArguments&) {
+    calls.fetch_add(1U, std::memory_order_relaxed);
+    return std::string{"marked\n"};
+  }) == CliRegisterStatus::SUCCESS);
 
   ScopedFd client = connect_cli(server.port());
   assert(send_bytes(client.get(), "mark"));
@@ -367,10 +370,9 @@ void test_maximum_length_line_is_allowed() {
   RunningCliServer server;
   const std::string command(CLI_MAX_LINE_SIZE, 'x');
 
-  assert(server.registry().register_command(
-             command, "maximum command",
-             [](const CliArguments &) { return std::string{"maximum\n"}; }) ==
-         CliRegisterStatus::SUCCESS);
+  assert(server.registry().register_command(command, "maximum command", [](const CliArguments&) {
+    return std::string{"maximum\n"};
+  }) == CliRegisterStatus::SUCCESS);
 
   ScopedFd client = connect_cli(server.port());
   assert(send_bytes(client.get(), command + "\r\n"));
@@ -382,10 +384,9 @@ void test_maximum_length_crlf_can_be_fragmented() {
   RunningCliServer server;
   const std::string command(CLI_MAX_LINE_SIZE, 'y');
 
-  assert(server.registry().register_command(
-             command, "fragmented CRLF",
-             [](const CliArguments &) { return std::string{"fragmented\n"}; }) ==
-         CliRegisterStatus::SUCCESS);
+  assert(server.registry().register_command(command, "fragmented CRLF", [](const CliArguments&) {
+    return std::string{"fragmented\n"};
+  }) == CliRegisterStatus::SUCCESS);
 
   ScopedFd client = connect_cli(server.port());
   assert(send_bytes(client.get(), command + "\r"));
@@ -412,10 +413,10 @@ void test_binary_handler_output_is_preserved() {
   const std::string handler_output{"A\0B\n", 4U};
   const std::string expected = std::string{"* "} + handler_output;
 
-  assert(server.registry().register_command(
-             "binary", "binary output",
-             [handler_output](const CliArguments &) { return handler_output; }) ==
-         CliRegisterStatus::SUCCESS);
+  assert(server.registry().register_command("binary", "binary output",
+                                            [handler_output](const CliArguments&) {
+                                              return handler_output;
+                                            }) == CliRegisterStatus::SUCCESS);
 
   ScopedFd client = connect_cli(server.port());
   assert(send_bytes(client.get(), "binary\n"));
@@ -491,11 +492,9 @@ void test_broken_client_does_not_affect_other_clients() {
 void test_slow_reader_does_not_block_engine_forever() {
   RunningCliServer server;
 
-  assert(server.registry().register_command(
-             "large", "large response",
-             [](const CliArguments &) {
-               return std::string(16U * 1024U * 1024U, 'L');
-             }) == CliRegisterStatus::SUCCESS);
+  assert(server.registry().register_command("large", "large response", [](const CliArguments&) {
+    return std::string(16U * 1024U * 1024U, 'L');
+  }) == CliRegisterStatus::SUCCESS);
 
   ScopedFd slow = connect_cli(server.port());
   assert(send_bytes(slow.get(), "large\n"));
@@ -529,7 +528,7 @@ void test_server_close_closes_all_sessions() {
   assert(server.engine().get_phase() == EnginePhase::RUNNING);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_single_command();

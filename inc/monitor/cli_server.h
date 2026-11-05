@@ -11,8 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <string_view>
 #include <string>
+#include <string_view>
 
 namespace TLSSMON {
 /** @brief CLI 监听端口、并发客户端上限和默认提示符名称。 */
@@ -34,21 +34,21 @@ struct CliServerTestAccess;
  * @note Engine 和 CliRegistry 由调用方持有，必须比本对象存活更久。
  */
 class CliServer final {
-public:
+ public:
   /**
    * @brief 保存 Engine、命令注册表和监听配置。
    * @param engine 用于注册事件或读写监控数据的 Engine；由调用方持有。
    * @param registry 调用方持有的注册表；其生命周期须覆盖当前对象或注册的回调。
    * @param config CLI 端口、并发客户端上限和默认提示符名称；服务仅绑定本机回环地址。
    */
-  CliServer(Engine &engine, CliRegistry &registry, CliServerConfig config);
+  CliServer(Engine& engine, CliRegistry& registry, CliServerConfig config);
   ~CliServer();
 
-  CliServer(const CliServer &) = delete;
-  CliServer &operator=(const CliServer &) = delete;
+  CliServer(const CliServer&) = delete;
+  CliServer& operator=(const CliServer&) = delete;
 
-  CliServer(CliServer &&) = delete;
-  CliServer &operator=(CliServer &&) = delete;
+  CliServer(CliServer&&) = delete;
+  CliServer& operator=(CliServer&&) = delete;
 
   /**
    * @brief 创建 TCP Listener 并注册到 Engine AIO。
@@ -82,7 +82,7 @@ public:
    */
   std::uint16_t bound_port() const noexcept;
 
-private:
+ private:
   /**
    * @brief 底层 Listener fd 的共享所有者。
    *
@@ -99,18 +99,16 @@ private:
    * @param listener 监听 socket 的共享资源。
    * @return AIO 回调结果；处理完成后返回 0。
    */
-  static int handle_listener_ready(
-      const std::shared_ptr<ServerState> &state,
-      const std::shared_ptr<ListenerResource> &listener) noexcept;
+  static int handle_listener_ready(const std::shared_ptr<ServerState>& state,
+                                   const std::shared_ptr<ListenerResource>& listener) noexcept;
   /**
    * @brief 处理就绪客户端的输入。
    * @param state 服务端或引擎状态。
    * @param session 当前客户端会话。
    * @return AIO 回调结果；处理完成后返回 0。
    */
-  static int
-  handle_client_ready(const std::shared_ptr<ServerState> &state,
-                      const std::shared_ptr<ClientSession> &session) noexcept;
+  static int handle_client_ready(const std::shared_ptr<ServerState>& state,
+                                 const std::shared_ptr<ClientSession>& session) noexcept;
   /**
    * @brief 处理 session 输入缓冲区中的完整行。
    *
@@ -119,8 +117,8 @@ private:
    * @param session 当前客户端会话。
    * @return 会话可继续时返回 true，需要关闭连接时返回 false。
    */
-  static bool process_input(const std::shared_ptr<ServerState> &state,
-                            const std::shared_ptr<ClientSession> &session);
+  static bool process_input(const std::shared_ptr<ServerState>& state,
+                            const std::shared_ptr<ClientSession>& session);
 
   /**
    * @brief 在非阻塞 socket 上完整发送数据。
@@ -130,7 +128,7 @@ private:
    * @param output 要完整发送的响应文本。
    * @return 完整发送成功时返回 true，超时或发送失败时返回 false。
    */
-  static bool send_all(const std::shared_ptr<ClientSession> &session,
+  static bool send_all(const std::shared_ptr<ClientSession>& session,
                        std::string_view output) noexcept;
   /**
    * @brief 发送当前客户端的 CLI 提示符。
@@ -138,9 +136,8 @@ private:
    * @param session 当前客户端会话。
    * @return 提示符发送成功时返回 true，否则返回 false。
    */
-  static bool send_prompt(
-      const std::shared_ptr<ServerState>& state,
-      const std::shared_ptr<ClientSession>& session) noexcept;
+  static bool send_prompt(const std::shared_ptr<ServerState>& state,
+                          const std::shared_ptr<ClientSession>& session) noexcept;
 
   /**
    * @brief 从活动 Session 表中移除客户端，并请求删除其 AIO。
@@ -149,13 +146,12 @@ private:
    * @param state 服务端或引擎状态。
    * @param session 当前客户端会话。
    */
-  static void
-  close_session(const std::shared_ptr<ServerState> &state,
-                const std::shared_ptr<ClientSession> &session) noexcept;
+  static void close_session(const std::shared_ptr<ServerState>& state,
+                            const std::shared_ptr<ClientSession>& session) noexcept;
   friend struct CliServerTestAccess;
 
-  Engine &_engine;
-  CliRegistry &_registry;
+  Engine& _engine;
+  CliRegistry& _registry;
   CliServerConfig _config;
 
   std::shared_ptr<ServerState> _state;
@@ -181,5 +177,5 @@ private:
    */
   bool _ever_started{false};
 };
-} // namespace TLSSMON
-#endif // __CLI_SERVER_H__
+}  // namespace TLSSMON
+#endif  // __CLI_SERVER_H__

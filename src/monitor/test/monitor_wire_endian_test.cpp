@@ -57,8 +57,7 @@ void test_u32_big_endian_and_unaligned_access() {
  * 验证 uint64_t 大端序。
  */
 void test_u64_big_endian_and_unaligned_access() {
-  std::array<std::uint8_t, 10> buffer{0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
-                                      0xaa, 0xaa, 0xaa, 0xaa, 0xaa};
+  std::array<std::uint8_t, 10> buffer{0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa};
 
   Wire::Detail::put_u64(buffer.data() + 1, UINT64_C(0x0102030405060708));
 
@@ -84,63 +83,49 @@ void test_u64_big_endian_and_unaligned_access() {
 void test_unsigned_boundaries_round_trip() {
   std::array<std::uint8_t, 8> buffer{};
 
-  Wire::Detail::put_u16(buffer.data(),
-                        std::numeric_limits<std::uint16_t>::min());
+  Wire::Detail::put_u16(buffer.data(), std::numeric_limits<std::uint16_t>::min());
 
-  assert(Wire::Detail::get_u16(buffer.data()) ==
-         std::numeric_limits<std::uint16_t>::min());
+  assert(Wire::Detail::get_u16(buffer.data()) == std::numeric_limits<std::uint16_t>::min());
 
-  Wire::Detail::put_u16(buffer.data(),
-                        std::numeric_limits<std::uint16_t>::max());
+  Wire::Detail::put_u16(buffer.data(), std::numeric_limits<std::uint16_t>::max());
 
-  assert(Wire::Detail::get_u16(buffer.data()) ==
-         std::numeric_limits<std::uint16_t>::max());
+  assert(Wire::Detail::get_u16(buffer.data()) == std::numeric_limits<std::uint16_t>::max());
 
-  Wire::Detail::put_u32(buffer.data(),
-                        std::numeric_limits<std::uint32_t>::min());
+  Wire::Detail::put_u32(buffer.data(), std::numeric_limits<std::uint32_t>::min());
 
-  assert(Wire::Detail::get_u32(buffer.data()) ==
-         std::numeric_limits<std::uint32_t>::min());
+  assert(Wire::Detail::get_u32(buffer.data()) == std::numeric_limits<std::uint32_t>::min());
 
-  Wire::Detail::put_u32(buffer.data(),
-                        std::numeric_limits<std::uint32_t>::max());
+  Wire::Detail::put_u32(buffer.data(), std::numeric_limits<std::uint32_t>::max());
 
-  assert(Wire::Detail::get_u32(buffer.data()) ==
-         std::numeric_limits<std::uint32_t>::max());
+  assert(Wire::Detail::get_u32(buffer.data()) == std::numeric_limits<std::uint32_t>::max());
 
-  Wire::Detail::put_u64(buffer.data(),
-                        std::numeric_limits<std::uint64_t>::min());
+  Wire::Detail::put_u64(buffer.data(), std::numeric_limits<std::uint64_t>::min());
 
-  assert(Wire::Detail::get_u64(buffer.data()) ==
-         std::numeric_limits<std::uint64_t>::min());
+  assert(Wire::Detail::get_u64(buffer.data()) == std::numeric_limits<std::uint64_t>::min());
 
-  Wire::Detail::put_u64(buffer.data(),
-                        std::numeric_limits<std::uint64_t>::max());
+  Wire::Detail::put_u64(buffer.data(), std::numeric_limits<std::uint64_t>::max());
 
-  assert(Wire::Detail::get_u64(buffer.data()) ==
-         std::numeric_limits<std::uint64_t>::max());
+  assert(Wire::Detail::get_u64(buffer.data()) == std::numeric_limits<std::uint64_t>::max());
 }
 
 /*
  * 验证有符号 seconds 按 64 位补码往返。
  */
 void test_signed_seconds_round_trip() {
-  constexpr std::array<std::int64_t, 7> values{
-      std::numeric_limits<std::int64_t>::min(),
-      INT64_C(-72623859790382856),
-      INT64_C(-1),
-      INT64_C(0),
-      INT64_C(1),
-      INT64_C(72623859790382856),
-      std::numeric_limits<std::int64_t>::max()};
+  constexpr std::array<std::int64_t, 7> values{std::numeric_limits<std::int64_t>::min(),
+                                               INT64_C(-72623859790382856),
+                                               INT64_C(-1),
+                                               INT64_C(0),
+                                               INT64_C(1),
+                                               INT64_C(72623859790382856),
+                                               std::numeric_limits<std::int64_t>::max()};
 
   std::array<std::uint8_t, 8> buffer{};
 
   for (const std::int64_t expected : values) {
     Wire::Detail::put_i64_twos_complement(buffer.data(), expected);
 
-    const std::int64_t actual =
-        Wire::Detail::get_i64_twos_complement(buffer.data());
+    const std::int64_t actual = Wire::Detail::get_i64_twos_complement(buffer.data());
 
     assert(actual == expected);
   }
@@ -169,8 +154,7 @@ void test_negative_one_twos_complement_bytes() {
 void test_int64_min_twos_complement_bytes() {
   std::array<std::uint8_t, 8> buffer{};
 
-  Wire::Detail::put_i64_twos_complement(
-      buffer.data(), std::numeric_limits<std::int64_t>::min());
+  Wire::Detail::put_i64_twos_complement(buffer.data(), std::numeric_limits<std::int64_t>::min());
 
   assert(buffer[0] == 0x80);
 
@@ -194,11 +178,10 @@ void test_nanoseconds_range() {
 
   assert(!Wire::Detail::is_valid_nanoseconds(1'000'000'000U));
 
-  assert(!Wire::Detail::is_valid_nanoseconds(
-      std::numeric_limits<std::uint32_t>::max()));
+  assert(!Wire::Detail::is_valid_nanoseconds(std::numeric_limits<std::uint32_t>::max()));
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_u16_big_endian_and_unaligned_access();

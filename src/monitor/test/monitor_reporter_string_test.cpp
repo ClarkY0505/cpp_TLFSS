@@ -17,17 +17,13 @@ MonData::MonitorTimestamp timestamp_at(std::int64_t seconds) {
   return MonData::MonitorTimestamp{std::chrono::seconds{seconds}};
 }
 
-const std::string &string_value(const MonData::StoredRecord &record) {
-
+const std::string& string_value(const MonData::StoredRecord& record) {
   return std::get<std::string>(record._data._value);
 }
 
-MonData::MonitorData make_string_data(MonData::MonitorKey key,
-                                      std::string value,
+MonData::MonitorData make_string_data(MonData::MonitorKey key, std::string value,
                                       std::string description) {
-
-  return MonData::MonitorData{std::move(key), std::move(description),
-                              std::move(value)};
+  return MonData::MonitorData{std::move(key), std::move(description), std::move(value)};
 }
 
 /*
@@ -114,15 +110,15 @@ void test_same_string_is_unchanged_and_not_published_again() {
 
   const MonData::MonitorTimestamp duplicate_timestamp = timestamp_at(300);
 
-  const MonData::UpdateResult inserted = reporter.report_string(
-      key, "same-value", "original-description", first_timestamp);
+  const MonData::UpdateResult inserted =
+      reporter.report_string(key, "same-value", "original-description", first_timestamp);
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
   assert(published.size() == 1);
 
-  const MonData::UpdateResult unchanged = reporter.report_string(
-      key, "same-value", "duplicate-description", duplicate_timestamp);
+  const MonData::UpdateResult unchanged =
+      reporter.report_string(key, "same-value", "duplicate-description", duplicate_timestamp);
 
   assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
 
@@ -178,8 +174,8 @@ void test_different_string_is_updated_and_published_again() {
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-  const MonData::UpdateResult updated = reporter.report_string(
-      key, "running", "changed-state", changed_timestamp);
+  const MonData::UpdateResult updated =
+      reporter.report_string(key, "running", "changed-state", changed_timestamp);
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 
@@ -245,8 +241,8 @@ void test_strings_with_same_64_byte_prefix_are_different() {
 
   assert(first_value != second_value);
 
-  const MonData::UpdateResult inserted = reporter.report_string(
-      key, first_value, "first-prefix-value", timestamp_at(600));
+  const MonData::UpdateResult inserted =
+      reporter.report_string(key, first_value, "first-prefix-value", timestamp_at(600));
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
@@ -254,8 +250,8 @@ void test_strings_with_same_64_byte_prefix_are_different() {
 
   assert(string_value(*inserted._record) == first_value);
 
-  const MonData::UpdateResult updated = reporter.report_string(
-      key, second_value, "second-prefix-value", timestamp_at(700));
+  const MonData::UpdateResult updated =
+      reporter.report_string(key, second_value, "second-prefix-value", timestamp_at(700));
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 
@@ -301,8 +297,7 @@ void test_empty_string_is_inserted_and_published() {
 
   const MonData::MonitorTimestamp timestamp = timestamp_at(800);
 
-  const MonData::UpdateResult result =
-      reporter.report_string(key, "", "empty-string", timestamp);
+  const MonData::UpdateResult result = reporter.report_string(key, "", "empty-string", timestamp);
 
   assert(result._status == MonData::UpdateStatus::INSERTED);
 
@@ -353,8 +348,7 @@ void test_force_does_not_change_string_behavior() {
   /*
    * force=false 的首次字符串正常插入。
    */
-  MonData::MonitorData false_data =
-      make_string_data(false_key, "force-value", "force-false");
+  MonData::MonitorData false_data = make_string_data(false_key, "force-value", "force-false");
 
   const MonData::UpdateResult false_inserted =
       reporter.update(std::move(false_data), false, timestamp_at(900));
@@ -364,8 +358,7 @@ void test_force_does_not_change_string_behavior() {
   /*
    * force=true 的首次字符串行为相同。
    */
-  MonData::MonitorData true_data =
-      make_string_data(true_key, "force-value", "force-true");
+  MonData::MonitorData true_data = make_string_data(true_key, "force-value", "force-true");
 
   const MonData::UpdateResult true_inserted =
       reporter.update(std::move(true_data), true, timestamp_at(1000));
@@ -470,7 +463,7 @@ void test_long_string_is_not_truncated() {
   assert(stored->_changed_at == timestamp);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_first_string_is_inserted_and_published();

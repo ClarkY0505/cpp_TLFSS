@@ -38,7 +38,7 @@ class ArcLru {
     }
     auto it = _main_cache.find(key);
     if (it != _main_cache.end()) {
-      return update_existing_node(it->second,value);
+      return update_existing_node(it->second, value);
     }
     // 重新驻留前清除同 key 历史，保证本分区的主缓存与 ghost 互斥。
     erase_ghost(key);

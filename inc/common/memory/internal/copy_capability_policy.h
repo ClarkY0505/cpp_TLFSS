@@ -1,9 +1,9 @@
 #ifndef __COPY_CAPABILITY_POLICY_H__
 #define __COPY_CAPABILITY_POLICY_H__
 
+#include "common/memory/tlss_memcpy.h"
 #include "copy_policy.h"
 #include "cpu_capabilities.h"
-#include "common/memory/tlss_memcpy.h"
 
 namespace TLSS::MEMORY::INTERNAL {
 

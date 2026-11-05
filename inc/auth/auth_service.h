@@ -35,23 +35,23 @@ struct AuthResult {
 };
 
 struct SignupRequest {
-    std::string username;
-    std::string password;
+  std::string username;
+  std::string password;
 };
 
 enum class SignupStatus {
-    k_created,
-    k_invalid_username,
-    k_invalid_password,
-    k_username_taken,
-    k_backend_unavailable,
-    k_outcome_unknown,
+  k_created,
+  k_invalid_username,
+  k_invalid_password,
+  k_username_taken,
+  k_backend_unavailable,
+  k_outcome_unknown,
 };
 
 struct SignupResult {
-    SignupStatus status = SignupStatus::k_backend_unavailable;
-    std::uint64_t user_id = 0;
-    std::string username;
+  SignupStatus status = SignupStatus::k_backend_unavailable;
+  std::uint64_t user_id = 0;
+  std::string username;
 };
 
 class AuthService {

@@ -1,6 +1,6 @@
+#include "monitor_module_registry.h"
 #include "monitor_error.h"
 #include "monitor_module.h"
-#include "monitor_module_registry.h"
 
 #include <cstdint>
 #include <ctime>
@@ -12,13 +12,12 @@
 #include <utility>
 #include <vector>
 namespace TLSSMON {
-ModuleRegisterStatus
-MonitorModuleRegistry::register_module(MonitorModuleInfo module) {
+ModuleRegisterStatus MonitorModuleRegistry::register_module(MonitorModuleInfo module) {
   if (!is_valid_module_name(module._name)) {
     return ModuleRegisterStatus::INVALID_NAME;
   }
 
-  for (const MonitorErrorInfo &error : module._errors) {
+  for (const MonitorErrorInfo& error : module._errors) {
     const auto raw_level = static_cast<std::uint32_t>(error._level);
     if (!is_valid_monitor_level(raw_level)) {
       return ModuleRegisterStatus::INVALID_ERROR_LEVEL;
@@ -89,8 +88,7 @@ MonitorModuleRegistry::register_module(MonitorModuleInfo module) {
   return ModuleRegisterStatus::SUCCESS;
 }
 
-std::optional<MonitorModuleInfo>
-MonitorModuleRegistry::find_by_id(std::uint32_t mid) const {
+std::optional<MonitorModuleInfo> MonitorModuleRegistry::find_by_id(std::uint32_t mid) const {
   std::lock_guard<std::mutex> lock{_mutex};
 
   const auto module = _by_id.find(mid);
@@ -106,24 +104,23 @@ MonitorModuleRegistry::find_by_id(std::uint32_t mid) const {
   return module->second;
 }
 
-std::optional<MonitorErrorInfo> 
-MonitorModuleRegistry::find_error(std::uint32_t mid, std::uint32_t eid) const {
-    // EID 是模块错误表的下标；缺少模块或越界都表示没有可用元数据。
-    std::lock_guard<std::mutex> lock{_mutex};
-    const auto module = _by_id.find(mid);
-    if(module == _by_id.end()){
-        return std::nullopt;
-    }
-    const std::vector<MonitorErrorInfo> &errors = module->second._errors;
-    if (eid >= errors.size()) {
-      return std::nullopt;
-    }
+std::optional<MonitorErrorInfo> MonitorModuleRegistry::find_error(std::uint32_t mid,
+                                                                  std::uint32_t eid) const {
+  // EID 是模块错误表的下标；缺少模块或越界都表示没有可用元数据。
+  std::lock_guard<std::mutex> lock{_mutex};
+  const auto module = _by_id.find(mid);
+  if (module == _by_id.end()) {
+    return std::nullopt;
+  }
+  const std::vector<MonitorErrorInfo>& errors = module->second._errors;
+  if (eid >= errors.size()) {
+    return std::nullopt;
+  }
 
-    return errors[eid];
+  return errors[eid];
 }
 
-std::optional<MonitorModuleInfo>
-MonitorModuleRegistry::find_by_name(std::string_view name) const {
+std::optional<MonitorModuleInfo> MonitorModuleRegistry::find_by_name(std::string_view name) const {
   std::lock_guard<std::mutex> lock{_mutex};
 
   /*
@@ -162,7 +159,7 @@ std::vector<MonitorModuleInfo> MonitorModuleRegistry::modules() const {
    * _id_by_name 是 std::map<std::string, ...>，
    * 迭代顺序天然是模块名字典序。
    */
-  for (const auto &name_entry : _id_by_name) {
+  for (const auto& name_entry : _id_by_name) {
     const auto module = _by_id.find(name_entry.second);
 
     if (module != _by_id.end()) {
@@ -177,4 +174,4 @@ std::vector<MonitorModuleInfo> MonitorModuleRegistry::modules() const {
   return snapshot;
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

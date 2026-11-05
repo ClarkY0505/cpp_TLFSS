@@ -39,20 +39,12 @@ inline constexpr std::uint32_t TEST_EID = 0xddeeff00U;
 static_assert(Wire::V2_HEADER_SIZE == 40U);
 static_assert(Wire::V2_MAX_DATAGRAM_SIZE == 1200U);
 
-const MonData::MonitorKey TEST_KEY{
-    TEST_MID,
-    TEST_LEVEL,
-    TEST_FID,
-    TEST_EID};
+const MonData::MonitorKey TEST_KEY{TEST_MID, TEST_LEVEL, TEST_FID, TEST_EID};
 
 MonData::StoredRecord make_record(
-    std::string description,
-    MonData::MonitorTimestamp changed_at = MonData::MonitorTimestamp{}) {
+    std::string description, MonData::MonitorTimestamp changed_at = MonData::MonitorTimestamp{}) {
   return MonData::StoredRecord{
-      MonData::MonitorData{
-          TEST_KEY,
-          std::move(description),
-          MonData::NumericValue{123U, 2U}},
+      MonData::MonitorData{TEST_KEY, std::move(description), MonData::NumericValue{123U, 2U}},
       changed_at};
 }
 
@@ -62,53 +54,37 @@ MonData::StoredRecord make_record(
  * 读取测试使用它作为输入，避免写入端和读取端出现相同错误时，
  * 往返测试仍然错误地通过。
  */
-std::vector<std::uint8_t> make_valid_datagram(
-    std::uint16_t description_length = 3U,
-    std::uint16_t value_length = 8U) {
-  const std::size_t total_length =
-      Wire::V2_HEADER_SIZE +
-      static_cast<std::size_t>(description_length) +
-      static_cast<std::size_t>(value_length);
+std::vector<std::uint8_t> make_valid_datagram(std::uint16_t description_length = 3U,
+                                              std::uint16_t value_length = 8U) {
+  const std::size_t total_length = Wire::V2_HEADER_SIZE +
+                                   static_cast<std::size_t>(description_length) +
+                                   static_cast<std::size_t>(value_length);
 
   assert(total_length <= Wire::V2_MAX_DATAGRAM_SIZE);
 
   std::vector<std::uint8_t> bytes(total_length, 0U);
 
-  bytes[VERSION_OFFSET] =
-      static_cast<std::uint8_t>(Wire::WireVersion::V2);
-  bytes[TYPE_OFFSET] =
-      static_cast<std::uint8_t>(Wire::WireValueType::NUMERIC);
+  bytes[VERSION_OFFSET] = static_cast<std::uint8_t>(Wire::WireVersion::V2);
+  bytes[TYPE_OFFSET] = static_cast<std::uint8_t>(Wire::WireValueType::NUMERIC);
 
   Wire::Detail::put_u16(bytes.data() + FLAGS_OFFSET, 0U);
-  Wire::Detail::put_u16(
-      bytes.data() + TOTAL_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(total_length));
-  Wire::Detail::put_u16(
-      bytes.data() + HEADER_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE));
+  Wire::Detail::put_u16(bytes.data() + TOTAL_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(total_length));
+  Wire::Detail::put_u16(bytes.data() + HEADER_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE));
   Wire::Detail::put_u32(bytes.data() + MID_OFFSET, TEST_MID);
   Wire::Detail::put_u32(bytes.data() + LEVEL_OFFSET, TEST_LEVEL);
   Wire::Detail::put_u32(bytes.data() + FID_OFFSET, TEST_FID);
   Wire::Detail::put_u32(bytes.data() + EID_OFFSET, TEST_EID);
-  Wire::Detail::put_i64_twos_complement(
-      bytes.data() + SECONDS_OFFSET,
-      INT64_C(-2));
-  Wire::Detail::put_u32(
-      bytes.data() + NANOSECONDS_OFFSET,
-      250'000'000U);
-  Wire::Detail::put_u16(
-      bytes.data() + DESCRIPTION_LENGTH_OFFSET,
-      description_length);
-  Wire::Detail::put_u16(
-      bytes.data() + VALUE_LENGTH_OFFSET,
-      value_length);
+  Wire::Detail::put_i64_twos_complement(bytes.data() + SECONDS_OFFSET, INT64_C(-2));
+  Wire::Detail::put_u32(bytes.data() + NANOSECONDS_OFFSET, 250'000'000U);
+  Wire::Detail::put_u16(bytes.data() + DESCRIPTION_LENGTH_OFFSET, description_length);
+  Wire::Detail::put_u16(bytes.data() + VALUE_LENGTH_OFFSET, value_length);
 
   return bytes;
 }
 
-void assert_read_failure(
-    const std::vector<std::uint8_t> &bytes,
-    Wire::WireStatus expected_status) {
+void assert_read_failure(const std::vector<std::uint8_t>& bytes, Wire::WireStatus expected_status) {
   const Wire::Detail::V2HeaderResult result =
       Wire::Detail::read_v2_header(bytes.data(), bytes.size());
 
@@ -127,36 +103,28 @@ void assert_read_failure(
  * - Key、时间戳和长度字段全部使用大端序。
  */
 void test_writer_matches_v2_header_golden_bytes() {
-  const MonData::MonitorTimestamp timestamp{
-      std::chrono::seconds{0x01020304} +
-      std::chrono::nanoseconds{0x11223344}};
-  const MonData::StoredRecord record =
-      make_record("abc", timestamp);
-  std::vector<std::uint8_t> datagram(
-      Wire::V2_HEADER_SIZE + 3U + 8U,
-      0U);
+  const MonData::MonitorTimestamp timestamp{std::chrono::seconds{0x01020304} +
+                                            std::chrono::nanoseconds{0x11223344}};
+  const MonData::StoredRecord record = make_record("abc", timestamp);
+  std::vector<std::uint8_t> datagram(Wire::V2_HEADER_SIZE + 3U + 8U, 0U);
 
   const Wire::WireStatus status =
-      Wire::Detail::write_v2_header(
-          datagram,
-          record,
-          Wire::WireValueType::NUMERIC,
-          8U);
+      Wire::Detail::write_v2_header(datagram, record, Wire::WireValueType::NUMERIC, 8U);
 
   const std::array<std::uint8_t, Wire::V2_HEADER_SIZE> expected{
-      0x02, 0x00,                         // version, numeric type
-      0x00, 0x00,                         // flags
-      0x00, 0x33,                         // total_length = 51
-      0x00, 0x28,                         // header_length = 40
-      0x11, 0x22, 0x33, 0x44,             // mid
-      0x55, 0x66, 0x77, 0x88,             // level
-      0x99, 0xaa, 0xbb, 0xcc,             // fid
-      0xdd, 0xee, 0xff, 0x00,             // eid
-      0x00, 0x00, 0x00, 0x00,             // seconds high
-      0x01, 0x02, 0x03, 0x04,             // seconds low
-      0x11, 0x22, 0x33, 0x44,             // nanoseconds
-      0x00, 0x03,                         // description_length
-      0x00, 0x08};                        // value_length
+      0x02, 0x00,              // version, numeric type
+      0x00, 0x00,              // flags
+      0x00, 0x33,              // total_length = 51
+      0x00, 0x28,              // header_length = 40
+      0x11, 0x22, 0x33, 0x44,  // mid
+      0x55, 0x66, 0x77, 0x88,  // level
+      0x99, 0xaa, 0xbb, 0xcc,  // fid
+      0xdd, 0xee, 0xff, 0x00,  // eid
+      0x00, 0x00, 0x00, 0x00,  // seconds high
+      0x01, 0x02, 0x03, 0x04,  // seconds low
+      0x11, 0x22, 0x33, 0x44,  // nanoseconds
+      0x00, 0x03,              // description_length
+      0x00, 0x08};             // value_length
 
   assert(status == Wire::WireStatus::SUCCESS);
   assert(std::equal(expected.begin(), expected.end(), datagram.begin()));
@@ -167,25 +135,16 @@ void test_writer_matches_v2_header_golden_bytes() {
  * 而不是 seconds = 0、nanoseconds 为负数。
  */
 void test_writer_normalizes_negative_timestamp() {
-  const MonData::MonitorTimestamp timestamp{
-      std::chrono::nanoseconds{-500'000'000}};
+  const MonData::MonitorTimestamp timestamp{std::chrono::nanoseconds{-500'000'000}};
   const MonData::StoredRecord record = make_record("", timestamp);
-  std::vector<std::uint8_t> datagram(
-      Wire::V2_HEADER_SIZE + 8U,
-      0U);
+  std::vector<std::uint8_t> datagram(Wire::V2_HEADER_SIZE + 8U, 0U);
 
   const Wire::WireStatus status =
-      Wire::Detail::write_v2_header(
-          datagram,
-          record,
-          Wire::WireValueType::NUMERIC,
-          8U);
+      Wire::Detail::write_v2_header(datagram, record, Wire::WireValueType::NUMERIC, 8U);
 
   assert(status == Wire::WireStatus::SUCCESS);
-  assert(Wire::Detail::get_i64_twos_complement(
-             datagram.data() + SECONDS_OFFSET) == INT64_C(-1));
-  assert(Wire::Detail::get_u32(
-             datagram.data() + NANOSECONDS_OFFSET) == 500'000'000U);
+  assert(Wire::Detail::get_i64_twos_complement(datagram.data() + SECONDS_OFFSET) == INT64_C(-1));
+  assert(Wire::Detail::get_u32(datagram.data() + NANOSECONDS_OFFSET) == 500'000'000U);
 }
 
 /*
@@ -194,24 +153,16 @@ void test_writer_normalizes_negative_timestamp() {
  */
 void test_writer_records_string_type_and_field_lengths() {
   const MonData::StoredRecord record = make_record("description");
-  std::vector<std::uint8_t> datagram(
-      Wire::V2_HEADER_SIZE + record._data._description.size() + 5U,
-      0U);
+  std::vector<std::uint8_t> datagram(Wire::V2_HEADER_SIZE + record._data._description.size() + 5U,
+                                     0U);
 
   const Wire::WireStatus status =
-      Wire::Detail::write_v2_header(
-          datagram,
-          record,
-          Wire::WireValueType::STRING,
-          5U);
+      Wire::Detail::write_v2_header(datagram, record, Wire::WireValueType::STRING, 5U);
 
   assert(status == Wire::WireStatus::SUCCESS);
-  assert(datagram[TYPE_OFFSET] ==
-         static_cast<std::uint8_t>(Wire::WireValueType::STRING));
-  assert(Wire::Detail::get_u16(
-             datagram.data() + DESCRIPTION_LENGTH_OFFSET) == 11U);
-  assert(Wire::Detail::get_u16(
-             datagram.data() + VALUE_LENGTH_OFFSET) == 5U);
+  assert(datagram[TYPE_OFFSET] == static_cast<std::uint8_t>(Wire::WireValueType::STRING));
+  assert(Wire::Detail::get_u16(datagram.data() + DESCRIPTION_LENGTH_OFFSET) == 11U);
+  assert(Wire::Detail::get_u16(datagram.data() + VALUE_LENGTH_OFFSET) == 5U);
 }
 
 /*
@@ -220,17 +171,12 @@ void test_writer_records_string_type_and_field_lengths() {
 void test_writer_rejects_incorrect_buffer_size() {
   const MonData::StoredRecord record = make_record("abc");
 
-  for (const std::size_t size : {
-           Wire::V2_HEADER_SIZE + 3U + 8U - 1U,
-           Wire::V2_HEADER_SIZE + 3U + 8U + 1U}) {
+  for (const std::size_t size :
+       {Wire::V2_HEADER_SIZE + 3U + 8U - 1U, Wire::V2_HEADER_SIZE + 3U + 8U + 1U}) {
     std::vector<std::uint8_t> datagram(size, 0U);
 
     const Wire::WireStatus status =
-        Wire::Detail::write_v2_header(
-            datagram,
-            record,
-            Wire::WireValueType::NUMERIC,
-            8U);
+        Wire::Detail::write_v2_header(datagram, record, Wire::WireValueType::NUMERIC, 8U);
 
     assert(status == Wire::WireStatus::INVALID_TOTAL_LENGTH);
   }
@@ -246,27 +192,19 @@ void test_writer_enforces_maximum_datagram_size() {
 
   const MonData::StoredRecord maximum_record =
       make_record(std::string(maximum_description_length, 'A'));
-  std::vector<std::uint8_t> maximum_datagram(
-      Wire::V2_MAX_DATAGRAM_SIZE,
-      0U);
+  std::vector<std::uint8_t> maximum_datagram(Wire::V2_MAX_DATAGRAM_SIZE, 0U);
 
-  assert(Wire::Detail::write_v2_header(
-             maximum_datagram,
-             maximum_record,
-             Wire::WireValueType::NUMERIC,
-             value_length) == Wire::WireStatus::SUCCESS);
+  assert(Wire::Detail::write_v2_header(maximum_datagram, maximum_record,
+                                       Wire::WireValueType::NUMERIC,
+                                       value_length) == Wire::WireStatus::SUCCESS);
 
   const MonData::StoredRecord oversized_record =
       make_record(std::string(maximum_description_length + 1U, 'A'));
-  std::vector<std::uint8_t> oversized_datagram(
-      Wire::V2_MAX_DATAGRAM_SIZE + 1U,
-      0U);
+  std::vector<std::uint8_t> oversized_datagram(Wire::V2_MAX_DATAGRAM_SIZE + 1U, 0U);
 
-  assert(Wire::Detail::write_v2_header(
-             oversized_datagram,
-             oversized_record,
-             Wire::WireValueType::NUMERIC,
-             value_length) == Wire::WireStatus::DATAGRAM_TOO_LARGE);
+  assert(Wire::Detail::write_v2_header(oversized_datagram, oversized_record,
+                                       Wire::WireValueType::NUMERIC,
+                                       value_length) == Wire::WireStatus::DATAGRAM_TOO_LARGE);
 }
 
 /*
@@ -274,34 +212,22 @@ void test_writer_enforces_maximum_datagram_size() {
  */
 void test_writer_rejects_invalid_type_and_field_length() {
   const MonData::StoredRecord normal_record = make_record("");
-  std::vector<std::uint8_t> normal_datagram(
-      Wire::V2_HEADER_SIZE,
-      0U);
+  std::vector<std::uint8_t> normal_datagram(Wire::V2_HEADER_SIZE, 0U);
+
+  assert(Wire::Detail::write_v2_header(normal_datagram, normal_record,
+                                       static_cast<Wire::WireValueType>(0xffU),
+                                       0U) == Wire::WireStatus::INVALID_TYPE);
+
+  const MonData::StoredRecord long_description_record = make_record(
+      std::string(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()) + 1U, 'A'));
+
+  assert(Wire::Detail::write_v2_header(normal_datagram, long_description_record,
+                                       Wire::WireValueType::STRING,
+                                       0U) == Wire::WireStatus::INVALID_FIELD_LENGTH);
 
   assert(Wire::Detail::write_v2_header(
-             normal_datagram,
-             normal_record,
-             static_cast<Wire::WireValueType>(0xffU),
-             0U) == Wire::WireStatus::INVALID_TYPE);
-
-  const MonData::StoredRecord long_description_record =
-      make_record(std::string(
-          static_cast<std::size_t>(
-              std::numeric_limits<std::uint16_t>::max()) + 1U,
-          'A'));
-
-  assert(Wire::Detail::write_v2_header(
-             normal_datagram,
-             long_description_record,
-             Wire::WireValueType::STRING,
-             0U) == Wire::WireStatus::INVALID_FIELD_LENGTH);
-
-  assert(Wire::Detail::write_v2_header(
-             normal_datagram,
-             normal_record,
-             Wire::WireValueType::STRING,
-             static_cast<std::size_t>(
-                 std::numeric_limits<std::uint16_t>::max()) + 1U) ==
+             normal_datagram, normal_record, Wire::WireValueType::STRING,
+             static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()) + 1U) ==
          Wire::WireStatus::INVALID_FIELD_LENGTH);
 }
 
@@ -312,14 +238,12 @@ void test_reader_parses_independent_valid_header() {
   const std::vector<std::uint8_t> datagram = make_valid_datagram();
 
   const Wire::Detail::V2HeaderResult result =
-      Wire::Detail::read_v2_header(
-          datagram.data(),
-          datagram.size());
+      Wire::Detail::read_v2_header(datagram.data(), datagram.size());
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._header.has_value());
 
-  const Wire::Detail::V2Header &header = *result._header;
+  const Wire::Detail::V2Header& header = *result._header;
   assert(header._type == Wire::WireValueType::NUMERIC);
   assert(header._flags == 0U);
   assert(header._total_length == datagram.size());
@@ -335,20 +259,15 @@ void test_reader_parses_independent_valid_header() {
  * 第 0 字节可以读取时先判断版本；只有 V2 才继续检查头部长度。
  */
 void test_reader_rejects_empty_wrong_version_and_short_header() {
-  const Wire::Detail::V2HeaderResult empty =
-      Wire::Detail::read_v2_header(nullptr, 0U);
+  const Wire::Detail::V2HeaderResult empty = Wire::Detail::read_v2_header(nullptr, 0U);
   assert(empty._status == Wire::WireStatus::EMPTY_INPUT);
   assert(!empty._header.has_value());
 
-  const std::vector<std::uint8_t> wrong_version{
-      static_cast<std::uint8_t>(Wire::WireVersion::V1)};
+  const std::vector<std::uint8_t> wrong_version{static_cast<std::uint8_t>(Wire::WireVersion::V1)};
   assert_read_failure(wrong_version, Wire::WireStatus::WRONG_VERSION);
 
-  std::vector<std::uint8_t> short_header(
-      Wire::V2_HEADER_SIZE - 1U,
-      0U);
-  short_header[VERSION_OFFSET] =
-      static_cast<std::uint8_t>(Wire::WireVersion::V2);
+  std::vector<std::uint8_t> short_header(Wire::V2_HEADER_SIZE - 1U, 0U);
+  short_header[VERSION_OFFSET] = static_cast<std::uint8_t>(Wire::WireVersion::V2);
   assert_read_failure(short_header, Wire::WireStatus::SHORT_HEADER);
 }
 
@@ -365,9 +284,8 @@ void test_reader_rejects_invalid_type_flags_and_header_length() {
   assert_read_failure(datagram, Wire::WireStatus::INVALID_FLAGS);
 
   datagram = make_valid_datagram();
-  Wire::Detail::put_u16(
-      datagram.data() + HEADER_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE - 1U));
+  Wire::Detail::put_u16(datagram.data() + HEADER_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE - 1U));
   assert_read_failure(datagram, Wire::WireStatus::INVALID_HEADER_LENGTH);
 }
 
@@ -376,15 +294,13 @@ void test_reader_rejects_invalid_type_flags_and_header_length() {
  */
 void test_reader_strictly_validates_total_length() {
   std::vector<std::uint8_t> datagram = make_valid_datagram();
-  Wire::Detail::put_u16(
-      datagram.data() + TOTAL_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(datagram.size() - 1U));
+  Wire::Detail::put_u16(datagram.data() + TOTAL_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(datagram.size() - 1U));
   assert_read_failure(datagram, Wire::WireStatus::INVALID_TOTAL_LENGTH);
 
   datagram = make_valid_datagram();
-  Wire::Detail::put_u16(
-      datagram.data() + TOTAL_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(Wire::V2_MAX_DATAGRAM_SIZE + 1U));
+  Wire::Detail::put_u16(datagram.data() + TOTAL_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(Wire::V2_MAX_DATAGRAM_SIZE + 1U));
   assert_read_failure(datagram, Wire::WireStatus::DATAGRAM_TOO_LARGE);
 
   datagram = make_valid_datagram();
@@ -401,9 +317,7 @@ void test_reader_strictly_validates_total_length() {
  */
 void test_reader_rejects_inconsistent_field_lengths() {
   std::vector<std::uint8_t> datagram = make_valid_datagram();
-  Wire::Detail::put_u16(
-      datagram.data() + DESCRIPTION_LENGTH_OFFSET,
-      4U);
+  Wire::Detail::put_u16(datagram.data() + DESCRIPTION_LENGTH_OFFSET, 4U);
 
   assert_read_failure(datagram, Wire::WireStatus::INVALID_FIELD_LENGTH);
 }
@@ -413,21 +327,15 @@ void test_reader_rejects_inconsistent_field_lengths() {
  */
 void test_reader_validates_nanoseconds_range() {
   std::vector<std::uint8_t> datagram = make_valid_datagram();
-  Wire::Detail::put_u32(
-      datagram.data() + NANOSECONDS_OFFSET,
-      999'999'999U);
+  Wire::Detail::put_u32(datagram.data() + NANOSECONDS_OFFSET, 999'999'999U);
 
   const Wire::Detail::V2HeaderResult maximum_valid =
-      Wire::Detail::read_v2_header(
-          datagram.data(),
-          datagram.size());
+      Wire::Detail::read_v2_header(datagram.data(), datagram.size());
   assert(maximum_valid._status == Wire::WireStatus::SUCCESS);
   assert(maximum_valid._header.has_value());
   assert(maximum_valid._header->_nanoseconds == 999'999'999U);
 
-  Wire::Detail::put_u32(
-      datagram.data() + NANOSECONDS_OFFSET,
-      1'000'000'000U);
+  Wire::Detail::put_u32(datagram.data() + NANOSECONDS_OFFSET, 1'000'000'000U);
   assert_read_failure(datagram, Wire::WireStatus::INVALID_TIMESTAMP);
 }
 
@@ -435,13 +343,10 @@ void test_reader_validates_nanoseconds_range() {
  * 40 字节头部加 1160 字节载荷是合法 V2 数据报的最大边界。
  */
 void test_reader_accepts_exactly_1200_bytes() {
-  const std::vector<std::uint8_t> datagram =
-      make_valid_datagram(1152U, 8U);
+  const std::vector<std::uint8_t> datagram = make_valid_datagram(1152U, 8U);
 
   const Wire::Detail::V2HeaderResult result =
-      Wire::Detail::read_v2_header(
-          datagram.data(),
-          datagram.size());
+      Wire::Detail::read_v2_header(datagram.data(), datagram.size());
 
   assert(datagram.size() == Wire::V2_MAX_DATAGRAM_SIZE);
   assert(result._status == Wire::WireStatus::SUCCESS);
@@ -450,7 +355,7 @@ void test_reader_accepts_exactly_1200_bytes() {
   assert(result._header->_value_length == 8U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_writer_matches_v2_header_golden_bytes();

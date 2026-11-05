@@ -1,3 +1,4 @@
+#include "ftp/metadata_service.h"
 #include <openssl/asn1.h>
 #include <charconv>
 #include <cstring>
@@ -9,7 +10,6 @@
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
 #include "ftp/transfer_validation.h"
-#include "ftp/metadata_service.h"
 
 namespace TLSS::FileStorage {
 MetadataService::MetadataService(BASE::DbConnectionPool& pool)
@@ -141,8 +141,9 @@ StorageContext<std::string> MetadataService::move_dir_by_current_dir_db(
   return {true, *row[0]};
 }
 
-bool MetadataService::create_dir_db(const std::string& username, const std::string& current_directory,
-                                  const std::string& directory) {
+bool MetadataService::create_dir_db(const std::string& username,
+                                    const std::string& current_directory,
+                                    const std::string& directory) {
   if (username.empty() || current_directory.empty() || directory.empty()) {
     return false;
   }
@@ -186,8 +187,8 @@ bool MetadataService::create_dir_db(const std::string& username, const std::stri
 }
 
 StorageContext<std::string> MetadataService::prepare_upload(const std::string& username,
-                                                          const std::string& directory,
-                                                          const std::string& file_name) {
+                                                            const std::string& directory,
+                                                            const std::string& file_name) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
     return {false, {}};
   }
@@ -225,8 +226,8 @@ StorageContext<std::string> MetadataService::prepare_upload(const std::string& u
 }
 
 bool MetadataService::commit_upload_db(const std::string& username, const std::string& parent_id,
-                                     const std::string& directory, const std::string& file_name,
-                                     const std::string& hash) {
+                                       const std::string& directory, const std::string& file_name,
+                                       const std::string& hash) {
   if (!Transfer::valid_name(file_name) || !Transfer::valid_hash(hash)) {
     return false;
   }
@@ -259,8 +260,8 @@ bool MetadataService::commit_upload_db(const std::string& username, const std::s
 }
 
 StorageContext<std::string> MetadataService::find_download_hash_db(const std::string& username,
-                                                                 const std::string& directory,
-                                                                 const std::string& file_name) {
+                                                                   const std::string& directory,
+                                                                   const std::string& file_name) {
   if (!Transfer::valid_name(file_name)) {
     return {false, {}};
   }
@@ -317,8 +318,8 @@ StorageContext<std::string> MetadataService::move_dir_by_current_dir(
 }
 
 StorageContext<std::string> MetadataService::find_download_hash(const std::string& username,
-                                                              const std::string& directory,
-                                                              const std::string& file_name) {
+                                                                const std::string& directory,
+                                                                const std::string& file_name) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
     return {false, {}};
   }
@@ -330,7 +331,7 @@ StorageContext<std::string> MetadataService::find_download_hash(const std::strin
 }
 
 bool MetadataService::create_dir(const std::string& username, const std::string& current_directory,
-                               const std::string& directory) {
+                                 const std::string& directory) {
   if (username.empty() || current_directory.empty() || directory.empty()) {
     return false;
   }
@@ -341,8 +342,8 @@ bool MetadataService::create_dir(const std::string& username, const std::string&
 }
 
 bool MetadataService::commit_upload(const std::string& username, const std::string& parent_id,
-                                  const std::string& directory, const std::string& file_name,
-                                  const std::string& hash) {
+                                    const std::string& directory, const std::string& file_name,
+                                    const std::string& hash) {
   if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
       !Transfer::valid_hash(hash)) {
     return false;

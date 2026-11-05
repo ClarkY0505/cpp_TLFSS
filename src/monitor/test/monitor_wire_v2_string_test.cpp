@@ -35,38 +35,24 @@ inline constexpr std::uint32_t TEST_LEVEL = 0x55667788U;
 inline constexpr std::uint32_t TEST_FID = 0x99aabbccU;
 inline constexpr std::uint32_t TEST_EID = 0xddeeff00U;
 
-const MonData::MonitorKey TEST_KEY{
-    TEST_MID,
-    TEST_LEVEL,
-    TEST_FID,
-    TEST_EID};
+const MonData::MonitorKey TEST_KEY{TEST_MID, TEST_LEVEL, TEST_FID, TEST_EID};
 
 MonData::StoredRecord make_string_record(
-    std::string value,
-    std::string description = {},
+    std::string value, std::string description = {},
     MonData::MonitorTimestamp timestamp = MonData::MonitorTimestamp{},
     MonData::MonitorKey key = TEST_KEY) {
-  return MonData::StoredRecord{
-      MonData::MonitorData{
-          key,
-          std::move(description),
-          std::move(value)},
-      timestamp};
+  return MonData::StoredRecord{MonData::MonitorData{key, std::move(description), std::move(value)},
+                               timestamp};
 }
 
-const std::string &string_value(
-    const Wire::DecodedRecord &record) {
-  const auto *value =
-      std::get_if<std::string>(
-          &record._data._value);
+const std::string& string_value(const Wire::DecodedRecord& record) {
+  const auto* value = std::get_if<std::string>(&record._data._value);
 
   assert(value != nullptr);
   return *value;
 }
 
-void assert_decode_failure(
-    const Wire::DecodeResult &result,
-    Wire::WireStatus expected_status) {
+void assert_decode_failure(const Wire::DecodeResult& result, Wire::WireStatus expected_status) {
   assert(result._status == expected_status);
   assert(!result._record.has_value());
 }
@@ -77,61 +63,43 @@ void assert_decode_failure(
  * description 和 value 都按显式长度复制，不增加 NUL。使用该报文测试
  * decode_v2()，可以避免编码器与解码器使用相同错误边界时伪造往返成功。
  */
-std::vector<std::uint8_t> make_raw_string_datagram(
-    const std::string &description,
-    const std::string &value,
-    std::int64_t seconds = INT64_C(123),
-    std::uint32_t nanoseconds = 456'789'012U) {
-  const std::size_t total_length =
-      Wire::V2_HEADER_SIZE +
-      description.size() +
-      value.size();
+std::vector<std::uint8_t> make_raw_string_datagram(const std::string& description,
+                                                   const std::string& value,
+                                                   std::int64_t seconds = INT64_C(123),
+                                                   std::uint32_t nanoseconds = 456'789'012U) {
+  const std::size_t total_length = Wire::V2_HEADER_SIZE + description.size() + value.size();
 
   assert(total_length <= Wire::V2_MAX_DATAGRAM_SIZE);
 
   std::vector<std::uint8_t> bytes(total_length, 0U);
 
-  bytes[VERSION_OFFSET] =
-      static_cast<std::uint8_t>(Wire::WireVersion::V2);
-  bytes[TYPE_OFFSET] =
-      static_cast<std::uint8_t>(Wire::WireValueType::STRING);
+  bytes[VERSION_OFFSET] = static_cast<std::uint8_t>(Wire::WireVersion::V2);
+  bytes[TYPE_OFFSET] = static_cast<std::uint8_t>(Wire::WireValueType::STRING);
 
   Wire::Detail::put_u16(bytes.data() + FLAGS_OFFSET, 0U);
-  Wire::Detail::put_u16(
-      bytes.data() + TOTAL_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(total_length));
-  Wire::Detail::put_u16(
-      bytes.data() + HEADER_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE));
+  Wire::Detail::put_u16(bytes.data() + TOTAL_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(total_length));
+  Wire::Detail::put_u16(bytes.data() + HEADER_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(Wire::V2_HEADER_SIZE));
   Wire::Detail::put_u32(bytes.data() + MID_OFFSET, TEST_MID);
   Wire::Detail::put_u32(bytes.data() + LEVEL_OFFSET, TEST_LEVEL);
   Wire::Detail::put_u32(bytes.data() + FID_OFFSET, TEST_FID);
   Wire::Detail::put_u32(bytes.data() + EID_OFFSET, TEST_EID);
-  Wire::Detail::put_i64_twos_complement(
-      bytes.data() + SECONDS_OFFSET,
-      seconds);
-  Wire::Detail::put_u32(
-      bytes.data() + NANOSECONDS_OFFSET,
-      nanoseconds);
-  Wire::Detail::put_u16(
-      bytes.data() + DESCRIPTION_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(description.size()));
-  Wire::Detail::put_u16(
-      bytes.data() + VALUE_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(value.size()));
+  Wire::Detail::put_i64_twos_complement(bytes.data() + SECONDS_OFFSET, seconds);
+  Wire::Detail::put_u32(bytes.data() + NANOSECONDS_OFFSET, nanoseconds);
+  Wire::Detail::put_u16(bytes.data() + DESCRIPTION_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(description.size()));
+  Wire::Detail::put_u16(bytes.data() + VALUE_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(value.size()));
 
   if (!description.empty()) {
-    std::copy_n(
-        reinterpret_cast<const std::uint8_t *>(description.data()),
-        description.size(),
-        bytes.data() + Wire::V2_HEADER_SIZE);
+    std::copy_n(reinterpret_cast<const std::uint8_t*>(description.data()), description.size(),
+                bytes.data() + Wire::V2_HEADER_SIZE);
   }
 
   if (!value.empty()) {
-    std::copy_n(
-        reinterpret_cast<const std::uint8_t *>(value.data()),
-        value.size(),
-        bytes.data() + Wire::V2_HEADER_SIZE + description.size());
+    std::copy_n(reinterpret_cast<const std::uint8_t*>(value.data()), value.size(),
+                bytes.data() + Wire::V2_HEADER_SIZE + description.size());
   }
 
   return bytes;
@@ -142,23 +110,16 @@ std::vector<std::uint8_t> make_raw_string_datagram(
  * 不存在用于表示空字符串的额外 NUL 字节。
  */
 void test_empty_string_round_trip() {
-  const MonData::StoredRecord source =
-      make_string_record("", "empty-string");
+  const MonData::StoredRecord source = make_string_record("", "empty-string");
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
-  assert(encoded._bytes.size() ==
-         Wire::V2_HEADER_SIZE + source._data._description.size());
-  assert(encoded._bytes[TYPE_OFFSET] ==
-         static_cast<std::uint8_t>(Wire::WireValueType::STRING));
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 0U);
+  assert(encoded._bytes.size() == Wire::V2_HEADER_SIZE + source._data._description.size());
+  assert(encoded._bytes[TYPE_OFFSET] == static_cast<std::uint8_t>(Wire::WireValueType::STRING));
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 0U);
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -172,27 +133,20 @@ void test_empty_string_round_trip() {
  * 使用的 NUL 终止符。
  */
 void test_ascii_encoding_has_no_trailing_nul() {
-  const MonData::StoredRecord source =
-      make_string_record("hello");
+  const MonData::StoredRecord source = make_string_record("hello");
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
   const std::vector<std::uint8_t> expected_payload{
-      static_cast<std::uint8_t>('h'),
-      static_cast<std::uint8_t>('e'),
-      static_cast<std::uint8_t>('l'),
-      static_cast<std::uint8_t>('l'),
+      static_cast<std::uint8_t>('h'), static_cast<std::uint8_t>('e'),
+      static_cast<std::uint8_t>('l'), static_cast<std::uint8_t>('l'),
       static_cast<std::uint8_t>('o')};
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(encoded._bytes.size() == Wire::V2_HEADER_SIZE + 5U);
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 5U);
-  assert(std::equal(
-      expected_payload.begin(),
-      expected_payload.end(),
-      encoded._bytes.begin() +
-          static_cast<std::ptrdiff_t>(Wire::V2_HEADER_SIZE)));
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 5U);
+  assert(std::equal(expected_payload.begin(), expected_payload.end(),
+                    encoded._bytes.begin() + static_cast<std::ptrdiff_t>(Wire::V2_HEADER_SIZE)));
   assert(encoded._bytes.back() == static_cast<std::uint8_t>('o'));
 }
 
@@ -200,11 +154,9 @@ void test_ascii_encoding_has_no_trailing_nul() {
  * 使用独立构造的报文验证 ASCII 解码，确保读取端不依赖尾部 NUL。
  */
 void test_ascii_decoding_from_independent_datagram() {
-  const std::vector<std::uint8_t> bytes =
-      make_raw_string_datagram("status", "running");
+  const std::vector<std::uint8_t> bytes = make_raw_string_datagram("status", "running");
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(bytes.data(), bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(bytes.data(), bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -220,23 +172,16 @@ void test_ascii_decoding_from_independent_datagram() {
 void test_utf8_chinese_round_trip() {
   const std::string source_value = u8"系统正常";
   const std::string description = u8"中文描述";
-  const MonData::StoredRecord source =
-      make_string_record(source_value, description);
+  const MonData::StoredRecord source = make_string_record(source_value, description);
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + DESCRIPTION_LENGTH_OFFSET) ==
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + DESCRIPTION_LENGTH_OFFSET) ==
          description.size());
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + VALUE_LENGTH_OFFSET) ==
-         source_value.size());
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + VALUE_LENGTH_OFFSET) == source_value.size());
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -249,18 +194,13 @@ void test_utf8_chinese_round_trip() {
  */
 void test_embedded_nul_round_trip() {
   const std::string source_value{"ab\0cd", 5U};
-  const MonData::StoredRecord source =
-      make_string_record(source_value, "binary-string");
+  const MonData::StoredRecord source = make_string_record(source_value, "binary-string");
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
   assert(encoded._status == Wire::WireStatus::SUCCESS);
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 5U);
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 5U);
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -274,28 +214,16 @@ void test_embedded_nul_round_trip() {
  * 完整往返。
  */
 void test_string_metadata_round_trip() {
-  const MonData::MonitorKey key{
-      0x01020304U,
-      0x11121314U,
-      0x21222324U,
-      0x31323334U};
-  const MonData::MonitorTimestamp timestamp{
-      std::chrono::seconds{1'700'000'000} +
-      std::chrono::nanoseconds{123'456'789}};
+  const MonData::MonitorKey key{0x01020304U, 0x11121314U, 0x21222324U, 0x31323334U};
+  const MonData::MonitorTimestamp timestamp{std::chrono::seconds{1'700'000'000} +
+                                            std::chrono::nanoseconds{123'456'789}};
   const MonData::StoredRecord source =
-      make_string_record(
-          "running",
-          "service status",
-          timestamp,
-          key);
+      make_string_record("running", "service status", timestamp, key);
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
   assert(encoded._status == Wire::WireStatus::SUCCESS);
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -311,15 +239,11 @@ void test_string_metadata_round_trip() {
  */
 void test_v2_string_is_not_limited_to_63_bytes() {
   const std::string source_value(64U, 'A');
-  const Wire::EncodeResult encoded =
-      Wire::encode_v2(make_string_record(source_value));
+  const Wire::EncodeResult encoded = Wire::encode_v2(make_string_record(source_value));
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -332,22 +256,16 @@ void test_v2_string_is_not_limited_to_63_bytes() {
 void test_combined_payload_exactly_1200_bytes() {
   const std::string description(400U, 'D');
   const std::string source_value(760U, 'V');
-  const MonData::StoredRecord source =
-      make_string_record(source_value, description);
+  const MonData::StoredRecord source = make_string_record(source_value, description);
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(encoded._bytes.size() == Wire::V2_MAX_DATAGRAM_SIZE);
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + DESCRIPTION_LENGTH_OFFSET) == 400U);
-  assert(Wire::Detail::get_u16(
-             encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 760U);
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + DESCRIPTION_LENGTH_OFFSET) == 400U);
+  assert(Wire::Detail::get_u16(encoded._bytes.data() + VALUE_LENGTH_OFFSET) == 760U);
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(
-          encoded._bytes.data(),
-          encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
@@ -361,9 +279,7 @@ void test_combined_payload_exactly_1200_bytes() {
  */
 void test_combined_payload_over_1200_is_rejected() {
   const MonData::StoredRecord source =
-      make_string_record(
-          std::string(761U, 'V'),
-          std::string(400U, 'D'));
+      make_string_record(std::string(761U, 'V'), std::string(400U, 'D'));
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
@@ -376,71 +292,55 @@ void test_combined_payload_over_1200_is_rejected() {
  * 不一致，因此必须拒绝。
  */
 void test_truncated_string_datagram_is_rejected() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v2(
-          make_string_record("hello", "description"));
+  const Wire::EncodeResult encoded = Wire::encode_v2(make_string_record("hello", "description"));
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
 
   std::vector<std::uint8_t> truncated = encoded._bytes;
   truncated.pop_back();
 
-  assert_decode_failure(
-      Wire::decode_v2(
-          truncated.data(),
-          truncated.size()),
-      Wire::WireStatus::INVALID_TOTAL_LENGTH);
+  assert_decode_failure(Wire::decode_v2(truncated.data(), truncated.size()),
+                        Wire::WireStatus::INVALID_TOTAL_LENGTH);
 }
 
 /*
  * 单独增加 description_length 会让字段长度之和大于实际载荷。
  */
 void test_forged_description_length_is_rejected() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v2(
-          make_string_record("hello", "description"));
+  const Wire::EncodeResult encoded = Wire::encode_v2(make_string_record("hello", "description"));
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
 
   std::vector<std::uint8_t> forged = encoded._bytes;
   const std::uint16_t original_length =
-      Wire::Detail::get_u16(
-          forged.data() + DESCRIPTION_LENGTH_OFFSET);
+      Wire::Detail::get_u16(forged.data() + DESCRIPTION_LENGTH_OFFSET);
 
-  Wire::Detail::put_u16(
-      forged.data() + DESCRIPTION_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(original_length + 1U));
+  Wire::Detail::put_u16(forged.data() + DESCRIPTION_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(original_length + 1U));
 
-  assert_decode_failure(
-      Wire::decode_v2(forged.data(), forged.size()),
-      Wire::WireStatus::INVALID_FIELD_LENGTH);
+  assert_decode_failure(Wire::decode_v2(forged.data(), forged.size()),
+                        Wire::WireStatus::INVALID_FIELD_LENGTH);
 }
 
 /*
  * 单独增加 value_length 同样会破坏字段长度总和。
  */
 void test_forged_value_length_is_rejected() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v2(
-          make_string_record("hello", "description"));
+  const Wire::EncodeResult encoded = Wire::encode_v2(make_string_record("hello", "description"));
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
 
   std::vector<std::uint8_t> forged = encoded._bytes;
-  const std::uint16_t original_length =
-      Wire::Detail::get_u16(
-          forged.data() + VALUE_LENGTH_OFFSET);
+  const std::uint16_t original_length = Wire::Detail::get_u16(forged.data() + VALUE_LENGTH_OFFSET);
 
-  Wire::Detail::put_u16(
-      forged.data() + VALUE_LENGTH_OFFSET,
-      static_cast<std::uint16_t>(original_length + 1U));
+  Wire::Detail::put_u16(forged.data() + VALUE_LENGTH_OFFSET,
+                        static_cast<std::uint16_t>(original_length + 1U));
 
-  assert_decode_failure(
-      Wire::decode_v2(forged.data(), forged.size()),
-      Wire::WireStatus::INVALID_FIELD_LENGTH);
+  assert_decode_failure(Wire::decode_v2(forged.data(), forged.size()),
+                        Wire::WireStatus::INVALID_FIELD_LENGTH);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_empty_string_round_trip();

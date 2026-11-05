@@ -1,9 +1,9 @@
+#include "reliable_alarm_collector.h"
 #include "alarm_protocol.h"
 #include "alarm_spool.h"
 #include "alarm_stream_decoder.h"
 #include "monitor_collector.h"
 #include "monitor_wire.h"
-#include "reliable_alarm_collector.h"
 #include "wake_pipe.h"
 
 #include <arpa/inet.h>
@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <fcntl.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,7 +23,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <fcntl.h>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -57,8 +57,9 @@ constexpr std::size_t CLIENT_READ_CHUNK =
     AlarmWire::ALARM_HEADER_SIZE * MAX_FRAMES_PER_CLIENT_ROUND;
 
 class UniqueFd final {
-public:
-  explicit UniqueFd(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit UniqueFd(int fd = -1) noexcept
+      : _fd(fd) {}
 
   ~UniqueFd() {
     if (_fd >= 0) {
@@ -66,12 +67,13 @@ public:
     }
   }
 
-  UniqueFd(const UniqueFd &) = delete;
-  UniqueFd &operator=(const UniqueFd &) = delete;
+  UniqueFd(const UniqueFd&) = delete;
+  UniqueFd& operator=(const UniqueFd&) = delete;
 
-  UniqueFd(UniqueFd &&other) noexcept : _fd(other.release()) {}
+  UniqueFd(UniqueFd&& other) noexcept
+      : _fd(other.release()) {}
 
-  UniqueFd &operator=(UniqueFd &&other) noexcept {
+  UniqueFd& operator=(UniqueFd&& other) noexcept {
     if (this != &other) {
       if (_fd >= 0) {
         (void)::close(_fd);
@@ -95,32 +97,28 @@ public:
     return fd;
   }
 
-private:
+ private:
   int _fd{-1};
 };
 
 bool set_nonblocking_and_cloexec(int fd) noexcept {
   const int status_flags = ::fcntl(fd, F_GETFL, 0);
 
-  if (status_flags < 0 ||
-      ::fcntl(fd, F_SETFL, status_flags | O_NONBLOCK) != 0) {
+  if (status_flags < 0 || ::fcntl(fd, F_SETFL, status_flags | O_NONBLOCK) != 0) {
     return false;
   }
 
   const int descriptor_flags = ::fcntl(fd, F_GETFD, 0);
 
-  return descriptor_flags >= 0 &&
-         ::fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0;
+  return descriptor_flags >= 0 && ::fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0;
 }
 
-bool valid_config(const ReliableAlarmCollectorConfig &config) noexcept {
-
-  return !config._bind_host.empty() && !config._inbox_dir.empty() &&
-         config._max_clients != 0U &&
+bool valid_config(const ReliableAlarmCollectorConfig& config) noexcept {
+  return !config._bind_host.empty() && !config._inbox_dir.empty() && config._max_clients != 0U &&
          config._client_timeout > std::chrono::milliseconds::zero();
 }
 
-bool engine_accepts_recovery(const Engine &engine) noexcept {
+bool engine_accepts_recovery(const Engine& engine) noexcept {
   const EnginePhase phase = engine.get_phase();
 
   return phase == EnginePhase::READY || phase == EnginePhase::RUNNING;
@@ -131,28 +129,21 @@ struct AlarmIdentity final {
   AlarmWire::AlarmMessageId _message_id{};
 };
 
-bool operator<(const AlarmIdentity &lhs, const AlarmIdentity &rhs) noexcept {
-  return std::tie(lhs._source_id, lhs._message_id) <
-         std::tie(rhs._source_id, rhs._message_id);
+bool operator<(const AlarmIdentity& lhs, const AlarmIdentity& rhs) noexcept {
+  return std::tie(lhs._source_id, lhs._message_id) < std::tie(rhs._source_id, rhs._message_id);
 }
 
-AlarmIdentity identity_of(const AlarmWire::AlarmFrame &frame) noexcept {
-
+AlarmIdentity identity_of(const AlarmWire::AlarmFrame& frame) noexcept {
   return AlarmIdentity{frame._source_id, frame._message_id};
 }
 
 bool ingest_succeeded(MonData::UpdateStatus status) noexcept {
-
-  return status == MonData::UpdateStatus::INSERTED ||
-         status == MonData::UpdateStatus::UPDATED ||
+  return status == MonData::UpdateStatus::INSERTED || status == MonData::UpdateStatus::UPDATED ||
          status == MonData::UpdateStatus::UNCHANGED;
 }
 
-std::optional<Wire::DecodedRecord>
-decode_reliable_payload(const AlarmWire::AlarmFrame &frame) {
-
-  if (frame._type != AlarmWire::AlarmFrameType::ALARM ||
-      frame._payload.empty()) {
+std::optional<Wire::DecodedRecord> decode_reliable_payload(const AlarmWire::AlarmFrame& frame) {
+  if (frame._type != AlarmWire::AlarmFrameType::ALARM || frame._payload.empty()) {
     return std::nullopt;
   }
 
@@ -162,11 +153,9 @@ decode_reliable_payload(const AlarmWire::AlarmFrame &frame) {
    * 这里不能调用统一 decode() 后接受 V1，因为可靠告警需要保留
    * description 和生产端 changed_at。
    */
-  Wire::DecodeResult decoded =
-      Wire::decode_v2(frame._payload.data(), frame._payload.size());
+  Wire::DecodeResult decoded = Wire::decode_v2(frame._payload.data(), frame._payload.size());
 
-  if (decoded._status != Wire::WireStatus::SUCCESS ||
-      !decoded._record.has_value() ||
+  if (decoded._status != Wire::WireStatus::SUCCESS || !decoded._record.has_value() ||
       decoded._record->_version != Wire::WireVersion::V2 ||
       !decoded._record->_changed_at.has_value()) {
     return std::nullopt;
@@ -175,14 +164,12 @@ decode_reliable_payload(const AlarmWire::AlarmFrame &frame) {
   return std::move(decoded._record);
 }
 
-int poll_timeout(const std::vector<Deadline> &deadlines) noexcept {
-
+int poll_timeout(const std::vector<Deadline>& deadlines) noexcept {
   if (deadlines.empty()) {
     return -1;
   }
 
-  const Deadline earliest =
-      *std::min_element(deadlines.begin(), deadlines.end());
+  const Deadline earliest = *std::min_element(deadlines.begin(), deadlines.end());
 
   const Deadline now = Clock::now();
 
@@ -192,8 +179,7 @@ int poll_timeout(const std::vector<Deadline> &deadlines) noexcept {
 
   const Clock::duration remaining = earliest - now;
 
-  auto milliseconds =
-      std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+  auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
 
   if (milliseconds < remaining) {
     milliseconds += std::chrono::milliseconds{1};
@@ -206,7 +192,7 @@ int poll_timeout(const std::vector<Deadline> &deadlines) noexcept {
   return static_cast<int>(milliseconds.count());
 }
 
-} // namespace
+}  // namespace
 
 struct ReliableAlarmCollector::Impl final {
   struct PendingWrite final {
@@ -216,7 +202,8 @@ struct ReliableAlarmCollector::Impl final {
 
   struct Client final {
     explicit Client(int input_fd)
-        : _fd(input_fd), _last_activity(Clock::now()) {}
+        : _fd(input_fd)
+        , _last_activity(Clock::now()) {}
 
     int _fd{-1};
     AlarmWire::AlarmStreamDecoder _decoder;
@@ -232,35 +219,36 @@ struct ReliableAlarmCollector::Impl final {
     Wire::DecodedRecord _record;
   };
 
-  Impl(Engine &input_engine, const ReliableAlarmCollectorConfig &input_config)
-      : _engine(input_engine), _config(input_config) {}
+  Impl(Engine& input_engine, const ReliableAlarmCollectorConfig& input_config)
+      : _engine(input_engine)
+      , _config(input_config) {}
 
-  ~Impl() { stop(); }
+  ~Impl() {
+    stop();
+  }
 
   bool initialize();
   bool recover_inbox();
-  bool collect_recovery_paths(std::vector<fs::path> &paths);
+  bool collect_recovery_paths(std::vector<fs::path>& paths);
   bool open_listener();
   void run() noexcept;
   bool poll_once();
   void accept_clients();
-  bool read_client(Client &client);
-  bool write_client(Client &client);
-  bool process_frame(Client &client, AlarmWire::AlarmFrame frame);
-  bool process_alarm(Client &client, AlarmWire::AlarmFrame frame);
-  bool queue_control(Client &client, AlarmWire::AlarmFrameType type,
-                     const AlarmWire::AlarmFrame &request);
+  bool read_client(Client& client);
+  bool write_client(Client& client);
+  bool process_frame(Client& client, AlarmWire::AlarmFrame frame);
+  bool process_alarm(Client& client, AlarmWire::AlarmFrame frame);
+  bool queue_control(Client& client, AlarmWire::AlarmFrameType type,
+                     const AlarmWire::AlarmFrame& request);
 
-  std::optional<Wire::DecodedRecord>
-  load_persisted_record(const fs::path &path);
+  std::optional<Wire::DecodedRecord> load_persisted_record(const fs::path& path);
 
   void close_marked_clients() noexcept;
   void close_all_clients() noexcept;
   void close_listener() noexcept;
   void stop() noexcept;
   ReliableAlarmCollectorStatus status() const;
-  void record_stream_failure(
-      const AlarmWire::AlarmStreamFeedResult &result) noexcept;
+  void record_stream_failure(const AlarmWire::AlarmStreamFeedResult& result) noexcept;
   void record_protocol_error() noexcept;
   void record_persist_failure() noexcept;
   void record_duplicate() noexcept;
@@ -268,8 +256,8 @@ struct ReliableAlarmCollector::Impl final {
   void record_rejected_client() noexcept;
   void update_client_count() noexcept;
 
-  Engine &_engine;
-  const ReliableAlarmCollectorConfig &_config;
+  Engine& _engine;
+  const ReliableAlarmCollectorConfig& _config;
   std::unique_ptr<AlarmWire::AlarmSpool> _spool;
   WakeupPipe _wakeup;
   std::atomic<bool> _stop{false};
@@ -312,10 +300,9 @@ bool ReliableAlarmCollector::Impl::initialize() {
   }
 
   try {
-    _spool =
-        std::make_unique<AlarmWire::AlarmSpool>(AlarmWire::AlarmSpoolConfig{
-            _config._inbox_dir, AlarmWire::AlarmSpoolKind::INBOX, 0U});
-  } catch (const std::bad_alloc &) {
+    _spool = std::make_unique<AlarmWire::AlarmSpool>(
+        AlarmWire::AlarmSpoolConfig{_config._inbox_dir, AlarmWire::AlarmSpoolKind::INBOX, 0U});
+  } catch (const std::bad_alloc&) {
     _setup_status = ReliableAlarmCollectorSetupStatus::SPOOL_ERROR;
     _setup_error = ENOMEM;
     return false;
@@ -337,11 +324,11 @@ bool ReliableAlarmCollector::Impl::initialize() {
 
       return false;
     }
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     _setup_status = ReliableAlarmCollectorSetupStatus::RECOVERY_ERROR;
     _setup_error = ENOMEM;
     return false;
-  } catch (const fs::filesystem_error &error) {
+  } catch (const fs::filesystem_error& error) {
     _setup_status = ReliableAlarmCollectorSetupStatus::RECOVERY_ERROR;
     _setup_error = error.code().value();
     return false;
@@ -371,15 +358,17 @@ bool ReliableAlarmCollector::Impl::initialize() {
   _active.store(true, std::memory_order_release);
 
   try {
-    _worker = std::thread([this] { run(); });
-  } catch (const std::system_error &error) {
+    _worker = std::thread([this] {
+      run();
+    });
+  } catch (const std::system_error& error) {
     _active.store(false, std::memory_order_release);
     close_listener();
 
     _setup_status = ReliableAlarmCollectorSetupStatus::THREAD_ERROR;
     _setup_error = error.code().value();
     return false;
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     _active.store(false, std::memory_order_release);
     close_listener();
 
@@ -393,15 +382,12 @@ bool ReliableAlarmCollector::Impl::initialize() {
   return true;
 }
 
-bool ReliableAlarmCollector::Impl::collect_recovery_paths(
-    std::vector<fs::path> &paths) {
-
+bool ReliableAlarmCollector::Impl::collect_recovery_paths(std::vector<fs::path>& paths) {
   const fs::path accepted_directory = _config._inbox_dir / "accepted";
 
   std::error_code error;
 
-  fs::recursive_directory_iterator iterator(accepted_directory,
-                                            fs::directory_options::none, error);
+  fs::recursive_directory_iterator iterator(accepted_directory, fs::directory_options::none, error);
 
   const fs::recursive_directory_iterator end;
 
@@ -444,7 +430,7 @@ bool ReliableAlarmCollector::Impl::recover_inbox() {
   std::vector<RecoveryItem> records;
   records.reserve(paths.size());
 
-  for (const fs::path &path : paths) {
+  for (const fs::path& path : paths) {
     AlarmWire::AlarmSpoolReadResult stored = _spool->read(path);
 
     /*
@@ -460,11 +446,10 @@ bool ReliableAlarmCollector::Impl::recover_inbox() {
       return false;
     }
 
-    AlarmWire::AlarmDecodeResult frame = AlarmWire::decode_alarm_frame(
-        stored._bytes.data(), stored._bytes.size());
+    AlarmWire::AlarmDecodeResult frame =
+        AlarmWire::decode_alarm_frame(stored._bytes.data(), stored._bytes.size());
 
-    if (!frame.success() ||
-        frame._frame->_type != AlarmWire::AlarmFrameType::ALARM) {
+    if (!frame.success() || frame._frame->_type != AlarmWire::AlarmFrameType::ALARM) {
       const auto quarantined = _spool->quarantine(stored._path);
 
       if (!quarantined.success()) {
@@ -492,24 +477,19 @@ bool ReliableAlarmCollector::Impl::recover_inbox() {
       continue;
     }
 
-    records.push_back(RecoveryItem{stored._path, std::move(*frame._frame),
-                                   std::move(*decoded)});
+    records.push_back(RecoveryItem{stored._path, std::move(*frame._frame), std::move(*decoded)});
   }
 
   /*
    * 文件名包含随机 message ID，不能用目录遍历顺序恢复。
    */
-  std::sort(records.begin(), records.end(),
-            [](const RecoveryItem &lhs, const RecoveryItem &rhs) {
-              return std::tie(lhs._frame._timestamp_ms, lhs._frame._source_id,
-                              lhs._frame._message_id) <
-                     std::tie(rhs._frame._timestamp_ms, rhs._frame._source_id,
-                              rhs._frame._message_id);
-            });
+  std::sort(records.begin(), records.end(), [](const RecoveryItem& lhs, const RecoveryItem& rhs) {
+    return std::tie(lhs._frame._timestamp_ms, lhs._frame._source_id, lhs._frame._message_id) <
+           std::tie(rhs._frame._timestamp_ms, rhs._frame._source_id, rhs._frame._message_id);
+  });
 
-  for (RecoveryItem &item : records) {
-    MonData::UpdateResult result =
-        ingest_decoded_record(_engine, std::move(item._record), true);
+  for (RecoveryItem& item : records) {
+    MonData::UpdateResult result = ingest_decoded_record(_engine, std::move(item._record), true);
 
     if (!ingest_succeeded(result._status)) {
       return false;
@@ -530,24 +510,21 @@ bool ReliableAlarmCollector::Impl::open_listener() {
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
 
-  addrinfo *raw_addresses = nullptr;
+  addrinfo* raw_addresses = nullptr;
 
-  const int address_result = ::getaddrinfo(
-      _config._bind_host.c_str(), service.c_str(), &hints, &raw_addresses);
+  const int address_result =
+      ::getaddrinfo(_config._bind_host.c_str(), service.c_str(), &hints, &raw_addresses);
 
   if (address_result != 0) {
     _setup_error = EADDRNOTAVAIL;
     return false;
   }
 
-  const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> addresses(
-      raw_addresses, &::freeaddrinfo);
+  const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> addresses(raw_addresses,
+                                                                       &::freeaddrinfo);
 
-  for (const addrinfo *address = addresses.get(); address != nullptr;
-       address = address->ai_next) {
-
-    UniqueFd candidate{::socket(address->ai_family, address->ai_socktype,
-                                address->ai_protocol)};
+  for (const addrinfo* address = addresses.get(); address != nullptr; address = address->ai_next) {
+    UniqueFd candidate{::socket(address->ai_family, address->ai_socktype, address->ai_protocol)};
 
     if (candidate.get() < 0) {
       _setup_error = errno;
@@ -569,8 +546,7 @@ bool ReliableAlarmCollector::Impl::open_listener() {
       continue;
     }
 
-    if (::listen(candidate.get(), static_cast<int>(_config._max_clients)) !=
-        0) {
+    if (::listen(candidate.get(), static_cast<int>(_config._max_clients)) != 0) {
       _setup_error = errno;
       continue;
     }
@@ -578,17 +554,16 @@ bool ReliableAlarmCollector::Impl::open_listener() {
     sockaddr_storage bound{};
     socklen_t bound_size = static_cast<socklen_t>(sizeof(bound));
 
-    if (::getsockname(candidate.get(), reinterpret_cast<sockaddr *>(&bound),
-                      &bound_size) != 0) {
+    if (::getsockname(candidate.get(), reinterpret_cast<sockaddr*>(&bound), &bound_size) != 0) {
       _setup_error = errno;
       continue;
     }
 
     if (bound.ss_family == AF_INET) {
-      const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(&bound);
+      const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(&bound);
       _bound_port = ntohs(ipv4->sin_port);
     } else if (bound.ss_family == AF_INET6) {
-      const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&bound);
+      const auto* ipv6 = reinterpret_cast<const sockaddr_in6*>(&bound);
       _bound_port = ntohs(ipv6->sin6_port);
     } else {
       _setup_error = EAFNOSUPPORT;
@@ -602,9 +577,8 @@ bool ReliableAlarmCollector::Impl::open_listener() {
   return false;
 }
 
-std::optional<Wire::DecodedRecord>
-ReliableAlarmCollector::Impl::load_persisted_record(const fs::path &path) {
-
+std::optional<Wire::DecodedRecord> ReliableAlarmCollector::Impl::load_persisted_record(
+    const fs::path& path) {
   AlarmWire::AlarmSpoolReadResult stored = _spool->read(path);
 
   if (!stored.success()) {
@@ -628,18 +602,15 @@ ReliableAlarmCollector::Impl::load_persisted_record(const fs::path &path) {
   return record;
 }
 
-bool ReliableAlarmCollector::Impl::queue_control(
-    Client &client, AlarmWire::AlarmFrameType type,
-    const AlarmWire::AlarmFrame &request) {
-
+bool ReliableAlarmCollector::Impl::queue_control(Client& client, AlarmWire::AlarmFrameType type,
+                                                 const AlarmWire::AlarmFrame& request) {
   AlarmWire::AlarmFrame response;
   response._type = type;
   response._source_id = request._source_id;
   response._message_id = request._message_id;
   response._timestamp_ms = request._timestamp_ms;
 
-  AlarmWire::AlarmEncodeResult encoded =
-      AlarmWire::encode_alarm_frame(response);
+  AlarmWire::AlarmEncodeResult encoded = AlarmWire::encode_alarm_frame(response);
 
   if (!encoded.success()) {
     return false;
@@ -654,9 +625,7 @@ bool ReliableAlarmCollector::Impl::queue_control(
   return true;
 }
 
-bool ReliableAlarmCollector::Impl::process_alarm(Client &client,
-                                                 AlarmWire::AlarmFrame frame) {
-
+bool ReliableAlarmCollector::Impl::process_alarm(Client& client, AlarmWire::AlarmFrame frame) {
   try {
     const AlarmIdentity identity = identity_of(frame);
 
@@ -678,8 +647,7 @@ bool ReliableAlarmCollector::Impl::process_alarm(Client &client,
       return queue_control(client, AlarmWire::AlarmFrameType::ACK, frame);
     }
 
-    const AlarmWire::AlarmEncodeResult encoded =
-        AlarmWire::encode_alarm_frame(frame);
+    const AlarmWire::AlarmEncodeResult encoded = AlarmWire::encode_alarm_frame(frame);
 
     if (!encoded.success()) {
       return false;
@@ -732,38 +700,35 @@ bool ReliableAlarmCollector::Impl::process_alarm(Client &client,
   }
 }
 
-bool ReliableAlarmCollector::Impl::process_frame(Client &client,
-                                                 AlarmWire::AlarmFrame frame) {
-
+bool ReliableAlarmCollector::Impl::process_frame(Client& client, AlarmWire::AlarmFrame frame) {
   switch (frame._type) {
-  case AlarmWire::AlarmFrameType::ALARM:
-    return process_alarm(client, std::move(frame));
+    case AlarmWire::AlarmFrameType::ALARM:
+      return process_alarm(client, std::move(frame));
 
-  case AlarmWire::AlarmFrameType::PING:
-    return queue_control(client, AlarmWire::AlarmFrameType::PONG, frame);
+    case AlarmWire::AlarmFrameType::PING:
+      return queue_control(client, AlarmWire::AlarmFrameType::PONG, frame);
 
-  case AlarmWire::AlarmFrameType::ACK:
-  case AlarmWire::AlarmFrameType::PONG:
-    record_protocol_error();
-    return false;
+    case AlarmWire::AlarmFrameType::ACK:
+    case AlarmWire::AlarmFrameType::PONG:
+      record_protocol_error();
+      return false;
   }
 
   return false;
 }
 
-bool ReliableAlarmCollector::Impl::read_client(Client &client) {
+bool ReliableAlarmCollector::Impl::read_client(Client& client) {
   // TCP 只有字节流边界；Decoder 在多次 recv 间保留未完成的帧。
   std::array<std::uint8_t, CLIENT_READ_CHUNK> buffer{};
 
   for (;;) {
-    const ssize_t received =
-        ::recv(client._fd, buffer.data(), buffer.size(), 0);
+    const ssize_t received = ::recv(client._fd, buffer.data(), buffer.size(), 0);
 
     if (received > 0) {
       client._last_activity = Clock::now();
 
-      AlarmWire::AlarmStreamFeedResult result = client._decoder.feed(
-          buffer.data(), static_cast<std::size_t>(received));
+      AlarmWire::AlarmStreamFeedResult result =
+          client._decoder.feed(buffer.data(), static_cast<std::size_t>(received));
 
       if (!result.success()) {
         record_stream_failure(result);
@@ -777,7 +742,7 @@ bool ReliableAlarmCollector::Impl::read_client(Client &client) {
         return false;
       }
 
-      for (AlarmWire::AlarmFrame &frame : result._frames) {
+      for (AlarmWire::AlarmFrame& frame : result._frames) {
         if (!process_frame(client, std::move(frame))) {
           return false;
         }
@@ -814,18 +779,17 @@ bool ReliableAlarmCollector::Impl::read_client(Client &client) {
   }
 }
 
-bool ReliableAlarmCollector::Impl::write_client(Client &client) {
+bool ReliableAlarmCollector::Impl::write_client(Client& client) {
   // ACK/PONG 留在发送队列中，短写后从上次偏移继续。
   if (client._writes.empty()) {
     return true;
   }
 
-  PendingWrite &write = client._writes.front();
+  PendingWrite& write = client._writes.front();
 
   for (;;) {
-    const ssize_t sent =
-        ::send(client._fd, write._bytes.data() + write._offset,
-               write._bytes.size() - write._offset, MSG_NOSIGNAL);
+    const ssize_t sent = ::send(client._fd, write._bytes.data() + write._offset,
+                                write._bytes.size() - write._offset, MSG_NOSIGNAL);
 
     if (sent > 0) {
       write._offset += static_cast<std::size_t>(sent);
@@ -860,7 +824,6 @@ bool ReliableAlarmCollector::Impl::write_client(Client &client) {
 void ReliableAlarmCollector::Impl::accept_clients() {
   // 每轮限制 accept 次数，给现有客户端和停止请求留出处理机会。
   for (std::size_t attempt = 0U; attempt < MAX_ACCEPTS_PER_ROUND; ++attempt) {
-
     const int client_fd = ::accept(_listener, nullptr, nullptr);
 
     if (client_fd < 0) {
@@ -901,8 +864,7 @@ void ReliableAlarmCollector::Impl::accept_clients() {
 }
 
 void ReliableAlarmCollector::Impl::close_marked_clients() noexcept {
-
-  for (const auto &client : _clients) {
+  for (const auto& client : _clients) {
     if (client->_close && client->_fd >= 0) {
       (void)::shutdown(client->_fd, SHUT_RDWR);
       (void)::close(client->_fd);
@@ -910,16 +872,16 @@ void ReliableAlarmCollector::Impl::close_marked_clients() noexcept {
     }
   }
 
-  _clients.erase(
-      std::remove_if(_clients.begin(), _clients.end(),
-                     [](const auto &client) { return client->_close; }),
-      _clients.end());
+  _clients.erase(std::remove_if(_clients.begin(), _clients.end(),
+                                [](const auto& client) {
+                                  return client->_close;
+                                }),
+                 _clients.end());
   update_client_count();
 }
 
 void ReliableAlarmCollector::Impl::close_all_clients() noexcept {
-
-  for (const auto &client : _clients) {
+  for (const auto& client : _clients) {
     if (client->_fd >= 0) {
       (void)::shutdown(client->_fd, SHUT_RDWR);
       (void)::close(client->_fd);
@@ -944,7 +906,7 @@ bool ReliableAlarmCollector::Impl::poll_once() {
   std::vector<Deadline> deadlines;
   deadlines.reserve(_clients.size());
 
-  for (const auto &client : _clients) {
+  for (const auto& client : _clients) {
     short events = 0;
 
     if (!client->_read_closed) {
@@ -965,8 +927,7 @@ bool ReliableAlarmCollector::Impl::poll_once() {
   for (;;) {
     const int timeout = poll_timeout(deadlines);
 
-    result = ::poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()),
-                    timeout);
+    result = ::poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()), timeout);
 
     if (result >= 0) {
       break;
@@ -998,8 +959,7 @@ bool ReliableAlarmCollector::Impl::poll_once() {
   const std::size_t client_count = _clients.size();
 
   for (std::size_t index = 0U; index < client_count; ++index) {
-
-    Client &client = *_clients[index];
+    Client& client = *_clients[index];
 
     const short events = descriptors[index + 2U].revents;
 
@@ -1033,8 +993,7 @@ bool ReliableAlarmCollector::Impl::poll_once() {
       client._close = true;
     }
 
-    if (!client._close &&
-        Clock::now() - client._last_activity >= _config._client_timeout) {
+    if (!client._close && Clock::now() - client._last_activity >= _config._client_timeout) {
       client._close = true;
     }
   }
@@ -1068,7 +1027,6 @@ void ReliableAlarmCollector::Impl::run() noexcept {
 }
 
 void ReliableAlarmCollector::Impl::close_listener() noexcept {
-
   if (_listener >= 0) {
     (void)::shutdown(_listener, SHUT_RDWR);
     (void)::close(_listener);
@@ -1095,7 +1053,7 @@ void ReliableAlarmCollector::Impl::stop() noexcept {
 }
 
 void ReliableAlarmCollector::Impl::record_stream_failure(
-    const AlarmWire::AlarmStreamFeedResult &result) noexcept {
+    const AlarmWire::AlarmStreamFeedResult& result) noexcept {
   if (result._status != AlarmWire::AlarmStreamStatus::PROTOCOL_ERROR) {
     return;
   }
@@ -1173,7 +1131,7 @@ ReliableAlarmCollectorStatus ReliableAlarmCollector::Impl::status() const {
     if (result.success()) {
       snapshot._corrupt_files = result._stats._corrupt_files;
     }
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     snapshot._spool_error = ENOMEM;
   } catch (...) {
     snapshot._spool_error = EIO;
@@ -1182,11 +1140,10 @@ ReliableAlarmCollectorStatus ReliableAlarmCollector::Impl::status() const {
   return snapshot;
 }
 
-ReliableAlarmCollector::ReliableAlarmCollector(
-    Engine &engine, ReliableAlarmCollectorConfig config)
-    : _engine(engine), _config(std::move(config)),
-      _impl(std::make_unique<Impl>(_engine, _config)) {
-
+ReliableAlarmCollector::ReliableAlarmCollector(Engine& engine, ReliableAlarmCollectorConfig config)
+    : _engine(engine)
+    , _config(std::move(config))
+    , _impl(std::make_unique<Impl>(_engine, _config)) {
   (void)_impl->initialize();
 }
 
@@ -1197,8 +1154,7 @@ bool ReliableAlarmCollector::ready() const noexcept {
          _impl->_setup_status == ReliableAlarmCollectorSetupStatus::SUCCESS;
 }
 
-ReliableAlarmCollectorSetupStatus
-ReliableAlarmCollector::setup_status() const noexcept {
+ReliableAlarmCollectorSetupStatus ReliableAlarmCollector::setup_status() const noexcept {
   if (!_impl) {
     return ReliableAlarmCollectorSetupStatus::THREAD_ERROR;
   }
@@ -1214,8 +1170,7 @@ std::uint16_t ReliableAlarmCollector::bound_port() const noexcept {
   return _impl ? _impl->_bound_port : 0U;
 }
 
-const ReliableAlarmCollectorConfig &
-ReliableAlarmCollector::config() const noexcept {
+const ReliableAlarmCollectorConfig& ReliableAlarmCollector::config() const noexcept {
   return _config;
 }
 
@@ -1235,4 +1190,4 @@ ReliableAlarmCollectorStatus ReliableAlarmCollector::status() const {
   return _impl->status();
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

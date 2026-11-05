@@ -36,24 +36,22 @@ static_assert(std::is_same_v<MonitorPublisher, ExpectedMonitorPublisher>,
  * MonitorReporter 内部也应暴露同一个 Publisher 类型，
  * 方便 Engine 使用 MonitorReporter::Publisher。
  */
-static_assert(
-    std::is_same_v<MonitorReporter::Publisher, ExpectedMonitorPublisher>,
-    "MonitorReporter::Publisher must match MonitorPublisher");
+static_assert(std::is_same_v<MonitorReporter::Publisher, ExpectedMonitorPublisher>,
+              "MonitorReporter::Publisher must match MonitorPublisher");
 
 /*
  * 额外验证 Publisher 可以使用 StoredRecord 按值调用，
  * 并且返回类型严格为 void。
  */
-static_assert(
-    std::is_invocable_r_v<void, MonitorPublisher &, MonData::StoredRecord>,
-    "MonitorPublisher must accept StoredRecord by value");
+static_assert(std::is_invocable_r_v<void, MonitorPublisher&, MonData::StoredRecord>,
+              "MonitorPublisher must accept StoredRecord by value");
 
 /*
  * MonitorReporter 必须显式绑定一个已经存在的 MonitorStore。
  *
  * Reporter 不拥有 Store，因此构造参数必须是 MonitorStore&。
  */
-static_assert(std::is_constructible_v<MonitorReporter, MonitorStore &>,
+static_assert(std::is_constructible_v<MonitorReporter, MonitorStore&>,
               "MonitorReporter must be constructible from MonitorStore&");
 
 /*
@@ -65,8 +63,7 @@ static_assert(!std::is_default_constructible_v<MonitorReporter>,
 /*
  * 类保持 final，避免通过继承修改 Publisher 和 Store 的调用语义。
  */
-static_assert(std::is_final_v<MonitorReporter>,
-              "MonitorReporter must remain final");
+static_assert(std::is_final_v<MonitorReporter>, "MonitorReporter must remain final");
 
 /*
  * 锁定 set_publisher()：
@@ -79,8 +76,7 @@ static_assert(std::is_final_v<MonitorReporter>,
  */
 using ExpectedSetPublisher = void (MonitorReporter::*)(MonitorPublisher);
 
-static_assert(std::is_same_v<decltype(&MonitorReporter::set_publisher),
-                             ExpectedSetPublisher>,
+static_assert(std::is_same_v<decltype(&MonitorReporter::set_publisher), ExpectedSetPublisher>,
               "MonitorReporter::set_publisher signature changed");
 
 /*
@@ -94,9 +90,8 @@ static_assert(std::is_same_v<decltype(&MonitorReporter::set_publisher),
 using ExpectedReporterUpdate = MonData::UpdateResult (MonitorReporter::*)(
     MonData::MonitorData, bool, MonData::MonitorTimestamp);
 
-static_assert(
-    std::is_same_v<decltype(&MonitorReporter::update), ExpectedReporterUpdate>,
-    "MonitorReporter::update signature changed");
+static_assert(std::is_same_v<decltype(&MonitorReporter::update), ExpectedReporterUpdate>,
+              "MonitorReporter::update signature changed");
 
 /*
  * Reporter 内部持有 MonitorStore 引用和 Publisher 状态，
@@ -118,15 +113,12 @@ MonData::MonitorTimestamp timestamp_at(std::int64_t seconds) {
   return MonData::MonitorTimestamp{std::chrono::seconds{seconds}};
 }
 
-MonData::MonitorData make_numeric(MonData::MonitorKey key, std::uint32_t value,
-                                  std::uint32_t state,
+MonData::MonitorData make_numeric(MonData::MonitorKey key, std::uint32_t value, std::uint32_t state,
                                   std::string description) {
-  return MonData::MonitorData{key, std::move(description),
-                              MonData::NumericValue{value, state}};
+  return MonData::MonitorData{key, std::move(description), MonData::NumericValue{value, state}};
 }
 
-const MonData::NumericValue &
-numeric_value(const MonData::StoredRecord &record) {
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
   return std::get<MonData::NumericValue>(record._data._value);
 }
 
@@ -141,10 +133,10 @@ void test_update_publishes_only_inserted_and_updated() {
   });
 
   const MonData::MonitorKey key{
-      1,  // mid
-      4,  // level
-      23, // fid
-      5   // eid
+      1,   // mid
+      4,   // level
+      23,  // fid
+      5    // eid
   };
 
   const auto first_time = timestamp_at(100);
@@ -179,8 +171,8 @@ void test_update_publishes_only_inserted_and_updated() {
    * M4 仍然返回 UNCHANGED；
    * Publisher 调用次数不能增加。
    */
-  const MonData::UpdateResult unchanged = reporter.update(
-      make_numeric(key, 5, 2, "duplicate-metadata"), false, duplicate_time);
+  const MonData::UpdateResult unchanged =
+      reporter.update(make_numeric(key, 5, 2, "duplicate-metadata"), false, duplicate_time);
 
   assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
 
@@ -218,8 +210,8 @@ void test_update_publishes_only_inserted_and_updated() {
    */
   const MonData::MonitorKey zero_key{1, 4, 23, 6};
 
-  const MonData::UpdateResult ignored = reporter.update(
-      make_numeric(zero_key, 0, 0, "initial-zero"), false, timestamp_at(400));
+  const MonData::UpdateResult ignored =
+      reporter.update(make_numeric(zero_key, 0, 0, "initial-zero"), false, timestamp_at(400));
 
   assert(ignored._status == MonData::UpdateStatus::IGNORED_INITIAL_ZERO);
 
@@ -247,10 +239,10 @@ void test_publisher_runs_synchronously_and_receives_copy() {
   MonitorReporter reporter(store);
 
   const MonData::MonitorKey key{
-      2,  // mid
-      7,  // level
-      31, // fid
-      9   // eid
+      2,   // mid
+      7,   // level
+      31,  // fid
+      9    // eid
   };
 
   const auto original_time = timestamp_at(500);
@@ -292,8 +284,7 @@ void test_publisher_runs_synchronously_and_receives_copy() {
      */
     record._data._description = "publisher-only-description";
 
-    MonData::NumericValue &numeric =
-        std::get<MonData::NumericValue>(record._data._value);
+    MonData::NumericValue& numeric = std::get<MonData::NumericValue>(record._data._value);
 
     numeric._value = 999;
     numeric._state = 1;
@@ -305,8 +296,8 @@ void test_publisher_runs_synchronously_and_receives_copy() {
     publisher_finished = true;
   });
 
-  const MonData::UpdateResult result = reporter.update(
-      make_numeric(key, 42, 2, "store-original"), false, original_time);
+  const MonData::UpdateResult result =
+      reporter.update(make_numeric(key, 42, 2, "store-original"), false, original_time);
 
   /*
    * 首次非零值必须成功插入。
@@ -336,8 +327,7 @@ void test_publisher_runs_synchronously_and_receives_copy() {
    */
   assert(retained_publisher_copy.has_value());
 
-  assert(retained_publisher_copy->_data._description ==
-         "publisher-only-description");
+  assert(retained_publisher_copy->_data._description == "publisher-only-description");
 
   assert(numeric_value(*retained_publisher_copy)._value == 999);
 
@@ -380,10 +370,10 @@ void test_publisher_runs_after_store_unlock() {
   MonitorReporter reporter(store);
 
   const MonData::MonitorKey published_key{
-      3,  // mid
-      2,  // level
-      40, // fid
-      50  // eid
+      3,   // mid
+      2,   // level
+      40,  // fid
+      50   // eid
   };
 
   const MonData::MonitorKey nested_key{3, 2, 40, 51};
@@ -446,8 +436,7 @@ void test_publisher_runs_after_store_unlock() {
      * 当前 Publisher 形成递归调用。
      */
     const MonData::UpdateResult nested =
-        store.update(make_numeric(nested_key, 20, 2, "nested-store-update"),
-                     false, nested_time);
+        store.update(make_numeric(nested_key, 20, 2, "nested-store-update"), false, nested_time);
 
     assert(nested._status == MonData::UpdateStatus::INSERTED);
 
@@ -461,8 +450,8 @@ void test_publisher_runs_after_store_unlock() {
   /*
    * 外层 update() 插入 published_key，并同步进入 Publisher。
    */
-  const MonData::UpdateResult result = reporter.update(
-      make_numeric(published_key, 10, 2, "published"), false, published_time);
+  const MonData::UpdateResult result =
+      reporter.update(make_numeric(published_key, 10, 2, "published"), false, published_time);
 
   assert(result._status == MonData::UpdateStatus::INSERTED);
 
@@ -526,8 +515,8 @@ void test_update_without_publisher_still_updates_store() {
   /*
    * 没有 Publisher 时首次非零值仍然必须保存。
    */
-  const MonData::UpdateResult inserted = reporter.update(
-      make_numeric(key, 50, 2, "caller-description"), false, first_time);
+  const MonData::UpdateResult inserted =
+      reporter.update(make_numeric(key, 50, 2, "caller-description"), false, first_time);
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
@@ -578,8 +567,7 @@ void test_update_without_publisher_still_updates_store() {
    * 没有 Publisher 不能导致每次 update() 都被当成变化。
    */
   const MonData::UpdateResult unchanged =
-      reporter.update(make_numeric(key, 50, 1, "must-not-replace-original"),
-                      false, duplicate_time);
+      reporter.update(make_numeric(key, 50, 1, "must-not-replace-original"), false, duplicate_time);
 
   assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
 
@@ -612,8 +600,7 @@ void test_update_without_publisher_still_updates_store() {
    * Store 仍然必须完成整体替换。
    */
   const MonData::UpdateResult updated =
-      reporter.update(make_numeric(key, 60, 1, "caller-updated-description"),
-                      false, changed_time);
+      reporter.update(make_numeric(key, 60, 1, "caller-updated-description"), false, changed_time);
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 

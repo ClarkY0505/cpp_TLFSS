@@ -1,9 +1,9 @@
+#include <dlfcn.h>
+#include <semaphore.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <dlfcn.h>
 #include <future>
-#include <semaphore.h>
 #include <thread>
 
 #include "common/base/tlss_thread.h"
@@ -28,7 +28,11 @@ int main() {
   std::promise<void> completed;
   auto future = completed.get_future();
   {
-    TLSS::BASE::Thread worker([&completed] { completed.set_value(); }, "DetachedLifetime");
+    TLSS::BASE::Thread worker(
+        [&completed] {
+          completed.set_value();
+        },
+        "DetachedLifetime");
     worker.start();
   }
 

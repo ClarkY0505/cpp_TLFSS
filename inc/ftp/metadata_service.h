@@ -2,8 +2,8 @@
 #define TLSS_FTP_METADATA_SERVICE_H
 
 #include "common/base/mysql_connection_pool.h"
-#include "ftp/metadata_types.h"
 #include "ftp/metadata_cache.h"
+#include "ftp/metadata_types.h"
 
 #include <memory>
 #include <string>

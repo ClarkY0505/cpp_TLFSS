@@ -74,6 +74,6 @@ struct AlarmEnqueueResult final {
  */
 using AlarmPublisher = std::function<AlarmEnqueueResult(MonData::StoredRecord)>;
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __ALARM_PUBLISHER_TYPES_H__
+#endif  // __ALARM_PUBLISHER_TYPES_H__

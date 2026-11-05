@@ -23,14 +23,14 @@ MonData::MonitorTimestamp make_timestamp(std::int64_t seconds) {
   return MonData::MonitorTimestamp{std::chrono::seconds{seconds}};
 }
 
-void register_test_module(MonitorModuleRegistry &modules) {
-  const ModuleRegisterStatus status = modules.register_module(
-      {MODULE_ID,
-       "module-a",
-       "stage8 test module",
-       {{MonitorLevel::INFO, "heartbeat"},
-        {MonitorLevel::WARN, "metadata timeout"},
-        {MonitorLevel::SOFT_STOP, ""}}});
+void register_test_module(MonitorModuleRegistry& modules) {
+  const ModuleRegisterStatus status =
+      modules.register_module({MODULE_ID,
+                               "module-a",
+                               "stage8 test module",
+                               {{MonitorLevel::INFO, "heartbeat"},
+                                {MonitorLevel::WARN, "metadata timeout"},
+                                {MonitorLevel::SOFT_STOP, ""}}});
 
   assert(status == ModuleRegisterStatus::SUCCESS);
 }
@@ -50,17 +50,13 @@ void test_normalization_happens_before_numeric_deduplication() {
     published.push_back(std::move(record));
   });
 
-  const MonData::MonitorKey first_supplied{
-      MODULE_ID, 99U, FUNCTION_ID, 1U};
-  const MonData::MonitorKey normalized{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::WARN),
-      FUNCTION_ID,
-      1U};
+  const MonData::MonitorKey first_supplied{MODULE_ID, 99U, FUNCTION_ID, 1U};
+  const MonData::MonitorKey normalized{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::WARN),
+                                       FUNCTION_ID, 1U};
   const auto first_time = make_timestamp(100);
 
-  const MonData::UpdateResult first = reporter.report_count(
-      first_supplied, 42U, "caller description", first_time);
+  const MonData::UpdateResult first =
+      reporter.report_count(first_supplied, 42U, "caller description", first_time);
 
   assert(first._status == MonData::UpdateStatus::INSERTED);
   assert(first._record.has_value());
@@ -76,12 +72,11 @@ void test_normalization_happens_before_numeric_deduplication() {
   assert(published[0]._data._description == "metadata timeout");
   assert(published[0]._changed_at == first_time);
 
-  const MonData::MonitorKey second_supplied{
-      MODULE_ID, 77U, FUNCTION_ID, 1U};
+  const MonData::MonitorKey second_supplied{MODULE_ID, 77U, FUNCTION_ID, 1U};
   const auto duplicate_time = make_timestamp(200);
 
-  const MonData::UpdateResult duplicate = reporter.report_count(
-      second_supplied, 42U, "another caller description", duplicate_time);
+  const MonData::UpdateResult duplicate =
+      reporter.report_count(second_supplied, 42U, "another caller description", duplicate_time);
 
   assert(duplicate._status == MonData::UpdateStatus::UNCHANGED);
   assert(duplicate._record.has_value());
@@ -108,17 +103,13 @@ void test_description_does_not_participate_in_numeric_deduplication() {
     published.push_back(std::move(record));
   });
 
-  const MonData::MonitorKey first_supplied{
-      MODULE_ID, 91U, FUNCTION_ID, 2U};
+  const MonData::MonitorKey first_supplied{MODULE_ID, 91U, FUNCTION_ID, 2U};
   const MonData::MonitorKey normalized{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP),
-      FUNCTION_ID,
-      2U};
+      MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP), FUNCTION_ID, 2U};
   const auto first_time = make_timestamp(300);
 
-  const MonData::UpdateResult first = reporter.report_count(
-      first_supplied, 7U, "first description", first_time);
+  const MonData::UpdateResult first =
+      reporter.report_count(first_supplied, 7U, "first description", first_time);
 
   assert(first._status == MonData::UpdateStatus::INSERTED);
   assert(first._record.has_value());
@@ -127,12 +118,11 @@ void test_description_does_not_participate_in_numeric_deduplication() {
   assert(first._record->_changed_at == first_time);
   assert(published.size() == 1U);
 
-  const MonData::MonitorKey second_supplied{
-      MODULE_ID, 92U, FUNCTION_ID, 2U};
+  const MonData::MonitorKey second_supplied{MODULE_ID, 92U, FUNCTION_ID, 2U};
   const auto duplicate_time = make_timestamp(301);
 
-  const MonData::UpdateResult duplicate = reporter.report_count(
-      second_supplied, 7U, "second description", duplicate_time);
+  const MonData::UpdateResult duplicate =
+      reporter.report_count(second_supplied, 7U, "second description", duplicate_time);
 
   assert(duplicate._status == MonData::UpdateStatus::UNCHANGED);
   assert(duplicate._record.has_value());
@@ -159,10 +149,7 @@ void test_count_initial_zero_is_still_ignored() {
   });
 
   const MonData::UpdateResult result = reporter.report_count(
-      {MODULE_ID, 99U, FUNCTION_ID, 1U},
-      0U,
-      "caller description",
-      make_timestamp(400));
+      {MODULE_ID, 99U, FUNCTION_ID, 1U}, 0U, "caller description", make_timestamp(400));
 
   assert(result._status == MonData::UpdateStatus::IGNORED_INITIAL_ZERO);
   assert(!result._record.has_value());
@@ -185,17 +172,13 @@ void test_error_initial_zero_is_inserted_and_published() {
     published.push_back(std::move(record));
   });
 
-  const MonData::MonitorKey supplied{
-      MODULE_ID, 99U, FUNCTION_ID, 1U};
-  const MonData::MonitorKey normalized{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::WARN),
-      FUNCTION_ID,
-      1U};
+  const MonData::MonitorKey supplied{MODULE_ID, 99U, FUNCTION_ID, 1U};
+  const MonData::MonitorKey normalized{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::WARN),
+                                       FUNCTION_ID, 1U};
   const auto changed_at = make_timestamp(500);
 
-  const MonData::UpdateResult result = reporter.report_error(
-      supplied, 0U, "caller description", changed_at);
+  const MonData::UpdateResult result =
+      reporter.report_error(supplied, 0U, "caller description", changed_at);
 
   assert(result._status == MonData::UpdateStatus::INSERTED);
   assert(result._record.has_value());
@@ -203,8 +186,7 @@ void test_error_initial_zero_is_inserted_and_published() {
   assert(result._record->_data._description == "metadata timeout");
   assert(result._record->_changed_at == changed_at);
 
-  const auto *numeric = std::get_if<MonData::NumericValue>(
-      &result._record->_data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&result._record->_data._value);
   assert(numeric != nullptr);
   assert(numeric->_value == 0U);
   assert(numeric->_state == 2U);
@@ -213,8 +195,7 @@ void test_error_initial_zero_is_inserted_and_published() {
   assert(published[0]._data._key == normalized);
   assert(published[0]._data._description == "metadata timeout");
 
-  const auto *published_numeric = std::get_if<MonData::NumericValue>(
-      &published[0]._data._value);
+  const auto* published_numeric = std::get_if<MonData::NumericValue>(&published[0]._data._value);
   assert(published_numeric != nullptr);
   assert(published_numeric->_value == 0U);
   assert(published_numeric->_state == 2U);
@@ -224,7 +205,7 @@ void test_error_initial_zero_is_inserted_and_published() {
   assert(store.size() == 1U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_normalization_happens_before_numeric_deduplication();

@@ -27,9 +27,9 @@ enum NetworkEventId : std::uint32_t {
   NETWORK_RX_ERROR_BURST = 2U
 };
 
-const MonitorModuleInfo &disk_module();
-const MonitorModuleInfo &network_module();
+const MonitorModuleInfo& disk_module();
+const MonitorModuleInfo& network_module();
 
-} // namespace TLSSMON::DemoM9
+}  // namespace TLSSMON::DemoM9
 
-#endif // __DEMO_MODULES_H__
+#endif  // __DEMO_MODULES_H__

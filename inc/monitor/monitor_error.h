@@ -50,14 +50,14 @@ struct MonitorErrorInfo final {
  */
 constexpr bool is_valid_monitor_level(std::uint32_t level) noexcept {
   switch (level) {
-  case static_cast<std::uint32_t>(MonitorLevel::INFO):
-  case static_cast<std::uint32_t>(MonitorLevel::WARN):
-  case static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP):
-  case static_cast<std::uint32_t>(MonitorLevel::EMERGENCY_STOP):
-    return true;
+    case static_cast<std::uint32_t>(MonitorLevel::INFO):
+    case static_cast<std::uint32_t>(MonitorLevel::WARN):
+    case static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP):
+    case static_cast<std::uint32_t>(MonitorLevel::EMERGENCY_STOP):
+      return true;
 
-  default:
-    return false;
+    default:
+      return false;
   }
 }
 
@@ -78,8 +78,7 @@ std::string_view monitor_level_name(std::uint32_t level) noexcept;
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator==(const MonitorErrorInfo &lhs,
-                       const MonitorErrorInfo &rhs) {
+inline bool operator==(const MonitorErrorInfo& lhs, const MonitorErrorInfo& rhs) {
   return lhs._level == rhs._level && lhs._description == rhs._description;
 }
 
@@ -89,10 +88,9 @@ inline bool operator==(const MonitorErrorInfo &lhs,
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator!=(const MonitorErrorInfo &lhs,
-                       const MonitorErrorInfo &rhs) {
+inline bool operator!=(const MonitorErrorInfo& lhs, const MonitorErrorInfo& rhs) {
   return !(lhs == rhs);
 }
 
-} // namespace TLSSMON
-#endif // __MONITOR_ERROR_H__
+}  // namespace TLSSMON
+#endif  // __MONITOR_ERROR_H__

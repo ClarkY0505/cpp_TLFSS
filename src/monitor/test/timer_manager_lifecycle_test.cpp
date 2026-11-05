@@ -6,19 +6,14 @@ using TLSSMON::CallbackRegistry;
 using TLSSMON::TimerManager;
 using TLSSMON::WakeupPipe;
 
-int main()
-{
-    CallbackRegistry registry;
-    WakeupPipe wakeup;
+int main() {
+  CallbackRegistry registry;
+  WakeupPipe wakeup;
 
-    {
-        TimerManager manager(registry, wakeup);
-    }
+  { TimerManager manager(registry, wakeup); }
 
-    // 再构造一次，确认空 TimerManager 可以正常析构。
-    {
-        TimerManager manager(registry, wakeup);
-    }
+  // 再构造一次，确认空 TimerManager 可以正常析构。
+  { TimerManager manager(registry, wakeup); }
 
-    return 0;
+  return 0;
 }

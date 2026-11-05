@@ -1,16 +1,16 @@
-#include "monitor_wire.h"
 #include "udp_publisher.h"
+#include "monitor_wire.h"
 
-#include <algorithm>
 #include <arpa/inet.h>
-#include <cerrno>
-#include <cstddef>
-#include <memory>
 #include <netinet/in.h>
-#include <new>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cerrno>
+#include <cstddef>
+#include <memory>
+#include <new>
 #include <utility>
 
 namespace TLSSMON {
@@ -23,9 +23,9 @@ struct UdpPublisher::Impl {
 };
 
 UdpPublisher::UdpPublisher(UdpPublisherConfig config)
-    : _config(std::move(config)), _impl(std::make_unique<Impl>()) {
-  if (_config._version != WireVersion::V1 &&
-      _config._version != WireVersion::V2) {
+    : _config(std::move(config))
+    , _impl(std::make_unique<Impl>()) {
+  if (_config._version != WireVersion::V1 && _config._version != WireVersion::V2) {
     _impl->_setup_status = UdpPublishStatus::INVALID_VERSION;
     return;
   }
@@ -38,8 +38,8 @@ UdpPublisher::UdpPublisher(UdpPublisherConfig config)
   sockaddr_in destination{};
   destination.sin_family = AF_INET;
   destination.sin_port = htons(_config._endpoint._port);
-  const int address_result = ::inet_pton(
-      AF_INET, _config._endpoint._address.c_str(), &destination.sin_addr);
+  const int address_result =
+      ::inet_pton(AF_INET, _config._endpoint._address.c_str(), &destination.sin_addr);
   if (address_result != 1) {
     _impl->_setup_status = UdpPublishStatus::INVALID_ENDPOINT;
     if (address_result < 0) {
@@ -69,8 +69,7 @@ UdpPublisher::~UdpPublisher() {
 }
 
 bool UdpPublisher::ready() const noexcept {
-  return _impl && _impl->_socket >= 0 &&
-         _impl->_setup_status == UdpPublishStatus::SUCCESS;
+  return _impl && _impl->_socket >= 0 && _impl->_setup_status == UdpPublishStatus::SUCCESS;
 }
 
 UdpPublishStatus UdpPublisher::setup_status() const noexcept {
@@ -81,7 +80,7 @@ UdpPublishStatus UdpPublisher::setup_status() const noexcept {
   return _impl->_setup_status;
 }
 
-UdpPublishResult UdpPublisher::send(const MonData::StoredRecord &record) const {
+UdpPublishResult UdpPublisher::send(const MonData::StoredRecord& record) const {
   // 编码失败在发送前返回，并保留 WireStatus 供调用方定位协议错误。
   if (!ready()) {
     return {_impl->_setup_status, WireStatus::SUCCESS, 0, _impl->_setup_error};
@@ -98,23 +97,22 @@ UdpPublishResult UdpPublisher::send(const MonData::StoredRecord &record) const {
    * 不能按 TCP 的处理方式循环发送剩余字节，因为 UDP
    * 每次 sendto() 都代表一个独立数据报。
    */
-  const ssize_t sent =
-      ::sendto(_impl->_socket, encoded._bytes.data(), encoded._bytes.size(), 0,
-               reinterpret_cast<const sockaddr *>(&_impl->_destination),
-               static_cast<socklen_t>(sizeof(_impl->_destination)));
+  const ssize_t sent = ::sendto(_impl->_socket, encoded._bytes.data(), encoded._bytes.size(), 0,
+                                reinterpret_cast<const sockaddr*>(&_impl->_destination),
+                                static_cast<socklen_t>(sizeof(_impl->_destination)));
 
-  if(sent < 0){
-      const int send_error = errno;
-      return {UdpPublishStatus::SEND_ERROR, WireStatus::SUCCESS, 0, send_error};
+  if (sent < 0) {
+    const int send_error = errno;
+    return {UdpPublishStatus::SEND_ERROR, WireStatus::SUCCESS, 0, send_error};
   }
 
   const std::size_t sent_size = static_cast<std::size_t>(sent);
-  if(sent_size != encoded._bytes.size()){
-      return {UdpPublishStatus::PARTIAL_SEND, WireStatus::SUCCESS, sent_size, 0};
+  if (sent_size != encoded._bytes.size()) {
+    return {UdpPublishStatus::PARTIAL_SEND, WireStatus::SUCCESS, sent_size, 0};
   }
 
   return {UdpPublishStatus::SUCCESS, WireStatus::SUCCESS, sent_size, 0};
 }
 
-} // namespace Wire
-} // namespace TLSSMON
+}  // namespace Wire
+}  // namespace TLSSMON

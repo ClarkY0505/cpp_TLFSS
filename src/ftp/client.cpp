@@ -1,9 +1,9 @@
+#include "ftp/client.h"
 #include "common/net/buffer.h"
 #include "common/net/channel.h"
 #include "common/net/event_loop.h"
 #include "common/net/net_logger.h"
 #include "common/net/tcp_connection.h"
-#include "ftp/client.h"
 #include "ftp/file_transfer.h"
 
 #include <bits/types/sigset_t.h>
@@ -419,7 +419,8 @@ void Client::upload(const std::string& args) {
       throw std::runtime_error("invalid filename");
     }
     auto conn = _client.connection();
-    if (!conn || !conn->connected()) throw std::runtime_error("not connected");
+    if (!conn || !conn->connected())
+      throw std::runtime_error("not connected");
     _transfer_state = FileTransferState::preparing_upload_source;
     auto lifetime = std::weak_ptr<int>(_disk_lifetime);
     auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
@@ -427,24 +428,30 @@ void Client::upload(const std::string& args) {
       return {Transfer::open_source(local), {}};
     };
     auto ready = [this, lifetime, weak_conn, remote](const Transfer::AsyncFileSource::Info& info) {
-      if (lifetime.expired()) return;
+      if (lifetime.expired())
+        return;
       auto conn = weak_conn.lock();
-      if (!conn || !conn->connected() || _stopping) return;
-      if (_transfer_state != FileTransferState::preparing_upload_source) return;
+      if (!conn || !conn->connected() || _stopping)
+        return;
+      if (_transfer_state != FileTransferState::preparing_upload_source)
+        return;
       _transfer_state = FileTransferState::waiting_upload_ready;
-      conn->send("@TLSS UPLOAD " + std::to_string(info.size) + " " + Transfer::quote(remote) + "\n");
+      conn->send("@TLSS UPLOAD " + std::to_string(info.size) + " " + Transfer::quote(remote) +
+                 "\n");
     };
     auto failed = [this, lifetime, weak_conn](std::string error) {
-      if (lifetime.expired()) return;
+      if (lifetime.expired())
+        return;
       const bool requested = _transfer_state != FileTransferState::preparing_upload_source;
       reset_transfer();
       std::cout << "[upload failed: " << error << "]\n" << std::flush;
       if (requested) {
-        if (auto conn = weak_conn.lock()) conn->force_close();
+        if (auto conn = weak_conn.lock())
+          conn->force_close();
       }
     };
-    _upload_source = Transfer::AsyncFileSource::open(
-        _disk_executor, conn, std::move(factory), std::move(ready), std::move(failed));
+    _upload_source = Transfer::AsyncFileSource::open(_disk_executor, conn, std::move(factory),
+                                                     std::move(ready), std::move(failed));
   } catch (const std::exception& exception) {
     reset_transfer();
     std::cout << "[upload failed: " << exception.what() << "]\n";
@@ -518,17 +525,19 @@ void Client::handle_transfer_response(const NET::TcpConnectionPtr& conn, const s
 
   if (verb == "UREADY" && _transfer_state == FileTransferState::waiting_upload_ready) {
     Transfer::require_end(input);
-    if (!_upload_source) throw std::runtime_error("upload source is missing");
+    if (!_upload_source)
+      throw std::runtime_error("upload source is missing");
     const auto source = _upload_source;
     auto weak_conn = std::weak_ptr<NET::TcpConnection>(conn);
     _transfer_state = FileTransferState::waiting_upload_result;
-    NET::TcpConnection::FileSendCallback completed =
-        [source, weak_conn](std::error_code error, std::uint64_t sent) {
+    NET::TcpConnection::FileSendCallback completed = [source, weak_conn](std::error_code error,
+                                                                         std::uint64_t sent) {
       source->cancel();
       if (error) {
         std::cout << "\n[send failed after " << sent << " bytes: " << error.message() << "]\n"
                   << std::flush;
-        if (auto conn = weak_conn.lock()) conn->force_close();
+        if (auto conn = weak_conn.lock())
+          conn->force_close();
         return;
       }
       std::cout << "\n[sent " << sent << " bytes; waiting for server confirmation]\n" << std::flush;

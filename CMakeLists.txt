@@ -1,9 +1,16 @@
-#如果只是编辑已有目标已经包含的 .h/.cpp，不需要重新 cmake --preset debug，直接构建即可：
+# 本项目有已设置的代码风格
+# 批量格式化方式：
+# find inc src tests proto -type f \
+#  \( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \
+#     -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
+#     -o -name '*.cxx' -o -name '*.proto' \) \
+#  -exec clang-format -i --style=file {} +
+
+# 如果只是编辑已有目标已经包含的 .h/.cpp，不需要重新 cmake --preset debug，直接构建即可：
 # cmake --build --preset debug
 # 如果是新增 .cpp 文件，通常需要把它加入对应的 CMakeLists.txt，然后重新配置一次：
 # cmake --preset debug
 # cmake --build --preset debug
-
 
 cmake_minimum_required(VERSION 3.16)
 # project(cpp-toy-level-storage-service VERSION 1.0.0 LANGUAGES C CXX)

@@ -8,19 +8,18 @@
 #include <cassert>
 #include <type_traits>
 
-int main()
-{
-    using TLSSMON::AioHandle;
-    using TLSSMON::AioManager;
-    using TLSSMON::CallbackRegistry;
-    using TLSSMON::WakeupPipe;
+int main() {
+  using TLSSMON::AioHandle;
+  using TLSSMON::AioManager;
+  using TLSSMON::CallbackRegistry;
+  using TLSSMON::WakeupPipe;
 
-    static_assert(!std::is_copy_constructible_v<AioManager>);
+  static_assert(!std::is_copy_constructible_v<AioManager>);
 
-    AioHandle handle;
-    assert(!handle);
+  AioHandle handle;
+  assert(!handle);
 
-    CallbackRegistry registry;
-    WakeupPipe wakeup;
-    AioManager manager(registry, wakeup);
+  CallbackRegistry registry;
+  WakeupPipe wakeup;
+  AioManager manager(registry, wakeup);
 }

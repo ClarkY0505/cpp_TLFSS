@@ -1,6 +1,6 @@
+#include "common/net/event_loop_thread.h"
 #include <mutex>
 #include "common/net/event_loop.h"
-#include "common/net/event_loop_thread.h"
 using namespace TLSS::NET;
 // EventLoop 在工作线程栈上创建，_loop 仅在该线程存活期间有效。
 EventLoopThread::EventLoopThread(const ThreadInitCallback& cb, const std::string& name)

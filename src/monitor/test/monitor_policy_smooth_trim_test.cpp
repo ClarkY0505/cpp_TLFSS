@@ -10,14 +10,12 @@ using namespace TLSSMON;
 
 namespace {
 
-void expect(const PolicyFeedResult &result, bool noteworthy,
-            std::uint32_t value) {
+void expect(const PolicyFeedResult& result, bool noteworthy, std::uint32_t value) {
   assert(result._noteworthy == noteworthy);
   assert(result._value == value);
 }
 
-std::unique_ptr<MonitorPolicy> make_policy(std::size_t window,
-                                           std::uint32_t trim_threshold) {
+std::unique_ptr<MonitorPolicy> make_policy(std::size_t window, std::uint32_t trim_threshold) {
   auto policy = make_smooth_trim_policy(window, trim_threshold);
   assert(policy);
   return policy;
@@ -96,7 +94,7 @@ void test_uint32_extremes_and_ignored_time_are_safe() {
   expect(time_independent->feed(102U, PolicyTime{-1000}), true, 101U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_factory_validation_and_initial_state();

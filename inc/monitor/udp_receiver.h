@@ -90,7 +90,7 @@ struct UdpReceiveResult final {
 
 /** @brief 在非阻塞 socket 上读取并解码监控数据报。 */
 class UdpReceiver final {
-public:
+ public:
   /**
    * @brief 创建并绑定监听 socket；通过 ready() 查询结果。
    * @param config 绑定的 IPv4 地址和 UDP 端口；端口 0 由系统分配。
@@ -98,11 +98,11 @@ public:
   explicit UdpReceiver(UdpReceiverConfig config);
   ~UdpReceiver();
 
-  UdpReceiver(const UdpReceiver &) = delete;
-  UdpReceiver &operator=(const UdpReceiver &) = delete;
+  UdpReceiver(const UdpReceiver&) = delete;
+  UdpReceiver& operator=(const UdpReceiver&) = delete;
 
-  UdpReceiver(UdpReceiver &&) = delete;
-  UdpReceiver &operator=(UdpReceiver &&) = delete;
+  UdpReceiver(UdpReceiver&&) = delete;
+  UdpReceiver& operator=(UdpReceiver&&) = delete;
 
   /**
    * @brief 判断监听 socket 是否初始化成功。
@@ -140,7 +140,7 @@ public:
    * @return 构造时保存的配置引用。
    */
   [[nodiscard]]
-  const UdpReceiverConfig &config() const noexcept {
+  const UdpReceiverConfig& config() const noexcept {
     return _config;
   }
 
@@ -153,13 +153,13 @@ public:
   [[nodiscard]]
   UdpReceiveResult receive_one() const;
 
-private:
+ private:
   struct Impl;
 
   const UdpReceiverConfig _config;
   std::unique_ptr<Impl> _impl;
 };
 
-} // namespace Wire
-} // namespace TLSSMON
-#endif // __UDP_RECEIVER_H__
+}  // namespace Wire
+}  // namespace TLSSMON
+#endif  // __UDP_RECEIVER_H__

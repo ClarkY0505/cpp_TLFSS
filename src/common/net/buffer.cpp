@@ -1,6 +1,6 @@
+#include "common/net/buffer.h"
 #include "common/base/current_thread.h"
 #include "common/memory/tlss_memcpy.h"
-#include "common/net/buffer.h"
 #include "common/net/net_logger.h"
 #include "common/utile/utile.h"
 

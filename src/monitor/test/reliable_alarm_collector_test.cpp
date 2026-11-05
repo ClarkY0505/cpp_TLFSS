@@ -1,6 +1,6 @@
+#include "reliable_alarm_collector.h"
 #include "alarm_spool.h"
 #include "engine.h"
-#include "reliable_alarm_collector.h"
 #include "reliable_alarm_test_support.h"
 
 #include <sys/socket.h>
@@ -25,31 +25,24 @@ namespace {
 
 constexpr std::uint64_t SOURCE_ID = UINT64_C(0x1111222233334444);
 
-ReliableAlarmCollectorConfig make_config(
-    const std::filesystem::path &root,
-    std::uint16_t port = 0U,
-    std::size_t max_clients = 8U,
-    std::chrono::milliseconds timeout = 1s) {
-  return ReliableAlarmCollectorConfig{
-      "127.0.0.1", port, root, max_clients, timeout};
+ReliableAlarmCollectorConfig make_config(const std::filesystem::path& root, std::uint16_t port = 0U,
+                                         std::size_t max_clients = 8U,
+                                         std::chrono::milliseconds timeout = 1s) {
+  return ReliableAlarmCollectorConfig{"127.0.0.1", port, root, max_clients, timeout};
 }
 
-void initialize_engine(Engine &engine) {
+void initialize_engine(Engine& engine) {
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::READY);
 }
 
-const MonData::NumericValue &numeric_value(
-    const MonData::StoredRecord &record) {
-  assert(std::holds_alternative<MonData::NumericValue>(
-      record._data._value));
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  assert(std::holds_alternative<MonData::NumericValue>(record._data._value));
   return std::get<MonData::NumericValue>(record._data._value);
 }
 
-void assert_matching_control(
-    const AlarmWire::AlarmFrame &response,
-    AlarmWire::AlarmFrameType type,
-    const AlarmWire::AlarmFrame &request) {
+void assert_matching_control(const AlarmWire::AlarmFrame& response, AlarmWire::AlarmFrameType type,
+                             const AlarmWire::AlarmFrame& request) {
   assert(response._type == type);
   assert(response._source_id == request._source_id);
   assert(response._message_id == request._message_id);
@@ -63,11 +56,9 @@ void assert_matching_control(
 void test_setup_validation_and_failure_status() {
   TemporaryDirectory root("collector-config");
   Engine uninitialized{MonConfig{"collector-created", 0U, 1U}};
-  ReliableAlarmCollector not_ready(
-      uninitialized, make_config(root.path()));
+  ReliableAlarmCollector not_ready(uninitialized, make_config(root.path()));
   assert(!not_ready.ready());
-  assert(not_ready.setup_status() ==
-         ReliableAlarmCollectorSetupStatus::ENGINE_NOT_READY);
+  assert(not_ready.setup_status() == ReliableAlarmCollectorSetupStatus::ENGINE_NOT_READY);
 
   Engine engine{MonConfig{"collector-config", 0U, 1U}};
   initialize_engine(engine);
@@ -75,8 +66,7 @@ void test_setup_validation_and_failure_status() {
   const auto assert_invalid = [&](ReliableAlarmCollectorConfig config) {
     ReliableAlarmCollector collector(engine, std::move(config));
     assert(!collector.ready());
-    assert(collector.setup_status() ==
-           ReliableAlarmCollectorSetupStatus::INVALID_CONFIG);
+    assert(collector.setup_status() == ReliableAlarmCollectorSetupStatus::INVALID_CONFIG);
     assert(collector.setup_error() == EINVAL);
   };
 
@@ -98,18 +88,15 @@ void test_setup_validation_and_failure_status() {
     std::ofstream output(file_root.path());
     output << "not a directory";
   }
-  ReliableAlarmCollector spool_error(
-      engine, make_config(file_root.path()));
+  ReliableAlarmCollector spool_error(engine, make_config(file_root.path()));
   assert(!spool_error.ready());
-  assert(spool_error.setup_status() ==
-         ReliableAlarmCollectorSetupStatus::SPOOL_ERROR);
+  assert(spool_error.setup_status() == ReliableAlarmCollectorSetupStatus::SPOOL_ERROR);
 
   BoundTcpListener occupied;
-  ReliableAlarmCollector socket_error(
-      engine, make_config(root.path() / "occupied", occupied.port()));
+  ReliableAlarmCollector socket_error(engine,
+                                      make_config(root.path() / "occupied", occupied.port()));
   assert(!socket_error.ready());
-  assert(socket_error.setup_status() ==
-         ReliableAlarmCollectorSetupStatus::SOCKET_ERROR);
+  assert(socket_error.setup_status() == ReliableAlarmCollectorSetupStatus::SOCKET_ERROR);
 }
 
 /* 配置端口 0 必须返回实际端口；stop() 可重复调用并及时唤醒 poll()。 */
@@ -120,8 +107,7 @@ void test_lifecycle_and_dynamic_port() {
 
   ReliableAlarmCollector collector(engine, make_config(root.path()));
   assert(collector.ready());
-  assert(collector.setup_status() ==
-         ReliableAlarmCollectorSetupStatus::SUCCESS);
+  assert(collector.setup_status() == ReliableAlarmCollectorSetupStatus::SUCCESS);
   assert(collector.bound_port() != 0U);
   assert(collector.config()._inbox_dir == root.path());
 
@@ -143,10 +129,8 @@ void test_fragmented_alarm_is_persisted_ingested_and_acked() {
   ReliableAlarmCollector collector(engine, make_config(root.path()));
   assert(collector.ready());
 
-  const MonData::StoredRecord original =
-      make_record(1U, 700U, 1'700'000'010, "accept failed");
-  const AlarmWire::AlarmFrame alarm =
-      make_alarm(original, SOURCE_ID, 1U);
+  const MonData::StoredRecord original = make_record(1U, 700U, 1'700'000'010, "accept failed");
+  const AlarmWire::AlarmFrame alarm = make_alarm(original, SOURCE_ID, 1U);
   const auto wire = encode_frame(alarm);
 
   UniqueSocket client = connect_loopback(collector.bound_port());
@@ -162,8 +146,7 @@ void test_fragmented_alarm_is_persisted_ingested_and_acked() {
   assert(numeric_value(*stored) == numeric_value(original));
   assert(stored->_changed_at == original._changed_at);
 
-  AlarmWire::AlarmSpool inbox(
-      {root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
+  AlarmWire::AlarmSpool inbox({root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
   const auto stats = inbox.stats();
   assert(stats.success());
   assert(stats._stats._files == 1U);
@@ -192,8 +175,7 @@ void test_duplicate_alarm_is_idempotent_and_acked_again() {
   assert(second_ack.has_value());
   assert_matching_control(*second_ack, AlarmWire::AlarmFrameType::ACK, alarm);
 
-  AlarmWire::AlarmSpool inbox(
-      {root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
+  AlarmWire::AlarmSpool inbox({root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
   assert(inbox.stats()._stats._files == 1U);
   assert(numeric_value(*engine.find_data(original._data._key))._value == 88U);
 }
@@ -314,11 +296,9 @@ void test_slow_partial_client_is_timed_out() {
   TemporaryDirectory root("collector-timeout");
   Engine engine{MonConfig{"collector-timeout", 0U, 1U}};
   initialize_engine(engine);
-  ReliableAlarmCollector collector(
-      engine, make_config(root.path(), 0U, 8U, 120ms));
+  ReliableAlarmCollector collector(engine, make_config(root.path(), 0U, 8U, 120ms));
 
-  const auto wire = encode_frame(
-      make_alarm(make_record(6U, 600U), SOURCE_ID, 8U));
+  const auto wire = encode_frame(make_alarm(make_record(6U, 600U), SOURCE_ID, 8U));
   UniqueSocket client = connect_loopback(collector.bound_port());
   assert(send_all(client.get(), wire.data(), 10U));
   assert(wait_for_close(client.get(), 1s));
@@ -333,8 +313,7 @@ void test_maximum_client_limit_rejects_extra_connection() {
   TemporaryDirectory root("collector-client-limit");
   Engine engine{MonConfig{"collector-client-limit", 0U, 1U}};
   initialize_engine(engine);
-  ReliableAlarmCollector collector(
-      engine, make_config(root.path(), 0U, 1U, 2s));
+  ReliableAlarmCollector collector(engine, make_config(root.path(), 0U, 1U, 2s));
 
   const auto record = make_record(9U, 900U);
   const auto alarm = make_alarm(record, SOURCE_ID, 11U);
@@ -374,8 +353,7 @@ void test_startup_recovery_is_sorted_and_quarantines_corrupt_files() {
   AlarmWire::AlarmFrame expected_last;
 
   {
-    AlarmWire::AlarmSpool inbox(
-        {root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
+    AlarmWire::AlarmSpool inbox({root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
     assert(inbox.ready());
 
     const std::vector<AlarmWire::AlarmFrame> frames{
@@ -384,19 +362,17 @@ void test_startup_recovery_is_sorted_and_quarantines_corrupt_files() {
         make_alarm(make_record(7U, 30U, 103), 2U, 10U, 1000U)};
 
     expected_last = frames[0];
-    for (const auto &frame : frames) {
+    for (const auto& frame : frames) {
       const auto wire = encode_frame(frame);
       assert(inbox.store(frame._source_id, frame._message_id, wire).success());
     }
 
     auto damaged = make_alarm(make_record(8U, 999U), 3U, 40U, 2000U);
     auto damaged_wire = encode_frame(damaged);
-    const auto stored =
-        inbox.store(damaged._source_id, damaged._message_id, damaged_wire);
+    const auto stored = inbox.store(damaged._source_id, damaged._message_id, damaged_wire);
     assert(stored.success());
     {
-      std::fstream file(stored._path,
-                        std::ios::binary | std::ios::in | std::ios::out);
+      std::fstream file(stored._path, std::ios::binary | std::ios::in | std::ios::out);
       assert(file.good());
       file.seekp(static_cast<std::streamoff>(AlarmWire::ALARM_HEADER_SIZE));
       const char changed = static_cast<char>(0xff);
@@ -412,11 +388,9 @@ void test_startup_recovery_is_sorted_and_quarantines_corrupt_files() {
   const auto recovered = engine.find_data(key);
   assert(recovered.has_value());
   assert(numeric_value(*recovered)._value == 10U);
-  assert(recovered->_changed_at ==
-         make_record(7U, 10U, 101)._changed_at);
+  assert(recovered->_changed_at == make_record(7U, 10U, 101)._changed_at);
 
-  AlarmWire::AlarmSpool inbox(
-      {root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
+  AlarmWire::AlarmSpool inbox({root.path(), AlarmWire::AlarmSpoolKind::INBOX, 0U});
   const auto stats = inbox.stats();
   assert(stats._stats._files == 3U);
   assert(stats._stats._corrupt_files == 1U);
@@ -426,12 +400,11 @@ void test_startup_recovery_is_sorted_and_quarantines_corrupt_files() {
   assert(send_all(client.get(), duplicate_wire.data(), duplicate_wire.size()));
   const auto ack = receive_frame(client.get());
   assert(ack.has_value());
-  assert_matching_control(
-      *ack, AlarmWire::AlarmFrameType::ACK, expected_last);
+  assert_matching_control(*ack, AlarmWire::AlarmFrameType::ACK, expected_last);
   assert(inbox.stats()._stats._files == 3U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_setup_validation_and_failure_status();

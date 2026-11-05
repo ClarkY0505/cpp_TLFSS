@@ -37,47 +37,32 @@ static_assert(ALARM_SOURCE_ID_OFFSET == 12U);
 static_assert(ALARM_MESSAGE_ID_OFFSET == 20U);
 static_assert(ALARM_TIMESTAMP_OFFSET == 36U);
 static_assert(ALARM_CRC32_OFFSET == 44U);
-static_assert(ALARM_CRC32_OFFSET + sizeof(std::uint32_t) ==
-              ALARM_HEADER_SIZE);
+static_assert(ALARM_CRC32_OFFSET + sizeof(std::uint32_t) == ALARM_HEADER_SIZE);
 
 static_assert(std::is_enum_v<AlarmFrameType>);
-static_assert(
-    std::is_same_v<std::underlying_type_t<AlarmFrameType>, std::uint8_t>);
+static_assert(std::is_same_v<std::underlying_type_t<AlarmFrameType>, std::uint8_t>);
 static_assert(static_cast<std::uint8_t>(AlarmFrameType::ALARM) == 1U);
 static_assert(static_cast<std::uint8_t>(AlarmFrameType::ACK) == 2U);
 static_assert(static_cast<std::uint8_t>(AlarmFrameType::PING) == 3U);
 static_assert(static_cast<std::uint8_t>(AlarmFrameType::PONG) == 4U);
 
-static_assert(std::is_same_v<AlarmMessageId,
-                             std::array<std::uint8_t, 16U>>);
+static_assert(std::is_same_v<AlarmMessageId, std::array<std::uint8_t, 16U>>);
 static_assert(std::is_copy_constructible_v<AlarmFrame>);
 static_assert(std::is_move_constructible_v<AlarmFrame>);
 static_assert(std::is_copy_assignable_v<AlarmFrame>);
 static_assert(std::is_move_assignable_v<AlarmFrame>);
 
+static_assert(std::is_same_v<decltype(std::declval<AlarmFrame&>()._type), AlarmFrameType>);
+static_assert(std::is_same_v<decltype(std::declval<AlarmFrame&>()._source_id), std::uint64_t>);
+static_assert(std::is_same_v<decltype(std::declval<AlarmFrame&>()._message_id), AlarmMessageId>);
+static_assert(std::is_same_v<decltype(std::declval<AlarmFrame&>()._timestamp_ms), std::uint64_t>);
 static_assert(
-    std::is_same_v<decltype(std::declval<AlarmFrame &>()._type),
-                   AlarmFrameType>);
-static_assert(
-    std::is_same_v<decltype(std::declval<AlarmFrame &>()._source_id),
-                   std::uint64_t>);
-static_assert(
-    std::is_same_v<decltype(std::declval<AlarmFrame &>()._message_id),
-                   AlarmMessageId>);
-static_assert(
-    std::is_same_v<decltype(std::declval<AlarmFrame &>()._timestamp_ms),
-                   std::uint64_t>);
-static_assert(
-    std::is_same_v<decltype(std::declval<AlarmFrame &>()._payload),
-                   std::vector<std::uint8_t>>);
+    std::is_same_v<decltype(std::declval<AlarmFrame&>()._payload), std::vector<std::uint8_t>>);
 
-using ExpectedCrc = std::uint32_t (*)(const std::uint8_t *,
-                                      std::size_t) noexcept;
-using ExpectedSize = AlarmFrameSizeResult (*)(const std::uint8_t *,
-                                               std::size_t) noexcept;
-using ExpectedEncode = AlarmEncodeResult (*)(const AlarmFrame &) noexcept;
-using ExpectedDecode = AlarmDecodeResult (*)(const std::uint8_t *,
-                                              std::size_t) noexcept;
+using ExpectedCrc = std::uint32_t (*)(const std::uint8_t*, std::size_t) noexcept;
+using ExpectedSize = AlarmFrameSizeResult (*)(const std::uint8_t*, std::size_t) noexcept;
+using ExpectedEncode = AlarmEncodeResult (*)(const AlarmFrame&) noexcept;
+using ExpectedDecode = AlarmDecodeResult (*)(const std::uint8_t*, std::size_t) noexcept;
 
 static_assert(std::is_same_v<decltype(&alarm_crc32), ExpectedCrc>);
 static_assert(std::is_same_v<decltype(&alarm_frame_size), ExpectedSize>);
@@ -109,24 +94,21 @@ void test_result_invariants() {
   const AlarmEncodeResult empty_encode{};
   assert(!empty_encode.success());
 
-  const AlarmEncodeResult encoded{
-      AlarmProtocolStatus::SUCCESS,
-      std::vector<std::uint8_t>(ALARM_HEADER_SIZE, 0U)};
+  const AlarmEncodeResult encoded{AlarmProtocolStatus::SUCCESS,
+                                  std::vector<std::uint8_t>(ALARM_HEADER_SIZE, 0U)};
   assert(encoded.success());
 
   const AlarmDecodeResult empty_decode{};
   assert(!empty_decode.success());
 
-  const AlarmDecodeResult decoded{
-      AlarmProtocolStatus::SUCCESS,
-      AlarmFrame{AlarmFrameType::PING, 1U, {}, 2U, {}}};
+  const AlarmDecodeResult decoded{AlarmProtocolStatus::SUCCESS,
+                                  AlarmFrame{AlarmFrameType::PING, 1U, {}, 2U, {}}};
   assert(decoded.success());
 
   const AlarmFrameSizeResult empty_size{};
   assert(!empty_size.success());
 
-  const AlarmFrameSizeResult frame_size{
-      AlarmProtocolStatus::SUCCESS, ALARM_HEADER_SIZE};
+  const AlarmFrameSizeResult frame_size{AlarmProtocolStatus::SUCCESS, ALARM_HEADER_SIZE};
   assert(frame_size.success());
 }
 
@@ -134,11 +116,7 @@ void test_result_invariants() {
  * AlarmFrame 使用值语义；修改副本不能影响原始帧。
  */
 void test_alarm_frame_value_semantics() {
-  AlarmFrame original{AlarmFrameType::ALARM,
-                      7U,
-                      {},
-                      8U,
-                      {1U, 2U, 3U}};
+  AlarmFrame original{AlarmFrameType::ALARM, 7U, {}, 8U, {1U, 2U, 3U}};
   AlarmFrame copy = original;
   copy._payload[0] = 9U;
 
@@ -147,7 +125,7 @@ void test_alarm_frame_value_semantics() {
   assert(copy != original);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_frame_type_classification();

@@ -48,8 +48,7 @@ constexpr MonData::MonitorKey STRING_KEY{DEMO_MID, 1U, 0U, 2U};
  *
  * 因此 7 次数值上报只产生 4 个 UDP 数据报。
  */
-constexpr std::array<std::uint32_t, 7U> COUNT_SEQUENCE{10U, 10U, 20U, 20U,
-                                                       30U, 0U,  0U};
+constexpr std::array<std::uint32_t, 7U> COUNT_SEQUENCE{10U, 10U, 20U, 20U, 30U, 0U, 0U};
 constexpr std::size_t EXPECTED_REPORTS = 9U;
 constexpr std::size_t EXPECTED_CHANGED = 6U;
 constexpr std::size_t EXPECTED_UNCHANGED = 3U;
@@ -89,26 +88,25 @@ struct DemoState final {
    */
   std::vector<Wire::DecodedRecord> decoded_records;
 };
-const char *update_status_name(MonData::UpdateStatus status) noexcept {
-
+const char* update_status_name(MonData::UpdateStatus status) noexcept {
   switch (status) {
-  case MonData::UpdateStatus::INSERTED:
-    return "INSERTED";
+    case MonData::UpdateStatus::INSERTED:
+      return "INSERTED";
 
-  case MonData::UpdateStatus::UPDATED:
-    return "UPDATED";
+    case MonData::UpdateStatus::UPDATED:
+      return "UPDATED";
 
-  case MonData::UpdateStatus::UNCHANGED:
-    return "UNCHANGED";
+    case MonData::UpdateStatus::UNCHANGED:
+      return "UNCHANGED";
 
-  case MonData::UpdateStatus::IGNORED_INITIAL_ZERO:
-    return "IGNORED_INITIAL_ZERO";
+    case MonData::UpdateStatus::IGNORED_INITIAL_ZERO:
+      return "IGNORED_INITIAL_ZERO";
 
-  case MonData::UpdateStatus::INVALID:
-    return "INVALID";
+    case MonData::UpdateStatus::INVALID:
+      return "INVALID";
 
-  case MonData::UpdateStatus::DURABILITY_FAILED:
-    return "DURABILITY_FAILED";
+    case MonData::UpdateStatus::DURABILITY_FAILED:
+      return "DURABILITY_FAILED";
   }
 
   return "UNKNOWN";
@@ -116,9 +114,7 @@ const char *update_status_name(MonData::UpdateStatus status) noexcept {
 /*
  * 统一统计一次 report_*() 的结果。
  */
-void record_update_result(DemoState &state,
-                          const MonData::UpdateResult &result) {
-
+void record_update_result(DemoState& state, const MonData::UpdateResult& result) {
   ++state.reports;
 
   if (result.changed()) {
@@ -145,8 +141,7 @@ void record_update_result(DemoState &state,
  *
  * stop() 本身允许重复调用，但单独维护标志可以让 Demo 生命周期更清晰。
  */
-void request_stop(Engine &engine, DemoState &state) {
-
+void request_stop(Engine& engine, DemoState& state) {
   if (state.stop_requested) {
     return;
   }
@@ -164,8 +159,7 @@ void request_stop(Engine &engine, DemoState &state) {
  * 不能仅根据 sequence_complete 停止，否则最后一个 UDP 包可能还在
  * socket 接收队列中，尚未被 AIO 回调读取。
  */
-void stop_if_complete(Engine &engine, DemoState &state) {
-
+void stop_if_complete(Engine& engine, DemoState& state) {
   if (state.sequence_complete && state.received == EXPECTED_DATAGRAMS) {
     request_stop(engine, state);
   }
@@ -175,30 +169,26 @@ void stop_if_complete(Engine &engine, DemoState &state) {
  *
  * 字符串只打印长度，不输出完整 128 字节内容，避免日志过长。
  */
-void print_decoded_record(const Wire::DecodedRecord &record) {
-
-  const MonData::MonitorKey &key = record._data._key;
+void print_decoded_record(const Wire::DecodedRecord& record) {
+  const MonData::MonitorKey& key = record._data._key;
 
   std::cout << "[recv]" << " version=" << static_cast<unsigned>(record._version)
-            << " mid=" << key._mid << " level=" << key._level
-            << " fid=" << key._fid << " eid=" << key._eid << " description=\""
-            << record._data._description << "\"";
+            << " mid=" << key._mid << " level=" << key._level << " fid=" << key._fid
+            << " eid=" << key._eid << " description=\"" << record._data._description << "\"";
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record._data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record._data._value);
 
   if (numeric != nullptr) {
     std::cout << " value=" << numeric->_value << " state=" << numeric->_state;
   } else {
-    const auto *text = std::get_if<std::string>(&record._data._value);
+    const auto* text = std::get_if<std::string>(&record._data._value);
 
     if (text != nullptr) {
       std::cout << " string_length=" << text->size();
     }
   }
 
-  std::cout << " changed_at="
-            << (record._changed_at.has_value() ? "present" : "missing") << '\n'
+  std::cout << " changed_at=" << (record._changed_at.has_value() ? "present" : "missing") << '\n'
             << std::flush;
 }
 /*
@@ -207,10 +197,8 @@ void print_decoded_record(const Wire::DecodedRecord &record) {
  * UdpReceiver 使用非阻塞 socket。
  * WOULD_BLOCK 表示本轮队列已经排空，是正常结束条件。
  */
-int drain_receiver(Engine &engine,
-                   const std::shared_ptr<Wire::UdpReceiver> &receiver,
-                   const std::shared_ptr<DemoState> &state) {
-
+int drain_receiver(Engine& engine, const std::shared_ptr<Wire::UdpReceiver>& receiver,
+                   const std::shared_ptr<DemoState>& state) {
   while (true) {
     Wire::UdpReceiveResult result = receiver->receive_one();
 
@@ -219,11 +207,9 @@ int drain_receiver(Engine &engine,
     }
 
     if (!result.success() || !result._record.has_value()) {
-
       ++state->receive_errors;
 
-      std::cerr << "[recv] failed"
-                << " receive_status=" << static_cast<int>(result._status)
+      std::cerr << "[recv] failed" << " receive_status=" << static_cast<int>(result._status)
                 << " wire_status=" << static_cast<int>(result._wire_status)
                 << " errno=" << result._system_error << '\n';
 
@@ -244,12 +230,10 @@ int drain_receiver(Engine &engine,
   }
 }
 
-const Wire::DecodedRecord *find_latest_decoded(const DemoState &state,
-                                               const MonData::MonitorKey &key) {
-
-  for (auto iterator = state.decoded_records.rbegin();
-       iterator != state.decoded_records.rend(); ++iterator) {
-
+const Wire::DecodedRecord* find_latest_decoded(const DemoState& state,
+                                               const MonData::MonitorKey& key) {
+  for (auto iterator = state.decoded_records.rbegin(); iterator != state.decoded_records.rend();
+       ++iterator) {
     if (iterator->_data._key == key) {
       return &*iterator;
     }
@@ -261,45 +245,38 @@ const Wire::DecodedRecord *find_latest_decoded(const DemoState &state,
 /*
  * 检查一条 StoredRecord 是否包含指定 numeric value/state。
  */
-bool stored_numeric_equals(const std::optional<MonData::StoredRecord> &record,
-                           std::uint32_t value, std::uint32_t state) {
-
+bool stored_numeric_equals(const std::optional<MonData::StoredRecord>& record, std::uint32_t value,
+                           std::uint32_t state) {
   if (!record.has_value()) {
     return false;
   }
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record->_data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record->_data._value);
 
-  return numeric != nullptr && numeric->_value == value &&
-         numeric->_state == state;
+  return numeric != nullptr && numeric->_value == value && numeric->_state == state;
 }
 
 /*
  * 检查一条解码记录是否包含指定 numeric value/state。
  */
-bool decoded_numeric_equals(const Wire::DecodedRecord *record,
-                            std::uint32_t value, std::uint32_t state) {
-
+bool decoded_numeric_equals(const Wire::DecodedRecord* record, std::uint32_t value,
+                            std::uint32_t state) {
   if (record == nullptr) {
     return false;
   }
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record->_data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record->_data._value);
 
-  return numeric != nullptr && numeric->_value == value &&
-         numeric->_state == state;
+  return numeric != nullptr && numeric->_value == value && numeric->_state == state;
 }
 
 /*
  * 输出稳定的 PASS/FAIL 验收行。
  */
-void print_check(const char *name, bool passed) {
-
+void print_check(const char* name, bool passed) {
   std::cout << name << '=' << (passed ? "PASS" : "FAIL") << '\n';
 }
-} // namespace
+}  // namespace
 
 int main() {
   /*
@@ -314,13 +291,11 @@ int main() {
    *
    * 端口传 0，让系统选择空闲端口，避免固定 9100 与其他测试冲突。
    */
-  auto receiver = std::make_shared<Wire::UdpReceiver>(
-      Wire::UdpReceiverConfig{"127.0.0.1", 0U});
+  auto receiver = std::make_shared<Wire::UdpReceiver>(Wire::UdpReceiverConfig{"127.0.0.1", 0U});
 
   if (!receiver->ready()) {
     std::cerr << "[demo_pub] receiver setup failed"
-              << " status=" << static_cast<int>(receiver->setup_status())
-              << '\n';
+              << " status=" << static_cast<int>(receiver->setup_status()) << '\n';
 
     return 1;
   }
@@ -336,8 +311,8 @@ int main() {
   const ENGINESTATE init_result = engine.init();
 
   if (init_result != ENGINESTATE::SUCCESSFUL) {
-    std::cerr << "[demo_pub] engine init failed"
-              << " status=" << static_cast<int>(init_result) << '\n';
+    std::cerr << "[demo_pub] engine init failed" << " status=" << static_cast<int>(init_result)
+              << '\n';
 
     return 1;
   }
@@ -348,13 +323,12 @@ int main() {
    * Receiver 仍拥有并负责关闭 fd；
    * Engine 只监听该 fd，不接管所有权。
    */
-  const std::optional<AioHandle> receiver_handle = engine.add_aio(
-      receiver->fd(), MonCallback{"demo-pub-receiver",
-                                  [&engine, receiver, state]() -> int {
-                                    return drain_receiver(engine, receiver,
-                                                          state);
-                                  },
-                                  false});
+  const std::optional<AioHandle> receiver_handle =
+      engine.add_aio(receiver->fd(), MonCallback{"demo-pub-receiver",
+                                                 [&engine, receiver, state]() -> int {
+                                                   return drain_receiver(engine, receiver, state);
+                                                 },
+                                                 false});
 
   if (!receiver_handle.has_value()) {
     std::cerr << "[demo_pub] failed to register receiver AIO\n";
@@ -367,14 +341,12 @@ int main() {
    *
    * 目标端口直接使用 Receiver 实际绑定端口。
    */
-  auto publisher =
-      std::make_shared<Wire::UdpPublisher>(Wire::UdpPublisherConfig{
-          {"127.0.0.1", receiver->bound_port()}, Wire::WireVersion::V2});
+  auto publisher = std::make_shared<Wire::UdpPublisher>(
+      Wire::UdpPublisherConfig{{"127.0.0.1", receiver->bound_port()}, Wire::WireVersion::V2});
 
   if (!publisher->ready()) {
     std::cerr << "[demo_pub] publisher setup failed"
-              << " status=" << static_cast<int>(publisher->setup_status())
-              << '\n';
+              << " status=" << static_cast<int>(publisher->setup_status()) << '\n';
 
     return 1;
   }
@@ -385,23 +357,21 @@ int main() {
    * MonitorReporter 只会为 INSERTED/UPDATED 调用该回调；
    * UNCHANGED 不会进入这里。
    */
-  const bool publisher_installed = engine.set_publisher(
-      [&engine, publisher, state](MonData::StoredRecord record) {
+  const bool publisher_installed =
+      engine.set_publisher([&engine, publisher, state](MonData::StoredRecord record) {
         const Wire::UdpPublishResult result = publisher->send(record);
 
         if (result.success()) {
           ++state->published;
 
-          std::cout << "[publish] bytes=" << result._bytes_sent << '\n'
-                    << std::flush;
+          std::cout << "[publish] bytes=" << result._bytes_sent << '\n' << std::flush;
 
           return;
         }
 
         ++state->send_errors;
 
-        std::cerr << "[publish] failed"
-                  << " status=" << static_cast<int>(result._status)
+        std::cerr << "[publish] failed" << " status=" << static_cast<int>(result._status)
                   << " wire_status=" << static_cast<int>(result._wire_status)
                   << " errno=" << result._system_error << '\n';
 
@@ -432,8 +402,8 @@ int main() {
 
                     record_update_result(*state, result);
 
-                    std::cout << "[report] error value=0" << " status="
-                              << update_status_name(result._status) << '\n'
+                    std::cout << "[report] error value=0"
+                              << " status=" << update_status_name(result._status) << '\n'
                               << std::flush;
 
                     return 0;
@@ -463,11 +433,9 @@ int main() {
 
                     record_update_result(*state, result);
 
-                    std::cout
-                        << "[report] string" << " length=" << value.size()
-                        << " status=" << update_status_name(result._status)
-                        << '\n'
-                        << std::flush;
+                    std::cout << "[report] string" << " length=" << value.size()
+                              << " status=" << update_status_name(result._status) << '\n'
+                              << std::flush;
 
                     return 0;
                   },
@@ -487,41 +455,38 @@ int main() {
    * 直到 Engine 停止时统一清理。
    */
   const auto count_timer = engine.set_timer(
-      MonCallback{
-          "demo-pub-count",
-          [&engine, state]() -> int {
-            if (state->sequence_complete) {
-              return 0;
-            }
+      MonCallback{"demo-pub-count",
+                  [&engine, state]() -> int {
+                    if (state->sequence_complete) {
+                      return 0;
+                    }
 
-            const std::uint32_t value = COUNT_SEQUENCE[state->sequence_index];
+                    const std::uint32_t value = COUNT_SEQUENCE[state->sequence_index];
 
-            ++state->sequence_index;
+                    ++state->sequence_index;
 
-            const MonData::UpdateResult result =
-                engine.report_count(COUNT_KEY, value, "cpu temperature");
+                    const MonData::UpdateResult result =
+                        engine.report_count(COUNT_KEY, value, "cpu temperature");
 
-            record_update_result(*state, result);
+                    record_update_result(*state, result);
 
-            std::cout << "[report] count" << " value=" << value
-                      << " status=" << update_status_name(result._status)
-                      << '\n'
-                      << std::flush;
+                    std::cout << "[report] count" << " value=" << value
+                              << " status=" << update_status_name(result._status) << '\n'
+                              << std::flush;
 
-            if (state->sequence_index == COUNT_SEQUENCE.size()) {
+                    if (state->sequence_index == COUNT_SEQUENCE.size()) {
+                      state->sequence_complete = true;
 
-              state->sequence_complete = true;
+                      /*
+                       * 最后一次上报是重复 0，不产生新 UDP 包。
+                       * 如果此前 6 个数据报都已收到，可以立即停止。
+                       */
+                      stop_if_complete(engine, *state);
+                    }
 
-              /*
-               * 最后一次上报是重复 0，不产生新 UDP 包。
-               * 如果此前 6 个数据报都已收到，可以立即停止。
-               */
-              stop_if_complete(engine, *state);
-            }
-
-            return 0;
-          },
-          false},
+                    return 0;
+                  },
+                  false},
       TimerFlags::RECURRING, 200ms);
 
   if (!count_timer.has_value()) {
@@ -536,20 +501,19 @@ int main() {
    * 正常 Demo 在约 1.4 秒结束。
    * 5 秒仍未完成说明 UDP、Timer 或 AIO 链路存在问题。
    */
-  const auto watchdog_timer =
-      engine.set_timer(MonCallback{"demo-pub-watchdog",
-                                   [&engine, state]() -> int {
-                                     state->timed_out = true;
+  const auto watchdog_timer = engine.set_timer(MonCallback{"demo-pub-watchdog",
+                                                           [&engine, state]() -> int {
+                                                             state->timed_out = true;
 
-                                     std::cerr
-                                         << "[demo_pub] watchdog timeout\n";
+                                                             std::cerr
+                                                                 << "[demo_pub] watchdog timeout\n";
 
-                                     request_stop(engine, *state);
+                                                             request_stop(engine, *state);
 
-                                     return 0;
-                                   },
-                                   false},
-                       TimerFlags::ONCE, 5s);
+                                                             return 0;
+                                                           },
+                                                           false},
+                                               TimerFlags::ONCE, 5s);
 
   if (!watchdog_timer.has_value()) {
     std::cerr << "[demo_pub] failed to register watchdog\n";
@@ -561,8 +525,7 @@ int main() {
    * 步骤 11：打印启动信息。
    */
   std::cout << "pipeline: report" << " -> dedup" << " -> V2 encode"
-            << " -> UDP:" << receiver->bound_port() << " -> AIO receive"
-            << " -> decode\n"
+            << " -> UDP:" << receiver->bound_port() << " -> AIO receive" << " -> decode\n"
             << std::flush;
 
   /*
@@ -593,7 +556,7 @@ int main() {
   bool string_store_ok = false;
 
   if (string_stored.has_value()) {
-    const auto *value = std::get_if<std::string>(&string_stored->_data._value);
+    const auto* value = std::get_if<std::string>(&string_stored->_data._value);
 
     string_store_ok = value != nullptr && value->size() == LONG_STRING_SIZE &&
                       string_stored->_data._description == "boot phase";
@@ -602,21 +565,18 @@ int main() {
   /*
    * 步骤 14：验证接收到的 V2 数据。
    */
-  const Wire::DecodedRecord *final_count =
-      find_latest_decoded(*state, COUNT_KEY);
+  const Wire::DecodedRecord* final_count = find_latest_decoded(*state, COUNT_KEY);
 
-  const Wire::DecodedRecord *error_record =
-      find_latest_decoded(*state, ERROR_KEY);
+  const Wire::DecodedRecord* error_record = find_latest_decoded(*state, ERROR_KEY);
 
-  const Wire::DecodedRecord *string_record =
-      find_latest_decoded(*state, STRING_KEY);
+  const Wire::DecodedRecord* string_record = find_latest_decoded(*state, STRING_KEY);
 
   const bool error_wire_ok = decoded_numeric_equals(error_record, 0U, 2U);
 
   bool string_wire_ok = false;
 
   if (string_record != nullptr) {
-    const auto *value = std::get_if<std::string>(&string_record->_data._value);
+    const auto* value = std::get_if<std::string>(&string_record->_data._value);
 
     string_wire_ok = value != nullptr && value->size() == LONG_STRING_SIZE &&
                      string_record->_data._description == "boot phase" &&
@@ -626,37 +586,34 @@ int main() {
   /*
    * 所有接收记录都必须明确是 V2，并携带 description/timestamp。
    */
-  const bool metadata_ok =
-      std::all_of(state->decoded_records.begin(), state->decoded_records.end(),
-                  [](const Wire::DecodedRecord &record) {
-                    return record._version == Wire::WireVersion::V2 &&
-                           !record._data._description.empty() &&
-                           record._changed_at.has_value();
-                  });
+  const bool metadata_ok = std::all_of(state->decoded_records.begin(), state->decoded_records.end(),
+                                       [](const Wire::DecodedRecord& record) {
+                                         return record._version == Wire::WireVersion::V2 &&
+                                                !record._data._description.empty() &&
+                                                record._changed_at.has_value();
+                                       });
 
   /*
    * COUNT_KEY 应收到 10、20、30、0 四个变化包。
    */
-  const std::size_t count_datagrams = static_cast<std::size_t>(std::count_if(
-      state->decoded_records.begin(), state->decoded_records.end(),
-      [](const Wire::DecodedRecord &record) {
-        return record._data._key == COUNT_KEY;
-      }));
+  const std::size_t count_datagrams = static_cast<std::size_t>(
+      std::count_if(state->decoded_records.begin(), state->decoded_records.end(),
+                    [](const Wire::DecodedRecord& record) {
+                      return record._data._key == COUNT_KEY;
+                    }));
 
   const bool reports_ok = state->reports == EXPECTED_REPORTS;
 
-  const bool dedup_ok =
-      state->changed == EXPECTED_CHANGED &&
-      state->unchanged == EXPECTED_UNCHANGED && state->invalid_updates == 0U &&
-      state->published == EXPECTED_DATAGRAMS &&
-      state->received == EXPECTED_DATAGRAMS && count_datagrams == 4U &&
-      decoded_numeric_equals(final_count, 0U, 0U);
+  const bool dedup_ok = state->changed == EXPECTED_CHANGED &&
+                        state->unchanged == EXPECTED_UNCHANGED && state->invalid_updates == 0U &&
+                        state->published == EXPECTED_DATAGRAMS &&
+                        state->received == EXPECTED_DATAGRAMS && count_datagrams == 4U &&
+                        decoded_numeric_equals(final_count, 0U, 0U);
 
-  const bool transport_ok =
-      state->send_errors == 0U && state->receive_errors == 0U;
+  const bool transport_ok = state->send_errors == 0U && state->receive_errors == 0U;
 
-  const bool store_ok = store_snapshot.size() == EXPECTED_STORE_RECORDS &&
-                        count_store_ok && error_store_ok && string_store_ok;
+  const bool store_ok = store_snapshot.size() == EXPECTED_STORE_RECORDS && count_store_ok &&
+                        error_store_ok && string_store_ok;
 
   const bool lifecycle_ok = run_result == ENGINESTATE::SUCCESSFUL &&
                             engine.get_phase() == EnginePhase::STOPPED &&
@@ -665,9 +622,8 @@ int main() {
   /*
    * 步骤 15：计算最终结果。
    */
-  const bool overall = reports_ok && dedup_ok && transport_ok && store_ok &&
-                       lifecycle_ok && error_wire_ok && string_wire_ok &&
-                       metadata_ok;
+  const bool overall = reports_ok && dedup_ok && transport_ok && store_ok && lifecycle_ok &&
+                       error_wire_ok && string_wire_ok && metadata_ok;
 
   /*
    * 步骤 16：输出稳定的机器可读验收标记。

@@ -40,7 +40,8 @@ bool is_aligned(const void* pointer, std::size_t alignment) noexcept {
 }  // namespace
 
 ParallelCopyPool::ParallelCopyPool(std::size_t worker_count, const int* cpu_ids)
-    : worker_count_(worker_count), tasks_(worker_count) {
+    : worker_count_(worker_count)
+    , tasks_(worker_count) {
   if (worker_count_ == 0) {
     throw std::invalid_argument("worker_count must be greater than zero");
   }
@@ -62,8 +63,9 @@ ParallelCopyPool::ParallelCopyPool(std::size_t worker_count, const int* cpu_ids)
     for (std::size_t worker_index = 0; worker_index < worker_count_; ++worker_index) {
       const int cpu_id = worker_cpu_ids_[worker_index];
 
-      workers_.emplace_back(
-          [this, worker_index, cpu_id]() noexcept { worker_loop(worker_index, cpu_id); });
+      workers_.emplace_back([this, worker_index, cpu_id]() noexcept {
+        worker_loop(worker_index, cpu_id);
+      });
     }
 
   } catch (...) {
@@ -80,7 +82,9 @@ ParallelCopyPool::ParallelCopyPool(std::size_t worker_count, const int* cpu_ids)
   //   CPU affinity
   std::unique_lock<std::mutex> lock(mutex_);
 
-  startup_condition_.wait(lock, [this]() noexcept { return ready_count_ == worker_count_; });
+  startup_condition_.wait(lock, [this]() noexcept {
+    return ready_count_ == worker_count_;
+  });
 
   if (worker_start_failed_) {
     lock.unlock();
@@ -128,32 +132,20 @@ void ParallelCopyPool::dispatch_copy(const std::vector<std::size_t>& active_work
   //
   // 先验证 worker index（工作线程索引）。
   //
-  for (std::size_t index = 0;
-       index < active_worker_indices.size();
-       ++index) {
-
-    const std::size_t worker_index =
-        active_worker_indices[index];
+  for (std::size_t index = 0; index < active_worker_indices.size(); ++index) {
+    const std::size_t worker_index = active_worker_indices[index];
 
     if (worker_index >= worker_count_) {
-      throw std::out_of_range(
-          "active worker index out of range");
+      throw std::out_of_range("active worker index out of range");
     }
 
     //
     // 防止重复 worker。
     //
-    for (std::size_t next_index =
-             index + 1;
-         next_index <
-             active_worker_indices.size();
+    for (std::size_t next_index = index + 1; next_index < active_worker_indices.size();
          ++next_index) {
-
-      if (worker_index ==
-          active_worker_indices[next_index]) {
-
-        throw std::invalid_argument(
-            "duplicate active worker index");
+      if (worker_index == active_worker_indices[next_index]) {
+        throw std::invalid_argument("duplicate active worker index");
       }
     }
   }
@@ -164,8 +156,7 @@ void ParallelCopyPool::dispatch_copy(const std::vector<std::size_t>& active_work
   // 一个 worker 至少分配一个 NT block（非临时复制块）。
   const std::size_t active_worker_count = active_worker_indices.size();
   if (block_count < active_worker_count) {
-    throw std::invalid_argument(
-        "not enough NT blocks for active workers");
+    throw std::invalid_argument("not enough NT blocks for active workers");
   }
   const std::size_t base_block_count = block_count / active_worker_count;
   const std::size_t extra_block_count = block_count % active_worker_count;
@@ -194,7 +185,8 @@ void ParallelCopyPool::dispatch_copy(const std::vector<std::size_t>& active_work
 
     for (std::size_t active_rank = 0; active_rank < active_worker_count; ++active_rank) {
       const std::size_t worker_index = active_worker_indices[active_rank];
-      const std::size_t worker_block_count = base_block_count + (active_rank < extra_block_count ? 1 : 0);
+      const std::size_t worker_block_count =
+          base_block_count + (active_rank < extra_block_count ? 1 : 0);
       const std::size_t worker_size = worker_block_count * k_nt_block_size;
 
       tasks_[worker_index] = {dst_bytes + current_offset, src_bytes + current_offset, worker_size};
@@ -408,9 +400,7 @@ void ParallelCopyPool::stop_and_join() noexcept {
 
   for (const auto& worker_state : worker_states_) {
     // Pair with the worker's condition wait to avoid a lost shutdown wake-up.
-    {
-      std::lock_guard<std::mutex> worker_lock(worker_state->mutex);
-    }
+    { std::lock_guard<std::mutex> worker_lock(worker_state->mutex); }
     worker_state->condition.notify_one();
   }
   startup_condition_.notify_all();

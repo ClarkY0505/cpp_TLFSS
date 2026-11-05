@@ -35,8 +35,8 @@ Acceptor::Acceptor(EventLoop* loop, const InetAddress& listen_addr, bool reuse_p
 }
 
 Acceptor::~Acceptor() {
-    _accept_channel.disable_all();
-    _accept_channel.remove();
+  _accept_channel.disable_all();
+  _accept_channel.remove();
 }
 
 //
@@ -46,10 +46,10 @@ void Acceptor::handle_read() {
   int connfd = _accept_socket.accept(&peer_addr);
   if (connfd >= 0) {
     if (_new_connection_cb) {
-        //
-        // 轮询获取subloop,
-        // 唤醒，分发
-        // 当前的新客户端的channel
+      //
+      // 轮询获取subloop,
+      // 唤醒，分发
+      // 当前的新客户端的channel
       _new_connection_cb(connfd, peer_addr);
     } else {
       ::close(connfd);
@@ -67,10 +67,10 @@ void Acceptor::handle_read() {
   }
 }
 
-void Acceptor::listen(){
-    _listenning = true;
-    _accept_socket.listen();
-    // 唤醒poller
-    _accept_channel.enable_reading();
+void Acceptor::listen() {
+  _listenning = true;
+  _accept_socket.listen();
+  // 唤醒poller
+  _accept_channel.enable_reading();
 }
 }  // namespace TLSS::NET

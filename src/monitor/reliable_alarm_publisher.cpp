@@ -4,6 +4,13 @@
 #include "alarm_spool.h"
 #include "monitor_wire.h"
 
+#include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/random.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -12,18 +19,11 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <fcntl.h>
 #include <memory>
 #include <mutex>
-#include <netdb.h>
 #include <optional>
-#include <poll.h>
-#include <sys/random.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 #include <system_error>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -47,8 +47,9 @@ enum class DeliveryStatus : std::uint8_t {
 };
 
 class UniqueFd final {
-public:
-  explicit UniqueFd(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit UniqueFd(int fd = -1) noexcept
+      : _fd(fd) {}
 
   ~UniqueFd() {
     if (_fd >= 0) {
@@ -56,10 +57,12 @@ public:
     }
   }
 
-  UniqueFd(const UniqueFd &) = delete;
-  UniqueFd &operator=(const UniqueFd &) = delete;
+  UniqueFd(const UniqueFd&) = delete;
+  UniqueFd& operator=(const UniqueFd&) = delete;
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
   int release() noexcept {
     const int fd = _fd;
@@ -67,12 +70,11 @@ public:
     return fd;
   }
 
-private:
+ private:
   int _fd;
 };
 
 Deadline make_deadline(std::chrono::milliseconds timeout) noexcept {
-
   const Deadline now = Clock::now();
   const auto maximum = Deadline::max() - now;
 
@@ -96,8 +98,7 @@ int remaining_timeout_ms(Deadline deadline) noexcept {
 
   const Clock::duration remaining = deadline - now;
 
-  auto milliseconds =
-      std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+  auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
 
   /*
    * poll() 使用整数毫秒。向上取整，避免不足 1ms 时提前超时。
@@ -113,8 +114,7 @@ int remaining_timeout_ms(Deadline deadline) noexcept {
   return static_cast<int>(milliseconds.count());
 }
 
-bool valid_config(const ReliableAlarmPublisherConfig &config) noexcept {
-
+bool valid_config(const ReliableAlarmPublisherConfig& config) noexcept {
   return !config._collector_host.empty() && config._collector_port != 0U &&
          config._source_id != 0U && !config._outbox_dir.empty() &&
          config._ack_timeout > std::chrono::milliseconds::zero() &&
@@ -124,14 +124,11 @@ bool valid_config(const ReliableAlarmPublisherConfig &config) noexcept {
 /*
  * 不允许退化到 rand()、时间戳或进程号。
  */
-bool secure_random_message_id(AlarmWire::AlarmMessageId &message_id,
-                              int &system_error) noexcept {
-
+bool secure_random_message_id(AlarmWire::AlarmMessageId& message_id, int& system_error) noexcept {
   std::size_t offset = 0U;
 
   while (offset < message_id.size()) {
-    const ssize_t received =
-        ::getrandom(message_id.data() + offset, message_id.size() - offset, 0);
+    const ssize_t received = ::getrandom(message_id.data() + offset, message_id.size() - offset, 0);
 
     if (received > 0) {
       offset += static_cast<std::size_t>(received);
@@ -149,28 +146,27 @@ bool secure_random_message_id(AlarmWire::AlarmMessageId &message_id,
   return true;
 }
 
-std::optional<std::uint64_t>
-timestamp_milliseconds(MonData::MonitorTimestamp timestamp) noexcept {
-
+std::optional<std::uint64_t> timestamp_milliseconds(MonData::MonitorTimestamp timestamp) noexcept {
   const auto duration = timestamp.time_since_epoch();
 
   if (duration < MonData::MonitorTimestamp::duration::zero()) {
     return std::nullopt;
   }
 
-  const auto milliseconds =
-      std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+  const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
 
   return static_cast<std::uint64_t>(milliseconds.count());
 }
 
-} // namespace
+}  // namespace
 
 struct ReliableAlarmPublisher::Impl final {
-  explicit Impl(const ReliableAlarmPublisherConfig &input_config)
+  explicit Impl(const ReliableAlarmPublisherConfig& input_config)
       : _config(input_config) {}
 
-  ~Impl() { stop(); }
+  ~Impl() {
+    stop();
+  }
 
   bool initialize();
 
@@ -196,10 +192,10 @@ struct ReliableAlarmPublisher::Impl final {
   void close_socket() noexcept;
   int socket_snapshot() const noexcept;
 
-  IoStatus send_all(int fd, const std::uint8_t *data, std::size_t size,
+  IoStatus send_all(int fd, const std::uint8_t* data, std::size_t size,
                     Deadline deadline) const noexcept;
 
-  IoStatus receive_all(int fd, std::uint8_t *data, std::size_t size,
+  IoStatus receive_all(int fd, std::uint8_t* data, std::size_t size,
                        Deadline deadline) const noexcept;
 
   struct ReceiveResult final {
@@ -209,8 +205,8 @@ struct ReliableAlarmPublisher::Impl final {
 
   ReceiveResult receive_frame(int fd, Deadline deadline) const;
 
-  DeliveryStatus send_alarm_and_wait_ack(const std::vector<std::uint8_t> &wire,
-                                         const AlarmWire::AlarmFrame &sent);
+  DeliveryStatus send_alarm_and_wait_ack(const std::vector<std::uint8_t>& wire,
+                                         const AlarmWire::AlarmFrame& sent);
   ReliableAlarmPublisherStatus status() const;
 
   bool heartbeat();
@@ -220,10 +216,9 @@ struct ReliableAlarmPublisher::Impl final {
   bool wait_backoff();
   void reset_backoff();
 
-  AlarmEnqueueResult
-  map_spool_result(const AlarmWire::AlarmSpoolStoreResult &result) const;
+  AlarmEnqueueResult map_spool_result(const AlarmWire::AlarmSpoolStoreResult& result) const;
 
-  const ReliableAlarmPublisherConfig &_config;
+  const ReliableAlarmPublisherConfig& _config;
 
   std::unique_ptr<AlarmWire::AlarmSpool> _spool;
 
@@ -260,11 +255,9 @@ bool ReliableAlarmPublisher::Impl::initialize() {
   }
 
   try {
-    _spool =
-        std::make_unique<AlarmWire::AlarmSpool>(AlarmWire::AlarmSpoolConfig{
-            _config._outbox_dir, AlarmWire::AlarmSpoolKind::OUTBOX,
-            _config._max_outbox_bytes});
-  } catch (const std::bad_alloc &) {
+    _spool = std::make_unique<AlarmWire::AlarmSpool>(AlarmWire::AlarmSpoolConfig{
+        _config._outbox_dir, AlarmWire::AlarmSpoolKind::OUTBOX, _config._max_outbox_bytes});
+  } catch (const std::bad_alloc&) {
     _setup_status = ReliableAlarmPublisherSetupStatus::SPOOL_ERROR;
     _setup_error = ENOMEM;
     return false;
@@ -283,14 +276,16 @@ bool ReliableAlarmPublisher::Impl::initialize() {
   }
 
   try {
-    _worker = std::thread([this] { run(); });
-  } catch (const std::system_error &error) {
+    _worker = std::thread([this] {
+      run();
+    });
+  } catch (const std::system_error& error) {
     std::lock_guard<std::mutex> lock(_mutex);
     _accepting = false;
     _setup_status = ReliableAlarmPublisherSetupStatus::THREAD_ERROR;
     _setup_error = error.code().value();
     return false;
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     std::lock_guard<std::mutex> lock(_mutex);
     _accepting = false;
     _setup_status = ReliableAlarmPublisherSetupStatus::THREAD_ERROR;
@@ -337,7 +332,7 @@ ReliableAlarmPublisherStatus ReliableAlarmPublisher::Impl::status() const {
       snapshot._pending_bytes = result._stats._bytes;
       snapshot._corrupt_files = result._stats._corrupt_files;
     }
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     snapshot._spool_error = ENOMEM;
   } catch (...) {
     snapshot._spool_error = EIO;
@@ -379,44 +374,42 @@ void ReliableAlarmPublisher::Impl::stop() noexcept {
 }
 
 AlarmEnqueueResult ReliableAlarmPublisher::Impl::map_spool_result(
-    const AlarmWire::AlarmSpoolStoreResult &result) const {
-
+    const AlarmWire::AlarmSpoolStoreResult& result) const {
   using AlarmWire::AlarmSpoolStatus;
 
   switch (result._status) {
-  case AlarmSpoolStatus::SUCCESS:
-    return {AlarmEnqueueStatus::SUCCESS, 0};
+    case AlarmSpoolStatus::SUCCESS:
+      return {AlarmEnqueueStatus::SUCCESS, 0};
 
-  case AlarmSpoolStatus::FULL:
-    return {AlarmEnqueueStatus::SPOOL_FULL, 0};
+    case AlarmSpoolStatus::FULL:
+      return {AlarmEnqueueStatus::SPOOL_FULL, 0};
 
-  case AlarmSpoolStatus::NOT_READY:
-    return {AlarmEnqueueStatus::NOT_READY, result._system_error};
+    case AlarmSpoolStatus::NOT_READY:
+      return {AlarmEnqueueStatus::NOT_READY, result._system_error};
 
-  case AlarmSpoolStatus::DUPLICATE:
-    /*
-     * 随机 message ID 碰撞由 enqueue() 重试，
-     * 正常不会走到最终映射。
-     */
-    return {AlarmEnqueueStatus::RANDOM_FAILED, EEXIST};
+    case AlarmSpoolStatus::DUPLICATE:
+      /*
+       * 随机 message ID 碰撞由 enqueue() 重试，
+       * 正常不会走到最终映射。
+       */
+      return {AlarmEnqueueStatus::RANDOM_FAILED, EEXIST};
 
-  case AlarmSpoolStatus::INVALID_ARGUMENT:
-  case AlarmSpoolStatus::INVALID_FRAME:
-    return {AlarmEnqueueStatus::ENCODE_FAILED, 0};
+    case AlarmSpoolStatus::INVALID_ARGUMENT:
+    case AlarmSpoolStatus::INVALID_FRAME:
+      return {AlarmEnqueueStatus::ENCODE_FAILED, 0};
 
-  case AlarmSpoolStatus::EMPTY:
-  case AlarmSpoolStatus::NOT_FOUND:
-  case AlarmSpoolStatus::OUTSIDE_ROOT:
-  case AlarmSpoolStatus::CORRUPT:
-  case AlarmSpoolStatus::IO_ERROR:
-    return {AlarmEnqueueStatus::IO_ERROR, result._system_error};
+    case AlarmSpoolStatus::EMPTY:
+    case AlarmSpoolStatus::NOT_FOUND:
+    case AlarmSpoolStatus::OUTSIDE_ROOT:
+    case AlarmSpoolStatus::CORRUPT:
+    case AlarmSpoolStatus::IO_ERROR:
+      return {AlarmEnqueueStatus::IO_ERROR, result._system_error};
   }
 
   return {AlarmEnqueueStatus::IO_ERROR, EIO};
 }
 
-AlarmEnqueueResult
-ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
+AlarmEnqueueResult ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
   // 本路径只做编码与持久化。网络发送交给 worker，成功表示可恢复的入队。
   if (!ready()) {
     return {AlarmEnqueueStatus::NOT_READY, 0};
@@ -445,15 +438,13 @@ ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
     frame._payload = std::move(payload._bytes);
 
     for (unsigned int attempt = 0U; attempt < MESSAGE_ID_ATTEMPTS; ++attempt) {
-
       int random_error = 0;
 
       if (!secure_random_message_id(frame._message_id, random_error)) {
         return {AlarmEnqueueStatus::RANDOM_FAILED, random_error};
       }
 
-      const AlarmWire::AlarmEncodeResult encoded =
-          AlarmWire::encode_alarm_frame(frame);
+      const AlarmWire::AlarmEncodeResult encoded = AlarmWire::encode_alarm_frame(frame);
 
       if (!encoded.success()) {
         return {AlarmEnqueueStatus::ENCODE_FAILED, 0};
@@ -490,16 +481,15 @@ ReliableAlarmPublisher::Impl::enqueue(MonData::StoredRecord record) {
     }
 
     return {AlarmEnqueueStatus::RANDOM_FAILED, EEXIST};
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     return {AlarmEnqueueStatus::ENCODE_FAILED, ENOMEM};
   } catch (...) {
     return {AlarmEnqueueStatus::IO_ERROR, EIO};
   }
 }
 
-IoStatus
-ReliableAlarmPublisher::Impl::wait_fd(int fd, short events,
-                                      Deadline deadline) const noexcept {
+IoStatus ReliableAlarmPublisher::Impl::wait_fd(int fd, short events,
+                                               Deadline deadline) const noexcept {
   // 使用绝对截止时间，EINTR 或短暂就绪不会重新计满超时。
   for (;;) {
     if (stopping()) {
@@ -565,27 +555,24 @@ bool ReliableAlarmPublisher::Impl::connect_collector() {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  addrinfo *raw_addresses = nullptr;
+  addrinfo* raw_addresses = nullptr;
 
-  const int address_result = ::getaddrinfo(
-      _config._collector_host.c_str(), service.c_str(), &hints, &raw_addresses);
+  const int address_result =
+      ::getaddrinfo(_config._collector_host.c_str(), service.c_str(), &hints, &raw_addresses);
 
   if (address_result != 0) {
     return false;
   }
 
-  const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> addresses(
-      raw_addresses, &::freeaddrinfo);
+  const std::unique_ptr<addrinfo, decltype(&::freeaddrinfo)> addresses(raw_addresses,
+                                                                       &::freeaddrinfo);
 
-  for (const addrinfo *address = addresses.get(); address != nullptr;
-       address = address->ai_next) {
-
+  for (const addrinfo* address = addresses.get(); address != nullptr; address = address->ai_next) {
     if (stopping() || Clock::now() >= deadline) {
       return false;
     }
 
-    UniqueFd socket{::socket(address->ai_family, address->ai_socktype,
-                             address->ai_protocol)};
+    UniqueFd socket{::socket(address->ai_family, address->ai_socktype, address->ai_protocol)};
 
     if (socket.get() < 0) {
       continue;
@@ -593,8 +580,7 @@ bool ReliableAlarmPublisher::Impl::connect_collector() {
 
     const int old_flags = ::fcntl(socket.get(), F_GETFL, 0);
 
-    if (old_flags < 0 ||
-        ::fcntl(socket.get(), F_SETFL, old_flags | O_NONBLOCK) != 0 ||
+    if (old_flags < 0 || ::fcntl(socket.get(), F_SETFL, old_flags | O_NONBLOCK) != 0 ||
         ::fcntl(socket.get(), F_SETFD, FD_CLOEXEC) != 0) {
       continue;
     }
@@ -604,8 +590,7 @@ bool ReliableAlarmPublisher::Impl::connect_collector() {
     if (result != 0) {
       const int connect_error = errno;
 
-      if (connect_error != EINPROGRESS && connect_error != EALREADY &&
-          connect_error != EINTR) {
+      if (connect_error != EINPROGRESS && connect_error != EALREADY && connect_error != EINTR) {
         continue;
       }
 
@@ -618,8 +603,7 @@ bool ReliableAlarmPublisher::Impl::connect_collector() {
       int socket_error = 0;
       socklen_t error_size = static_cast<socklen_t>(sizeof(socket_error));
 
-      if (::getsockopt(socket.get(), SOL_SOCKET, SO_ERROR, &socket_error,
-                       &error_size) != 0 ||
+      if (::getsockopt(socket.get(), SOL_SOCKET, SO_ERROR, &socket_error, &error_size) != 0 ||
           socket_error != 0) {
         continue;
       }
@@ -643,7 +627,6 @@ bool ReliableAlarmPublisher::Impl::connect_collector() {
 }
 
 int ReliableAlarmPublisher::Impl::socket_snapshot() const noexcept {
-
   std::lock_guard<std::mutex> lock(_mutex);
   return _socket;
 }
@@ -665,11 +648,8 @@ void ReliableAlarmPublisher::Impl::close_socket() noexcept {
   }
 }
 
-IoStatus
-ReliableAlarmPublisher::Impl::send_all(int fd, const std::uint8_t *data,
-                                       std::size_t size,
-                                       Deadline deadline) const noexcept {
-
+IoStatus ReliableAlarmPublisher::Impl::send_all(int fd, const std::uint8_t* data, std::size_t size,
+                                                Deadline deadline) const noexcept {
   std::size_t offset = 0U;
 
   while (offset < size) {
@@ -693,7 +673,6 @@ ReliableAlarmPublisher::Impl::send_all(int fd, const std::uint8_t *data,
     }
 
     if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-
       const IoStatus waited = wait_fd(fd, POLLOUT, deadline);
 
       if (waited != IoStatus::SUCCESS) {
@@ -709,11 +688,8 @@ ReliableAlarmPublisher::Impl::send_all(int fd, const std::uint8_t *data,
   return IoStatus::SUCCESS;
 }
 
-IoStatus
-ReliableAlarmPublisher::Impl::receive_all(int fd, std::uint8_t *data,
-                                          std::size_t size,
-                                          Deadline deadline) const noexcept {
-
+IoStatus ReliableAlarmPublisher::Impl::receive_all(int fd, std::uint8_t* data, std::size_t size,
+                                                   Deadline deadline) const noexcept {
   std::size_t offset = 0U;
 
   while (offset < size) {
@@ -756,9 +732,8 @@ ReliableAlarmPublisher::Impl::receive_all(int fd, std::uint8_t *data,
   return IoStatus::SUCCESS;
 }
 
-ReliableAlarmPublisher::Impl::ReceiveResult
-ReliableAlarmPublisher::Impl::receive_frame(int fd, Deadline deadline) const {
-
+ReliableAlarmPublisher::Impl::ReceiveResult ReliableAlarmPublisher::Impl::receive_frame(
+    int fd, Deadline deadline) const {
   std::array<std::uint8_t, AlarmWire::ALARM_HEADER_SIZE> header{};
 
   IoStatus status = receive_all(fd, header.data(), header.size(), deadline);
@@ -781,16 +756,14 @@ ReliableAlarmPublisher::Impl::receive_frame(int fd, Deadline deadline) const {
   const std::size_t payload_size = wire.size() - AlarmWire::ALARM_HEADER_SIZE;
 
   if (payload_size != 0U) {
-    status = receive_all(fd, wire.data() + AlarmWire::ALARM_HEADER_SIZE,
-                         payload_size, deadline);
+    status = receive_all(fd, wire.data() + AlarmWire::ALARM_HEADER_SIZE, payload_size, deadline);
 
     if (status != IoStatus::SUCCESS) {
       return {status, std::nullopt};
     }
   }
 
-  AlarmWire::AlarmDecodeResult decoded =
-      AlarmWire::decode_alarm_frame(wire.data(), wire.size());
+  AlarmWire::AlarmDecodeResult decoded = AlarmWire::decode_alarm_frame(wire.data(), wire.size());
 
   if (!decoded.success()) {
     return {IoStatus::ERROR, std::nullopt};
@@ -800,7 +773,7 @@ ReliableAlarmPublisher::Impl::receive_frame(int fd, Deadline deadline) const {
 }
 
 DeliveryStatus ReliableAlarmPublisher::Impl::send_alarm_and_wait_ack(
-    const std::vector<std::uint8_t> &wire, const AlarmWire::AlarmFrame &sent) {
+    const std::vector<std::uint8_t>& wire, const AlarmWire::AlarmFrame& sent) {
   // ACK 必须同时匹配类型、来源和消息 ID，才能安全删除 outbox 文件。
 
   const int socket = socket_snapshot();
@@ -813,8 +786,7 @@ DeliveryStatus ReliableAlarmPublisher::Impl::send_alarm_and_wait_ack(
    * send 和等待 ACK 共用一个绝对 deadline。
    */
   const Deadline deadline = make_deadline(_config._ack_timeout);
-  const IoStatus sent_status =
-      send_all(socket, wire.data(), wire.size(), deadline);
+  const IoStatus sent_status = send_all(socket, wire.data(), wire.size(), deadline);
 
   if (sent_status == IoStatus::STOPPED) {
     return DeliveryStatus::STOPPED;
@@ -834,14 +806,12 @@ DeliveryStatus ReliableAlarmPublisher::Impl::send_alarm_and_wait_ack(
     return DeliveryStatus::ACK_TIMEOUT;
   }
 
-  if (received._status != IoStatus::SUCCESS ||
-      !received._frame.has_value()) {
+  if (received._status != IoStatus::SUCCESS || !received._frame.has_value()) {
     return DeliveryStatus::INVALID_ACK;
   }
 
-  const AlarmWire::AlarmFrame &ack = *received._frame;
-  if (ack._type != AlarmWire::AlarmFrameType::ACK ||
-      ack._source_id != sent._source_id ||
+  const AlarmWire::AlarmFrame& ack = *received._frame;
+  if (ack._type != AlarmWire::AlarmFrameType::ACK || ack._source_id != sent._source_id ||
       ack._message_id != sent._message_id) {
     return DeliveryStatus::INVALID_ACK;
   }
@@ -867,8 +837,7 @@ bool ReliableAlarmPublisher::Impl::heartbeat() {
     return false;
   }
 
-  const auto timestamp =
-      timestamp_milliseconds(std::chrono::system_clock::now());
+  const auto timestamp = timestamp_milliseconds(std::chrono::system_clock::now());
 
   if (!timestamp.has_value()) {
     return false;
@@ -876,8 +845,7 @@ bool ReliableAlarmPublisher::Impl::heartbeat() {
 
   ping._timestamp_ms = *timestamp;
 
-  const AlarmWire::AlarmEncodeResult encoded =
-      AlarmWire::encode_alarm_frame(ping);
+  const AlarmWire::AlarmEncodeResult encoded = AlarmWire::encode_alarm_frame(ping);
 
   if (!encoded.success()) {
     return false;
@@ -885,8 +853,8 @@ bool ReliableAlarmPublisher::Impl::heartbeat() {
 
   const Deadline deadline = make_deadline(_config._ack_timeout);
 
-  if (send_all(socket, encoded._bytes.data(), encoded._bytes.size(),
-               deadline) != IoStatus::SUCCESS) {
+  if (send_all(socket, encoded._bytes.data(), encoded._bytes.size(), deadline) !=
+      IoStatus::SUCCESS) {
     return false;
   }
 
@@ -896,17 +864,18 @@ bool ReliableAlarmPublisher::Impl::heartbeat() {
     return false;
   }
 
-  const AlarmWire::AlarmFrame &pong = *received._frame;
+  const AlarmWire::AlarmFrame& pong = *received._frame;
 
-  return pong._type == AlarmWire::AlarmFrameType::PONG &&
-         pong._source_id == ping._source_id &&
+  return pong._type == AlarmWire::AlarmFrameType::PONG && pong._source_id == ping._source_id &&
          pong._message_id == ping._message_id;
 }
 
 void ReliableAlarmPublisher::Impl::wait_for_work() {
   std::unique_lock<std::mutex> lock(_mutex);
 
-  _condition.wait(lock, [this] { return _stop || _work_pending; });
+  _condition.wait(lock, [this] {
+    return _stop || _work_pending;
+  });
 
   _work_pending = false;
 }
@@ -914,8 +883,9 @@ void ReliableAlarmPublisher::Impl::wait_for_work() {
 bool ReliableAlarmPublisher::Impl::wait_idle() {
   std::unique_lock<std::mutex> lock(_mutex);
 
-  const bool notified = _condition.wait_for(
-      lock, HEARTBEAT_INTERVAL, [this] { return _stop || _work_pending; });
+  const bool notified = _condition.wait_for(lock, HEARTBEAT_INTERVAL, [this] {
+    return _stop || _work_pending;
+  });
 
   if (_stop) {
     return false;
@@ -943,7 +913,9 @@ bool ReliableAlarmPublisher::Impl::wait_backoff() {
   /*
    * 新 enqueue 不能跳过退避，只允许 stop 提前终止等待。
    */
-  _condition.wait_for(lock, _current_backoff, [this] { return _stop; });
+  _condition.wait_for(lock, _current_backoff, [this] {
+    return _stop;
+  });
 
   return !_stop;
 }
@@ -998,9 +970,7 @@ void ReliableAlarmPublisher::Impl::run_iteration() {
   AlarmWire::AlarmDecodeResult decoded =
       AlarmWire::decode_alarm_frame(stored._bytes.data(), stored._bytes.size());
 
-  if (!decoded.success() ||
-      decoded._frame->_type != AlarmWire::AlarmFrameType::ALARM) {
-
+  if (!decoded.success() || decoded._frame->_type != AlarmWire::AlarmFrameType::ALARM) {
     (void)_spool->quarantine(next._path);
     return;
   }
@@ -1028,26 +998,25 @@ void ReliableAlarmPublisher::Impl::run_iteration() {
     return;
   }
 
-  const DeliveryStatus delivery =
-      send_alarm_and_wait_ack(stored._bytes, *decoded._frame);
+  const DeliveryStatus delivery = send_alarm_and_wait_ack(stored._bytes, *decoded._frame);
 
   if (delivery != DeliveryStatus::SUCCESS) {
     {
       std::lock_guard<std::mutex> lock(_mutex);
 
       switch (delivery) {
-      case DeliveryStatus::ACK_TIMEOUT:
-        ++_ack_timeouts;
-        break;
+        case DeliveryStatus::ACK_TIMEOUT:
+          ++_ack_timeouts;
+          break;
 
-      case DeliveryStatus::SEND_FAILED:
-      case DeliveryStatus::INVALID_ACK:
-        ++_send_failures;
-        break;
+        case DeliveryStatus::SEND_FAILED:
+        case DeliveryStatus::INVALID_ACK:
+          ++_send_failures;
+          break;
 
-      case DeliveryStatus::STOPPED:
-      case DeliveryStatus::SUCCESS:
-        break;
+        case DeliveryStatus::STOPPED:
+        case DeliveryStatus::SUCCESS:
+          break;
       }
     }
 
@@ -1103,10 +1072,9 @@ void ReliableAlarmPublisher::Impl::run() noexcept {
   close_socket();
 }
 
-ReliableAlarmPublisher::ReliableAlarmPublisher(
-    ReliableAlarmPublisherConfig config)
-    : _config(std::move(config)), _impl(std::make_unique<Impl>(_config)) {
-
+ReliableAlarmPublisher::ReliableAlarmPublisher(ReliableAlarmPublisherConfig config)
+    : _config(std::move(config))
+    , _impl(std::make_unique<Impl>(_config)) {
   (void)_impl->initialize();
 }
 
@@ -1116,8 +1084,7 @@ bool ReliableAlarmPublisher::ready() const noexcept {
   return _impl && _impl->ready();
 }
 
-ReliableAlarmPublisherSetupStatus
-ReliableAlarmPublisher::setup_status() const noexcept {
+ReliableAlarmPublisherSetupStatus ReliableAlarmPublisher::setup_status() const noexcept {
   if (!_impl) {
     return ReliableAlarmPublisherSetupStatus::THREAD_ERROR;
   }
@@ -1129,14 +1096,11 @@ int ReliableAlarmPublisher::setup_error() const noexcept {
   return _impl ? _impl->_setup_error : ENOMEM;
 }
 
-const ReliableAlarmPublisherConfig &
-ReliableAlarmPublisher::config() const noexcept {
+const ReliableAlarmPublisherConfig& ReliableAlarmPublisher::config() const noexcept {
   return _config;
 }
 
-AlarmEnqueueResult
-ReliableAlarmPublisher::enqueue(MonData::StoredRecord record) {
-
+AlarmEnqueueResult ReliableAlarmPublisher::enqueue(MonData::StoredRecord record) {
   if (!_impl) {
     return {AlarmEnqueueStatus::NOT_READY, 0};
   }
@@ -1156,4 +1120,4 @@ ReliableAlarmPublisherStatus ReliableAlarmPublisher::status() const {
   return _impl->status();
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

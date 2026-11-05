@@ -7,6 +7,10 @@
 #include "udp_publisher.h"
 #include "udp_receiver.h"
 
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -18,13 +22,9 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <netinet/in.h>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
@@ -35,22 +35,28 @@ constexpr MonData::MonitorKey TIMER_KEY{7U, 1U, 1U, 1U};
 constexpr MonData::MonitorKey AIO_KEY{7U, 1U, 1U, 2U};
 
 class ScopedFd final {
-public:
-  explicit ScopedFd(int fd = -1) noexcept : _fd(fd) {}
-  ~ScopedFd() { reset(); }
+ public:
+  explicit ScopedFd(int fd = -1) noexcept
+      : _fd(fd) {}
+  ~ScopedFd() {
+    reset();
+  }
 
-  ScopedFd(const ScopedFd &) = delete;
-  ScopedFd &operator=(const ScopedFd &) = delete;
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
 
-  ScopedFd(ScopedFd &&other) noexcept : _fd(other.release()) {}
-  ScopedFd &operator=(ScopedFd &&other) noexcept {
+  ScopedFd(ScopedFd&& other) noexcept
+      : _fd(other.release()) {}
+  ScopedFd& operator=(ScopedFd&& other) noexcept {
     if (this != &other) {
       reset(other.release());
     }
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
   int release() noexcept {
     const int fd = _fd;
     _fd = -1;
@@ -63,17 +69,16 @@ public:
     _fd = fd;
   }
 
-private:
+ private:
   int _fd{-1};
 };
 
-void initialize(Engine &engine) {
+void initialize(Engine& engine) {
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::READY);
 }
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout = 2s) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (engine.get_phase() == expected) {
@@ -85,8 +90,7 @@ bool wait_for_phase(Engine &engine, EnginePhase expected,
 }
 
 template <typename Predicate>
-bool wait_until(Predicate predicate,
-                std::chrono::milliseconds timeout = 2s) {
+bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (predicate()) {
@@ -106,16 +110,15 @@ ScopedFd connect_loopback(std::uint16_t port) {
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(port);
 
-  assert(::connect(client.get(), reinterpret_cast<const sockaddr *>(&address),
-                   sizeof(address)) == 0);
+  assert(::connect(client.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) ==
+         0);
   return client;
 }
 
 bool send_all(int fd, std::string_view text) {
   std::size_t offset = 0U;
   while (offset < text.size()) {
-    const ssize_t sent =
-        ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
+    const ssize_t sent = ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
     if (sent > 0) {
       offset += static_cast<std::size_t>(sent);
       continue;
@@ -128,8 +131,7 @@ bool send_all(int fd, std::string_view text) {
   return true;
 }
 
-std::string receive_until(int fd, std::string_view suffix,
-                          std::chrono::milliseconds timeout = 2s) {
+std::string receive_until(int fd, std::string_view suffix, std::chrono::milliseconds timeout = 2s) {
   std::string output;
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -139,20 +141,17 @@ std::string receive_until(int fd, std::string_view suffix,
       break;
     }
 
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     pollfd descriptor{};
     descriptor.fd = fd;
     descriptor.events = POLLIN;
 
     int ready;
     do {
-      ready = ::poll(&descriptor, 1,
-                     std::max(1, static_cast<int>(remaining.count())));
+      ready = ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
     } while (ready < 0 && errno == EINTR);
 
-    if (ready <= 0 ||
-        (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
+    if (ready <= 0 || (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
       break;
     }
 
@@ -178,9 +177,12 @@ ScopedFd connect_cli(std::uint16_t port) {
 }
 
 struct EngineRunner final {
-  explicit EngineRunner(Engine &engine) : _engine(engine) {
+  explicit EngineRunner(Engine& engine)
+      : _engine(engine) {
     _future = _promise.get_future();
-    _thread = std::thread([this] { _promise.set_value(_engine.run()); });
+    _thread = std::thread([this] {
+      _promise.set_value(_engine.run());
+    });
     assert(wait_for_phase(_engine, EnginePhase::RUNNING));
   }
 
@@ -199,8 +201,8 @@ struct EngineRunner final {
     return _future.get();
   }
 
-private:
-  Engine &_engine;
+ private:
+  Engine& _engine;
   std::promise<ENGINESTATE> _promise;
   std::future<ENGINESTATE> _future;
   std::thread _thread;
@@ -223,8 +225,7 @@ void test_cli_port_and_basic_lifecycle() {
   ScopedFd client = connect_cli(cli.bound_port());
   assert(send_all(client.get(), "help\n"));
   const std::string output = receive_until(client.get(), "\n");
-  assert(output.find("* help    list available commands\n") !=
-         std::string::npos);
+  assert(output.find("* help    list available commands\n") != std::string::npos);
 
   assert(runner.stop_and_join() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::STOPPED);
@@ -237,8 +238,7 @@ void test_db_dump_observes_timer_and_aio_updates() {
   Engine engine{MonConfig{"m7-timer-aio", 0U, 1U}};
   initialize(engine);
   CliRegistry registry;
-  assert(register_db_dump_command(registry, engine) ==
-         CliRegisterStatus::SUCCESS);
+  assert(register_db_dump_command(registry, engine) == CliRegisterStatus::SUCCESS);
   CliServer cli{engine, registry, CliServerConfig{0U}};
   assert(cli.start());
 
@@ -247,32 +247,34 @@ void test_db_dump_observes_timer_and_aio_updates() {
   ScopedFd input{pipe_fds[0]};
   ScopedFd output{pipe_fds[1]};
 
-  assert(engine.add_aio(
-      input.get(), MonCallback{"m7-test-aio", [&engine, fd = input.get()] {
-        char byte{};
-        ssize_t count;
-        do {
-          count = ::read(fd, &byte, sizeof(byte));
-        } while (count < 0 && errno == EINTR);
-        if (count == 1) {
-          (void)engine.report_string(AIO_KEY, "aio-ready", "aio-record");
-        }
-        return 0;
-      }, false}));
+  assert(engine.add_aio(input.get(), MonCallback{"m7-test-aio",
+                                                 [&engine, fd = input.get()] {
+                                                   char byte{};
+                                                   ssize_t count;
+                                                   do {
+                                                     count = ::read(fd, &byte, sizeof(byte));
+                                                   } while (count < 0 && errno == EINTR);
+                                                   if (count == 1) {
+                                                     (void)engine.report_string(
+                                                         AIO_KEY, "aio-ready", "aio-record");
+                                                   }
+                                                   return 0;
+                                                 },
+                                                 false}));
 
-  assert(engine.set_timer(
-      MonCallback{"m7-test-timer", [&engine] {
-        (void)engine.report_count(TIMER_KEY, 42U, "timer-record");
-        return 0;
-      }, false},
-      TimerFlags::ONCE, 10ms));
+  assert(engine.set_timer(MonCallback{"m7-test-timer",
+                                      [&engine] {
+                                        (void)engine.report_count(TIMER_KEY, 42U, "timer-record");
+                                        return 0;
+                                      },
+                                      false},
+                          TimerFlags::ONCE, 10ms));
 
   EngineRunner runner{engine};
   const char signal = 'x';
   assert(::write(output.get(), &signal, sizeof(signal)) == 1);
   assert(wait_until([&engine] {
-    return engine.find_data(TIMER_KEY).has_value() &&
-           engine.find_data(AIO_KEY).has_value();
+    return engine.find_data(TIMER_KEY).has_value() && engine.find_data(AIO_KEY).has_value();
   }));
 
   ScopedFd client = connect_cli(cli.bound_port());
@@ -298,8 +300,7 @@ void test_m5_publisher_and_cli_can_work_together() {
   }));
 
   CliRegistry registry;
-  assert(register_db_dump_command(registry, engine) ==
-         CliRegisterStatus::SUCCESS);
+  assert(register_db_dump_command(registry, engine) == CliRegisterStatus::SUCCESS);
   CliServer cli{engine, registry, CliServerConfig{0U}};
   assert(cli.start());
   EngineRunner runner{engine};
@@ -324,18 +325,15 @@ void test_m6_udp_publisher_and_cli_can_work_together() {
 
   Engine engine{MonConfig{"m7-m6", 0U, 1U}};
   initialize(engine);
-  auto publisher = std::make_shared<Wire::UdpPublisher>(
-      Wire::UdpPublisherConfig{
-          Wire::UdpEndpoint{"127.0.0.1", receiver.bound_port()},
-          Wire::WireVersion::V2});
+  auto publisher = std::make_shared<Wire::UdpPublisher>(Wire::UdpPublisherConfig{
+      Wire::UdpEndpoint{"127.0.0.1", receiver.bound_port()}, Wire::WireVersion::V2});
   assert(publisher->ready());
   assert(engine.set_publisher([publisher](MonData::StoredRecord record) {
     assert(publisher->send(record).success());
   }));
 
   CliRegistry registry;
-  assert(register_db_dump_command(registry, engine) ==
-         CliRegisterStatus::SUCCESS);
+  assert(register_db_dump_command(registry, engine) == CliRegisterStatus::SUCCESS);
   CliServer cli{engine, registry, CliServerConfig{0U}};
   assert(cli.start());
   EngineRunner runner{engine};
@@ -367,11 +365,10 @@ void test_stopping_rejects_new_commands() {
   initialize(engine);
   CliRegistry registry;
   std::atomic<unsigned int> calls{0U};
-  assert(registry.register_command(
-             "mark", "count calls", [&calls](const CliArguments &) {
-               calls.fetch_add(1U, std::memory_order_relaxed);
-               return std::string{"marked\n"};
-             }) == CliRegisterStatus::SUCCESS);
+  assert(registry.register_command("mark", "count calls", [&calls](const CliArguments&) {
+    calls.fetch_add(1U, std::memory_order_relaxed);
+    return std::string{"marked\n"};
+  }) == CliRegisterStatus::SUCCESS);
   CliServer cli{engine, registry, CliServerConfig{0U}};
   assert(cli.start());
 
@@ -379,28 +376,32 @@ void test_stopping_rejects_new_commands() {
   std::condition_variable condition;
   bool entered = false;
   bool release = false;
-  assert(engine.set_timer(
-      MonCallback{"m7-stop-blocker", [&] {
-        std::unique_lock<std::mutex> lock(mutex);
-        entered = true;
-        condition.notify_all();
-        condition.wait(lock, [&release] { return release; });
-        return 0;
-      }, false},
-      TimerFlags::RECURRING | TimerFlags::WORKER, 10ms));
+  assert(engine.set_timer(MonCallback{"m7-stop-blocker",
+                                      [&] {
+                                        std::unique_lock<std::mutex> lock(mutex);
+                                        entered = true;
+                                        condition.notify_all();
+                                        condition.wait(lock, [&release] {
+                                          return release;
+                                        });
+                                        return 0;
+                                      },
+                                      false},
+                          TimerFlags::RECURRING | TimerFlags::WORKER, 10ms));
 
   EngineRunner runner{engine};
   ScopedFd existing = connect_cli(cli.bound_port());
 
   /* 先证明该连接已经被接纳，且 Handler 在 RUNNING 中可以执行。 */
   assert(send_all(existing.get(), "mark\n"));
-  assert(receive_until(existing.get(), "[monitor]> ") ==
-         "* marked\n[monitor]> ");
+  assert(receive_until(existing.get(), "[monitor]> ") == "* marked\n[monitor]> ");
   assert(calls.load(std::memory_order_relaxed) == 1U);
 
   {
     std::unique_lock<std::mutex> lock(mutex);
-    assert(condition.wait_for(lock, 2s, [&entered] { return entered; }));
+    assert(condition.wait_for(lock, 2s, [&entered] {
+      return entered;
+    }));
   }
 
   engine.stop();
@@ -418,8 +419,8 @@ void test_stopping_rejects_new_commands() {
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(cli.bound_port());
-  if (::connect(newcomer.get(), reinterpret_cast<const sockaddr *>(&address),
-                sizeof(address)) == 0) {
+  if (::connect(newcomer.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) ==
+      0) {
     (void)send_all(newcomer.get(), "mark\n");
   }
 
@@ -436,7 +437,7 @@ void test_stopping_rejects_new_commands() {
   cli.close();
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_cli_port_and_basic_lifecycle();

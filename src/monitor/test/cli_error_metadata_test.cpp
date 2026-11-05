@@ -16,42 +16,37 @@ using namespace TLSSMON;
 
 constexpr std::uint32_t MODULE_ID = 0x100U;
 
-void initialize_with_module(Engine &engine) {
+void initialize_with_module(Engine& engine) {
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::READY);
 
-  assert(engine.register_module(
-             {MODULE_ID,
-              "module-a",
-              "metadata service",
-              {{MonitorLevel::INFO, "heartbeat"},
-               {MonitorLevel::WARN, "metadata timeout"},
-               {MonitorLevel::SOFT_STOP, ""},
-               {MonitorLevel::EMERGENCY_STOP,
-                "line\n\"quoted\"\\tail"}}}) ==
+  assert(engine.register_module({MODULE_ID,
+                                 "module-a",
+                                 "metadata service",
+                                 {{MonitorLevel::INFO, "heartbeat"},
+                                  {MonitorLevel::WARN, "metadata timeout"},
+                                  {MonitorLevel::SOFT_STOP, ""},
+                                  {MonitorLevel::EMERGENCY_STOP, "line\n\"quoted\"\\tail"}}}) ==
          ModuleRegisterStatus::SUCCESS);
 }
 
-std::string dump_records(Engine &engine) {
+std::string dump_records(Engine& engine) {
   CliRegistry registry;
-  assert(register_db_dump_command(registry, engine) ==
-         CliRegisterStatus::SUCCESS);
+  assert(register_db_dump_command(registry, engine) == CliRegisterStatus::SUCCESS);
 
   const CliDispatchResult result = registry.dispatch("db_dump");
   assert(result._status == CliDispatchStatus::SUCCESS);
   return result._output;
 }
 
-void assert_contains(const std::string &output, const std::string &expected) {
+void assert_contains(const std::string& output, const std::string& expected) {
   if (output.find(expected) == std::string::npos) {
-    std::cerr << "expected substring: " << expected << '\n'
-              << "actual output: " << output;
+    std::cerr << "expected substring: " << expected << '\n' << "actual output: " << output;
   }
   assert(output.find(expected) != std::string::npos);
 }
 
-void assert_not_contains(const std::string &output,
-                         const std::string &unexpected) {
+void assert_not_contains(const std::string& output, const std::string& unexpected) {
   assert(output.find(unexpected) == std::string::npos);
 }
 
@@ -63,16 +58,15 @@ void test_local_report_description_is_displayed() {
   Engine engine{MonConfig{"cli-local-description", 0U, 1U}};
   initialize_with_module(engine);
 
-  const MonData::UpdateResult update = engine.report_count(
-      {MODULE_ID, 99U, 1U, 1U}, 7U, "caller description");
+  const MonData::UpdateResult update =
+      engine.report_count({MODULE_ID, 99U, 1U, 1U}, 7U, "caller description");
 
   assert(update._status == MonData::UpdateStatus::INSERTED);
   assert(update._record.has_value());
   assert(update._record->_data._description == "metadata timeout");
 
   const std::string output = dump_records(engine);
-  assert_contains(output,
-                  "mid=256 lvl=warn fid=1 eid=1 num=7 state=0 ");
+  assert_contains(output, "mid=256 lvl=warn fid=1 eid=1 num=7 state=0 ");
   assert_contains(output, "desc=\"metadata timeout\"");
   assert_not_contains(output, "desc=\"caller description\"");
 }
@@ -90,14 +84,10 @@ void test_v1_empty_description_is_filled_without_side_effects() {
     ++publish_count;
   }));
 
-  const MonData::MonitorKey key{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::WARN),
-      2U,
-      1U};
+  const MonData::MonitorKey key{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::WARN), 2U, 1U};
 
-  const MonData::UpdateResult update = engine.update_data(
-      MonData::MonitorData{key, "", MonData::NumericValue{9U, 0U}});
+  const MonData::UpdateResult update =
+      engine.update_data(MonData::MonitorData{key, "", MonData::NumericValue{9U, 0U}});
 
   assert(update._status == MonData::UpdateStatus::INSERTED);
   assert(update._record.has_value());
@@ -111,8 +101,7 @@ void test_v1_empty_description_is_filled_without_side_effects() {
   const std::size_t publishes_before_dump = publish_count;
   const std::string output = dump_records(engine);
 
-  assert_contains(output,
-                  "mid=256 lvl=warn fid=2 eid=1 num=9 state=0 ");
+  assert_contains(output, "mid=256 lvl=warn fid=2 eid=1 num=9 state=0 ");
   assert_contains(output, "desc=\"metadata timeout\"");
 
   const auto after = engine.find_data(key);
@@ -130,15 +119,10 @@ void test_v2_nonempty_description_has_priority() {
   Engine engine{MonConfig{"cli-v2-description", 0U, 1U}};
   initialize_with_module(engine);
 
-  const MonData::MonitorKey key{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::WARN),
-      3U,
-      1U};
+  const MonData::MonitorKey key{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::WARN), 3U, 1U};
 
   const MonData::UpdateResult update = engine.update_data(
-      MonData::MonitorData{
-          key, "remote node description", MonData::NumericValue{11U, 0U}});
+      MonData::MonitorData{key, "remote node description", MonData::NumericValue{11U, 0U}});
 
   assert(update._status == MonData::UpdateStatus::INSERTED);
 
@@ -159,20 +143,15 @@ void test_v2_empty_description_is_filled_for_string_record() {
   Engine engine{MonConfig{"cli-v2-empty-description", 0U, 1U}};
   initialize_with_module(engine);
 
-  const MonData::MonitorKey key{
-      MODULE_ID,
-      static_cast<std::uint32_t>(MonitorLevel::WARN),
-      4U,
-      1U};
+  const MonData::MonitorKey key{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::WARN), 4U, 1U};
 
-  const MonData::UpdateResult update = engine.update_data(
-      MonData::MonitorData{key, "", std::string{"running"}});
+  const MonData::UpdateResult update =
+      engine.update_data(MonData::MonitorData{key, "", std::string{"running"}});
 
   assert(update._status == MonData::UpdateStatus::INSERTED);
 
   const std::string output = dump_records(engine);
-  assert_contains(output,
-                  "mid=256 lvl=warn fid=4 eid=1 str=\"running\" ");
+  assert_contains(output, "mid=256 lvl=warn fid=4 eid=1 str=\"running\" ");
   assert_contains(output, "desc=\"metadata timeout\"");
 
   const auto stored = engine.find_data(key);
@@ -188,26 +167,20 @@ void test_unknown_mid_and_eid_keep_empty_description() {
   Engine engine{MonConfig{"cli-unknown-description", 0U, 1U}};
   initialize_with_module(engine);
 
-  assert(engine.update_data(
-                   MonData::MonitorData{
-                       {0x999U, 99U, 5U, 0U},
-                       "",
-                       MonData::NumericValue{1U, 0U}})
+  assert(engine
+             .update_data(
+                 MonData::MonitorData{{0x999U, 99U, 5U, 0U}, "", MonData::NumericValue{1U, 0U}})
              .changed());
 
-  assert(engine.update_data(
-                   MonData::MonitorData{
-                       {MODULE_ID, 99U, 6U, 99U},
-                       "",
-                       MonData::NumericValue{2U, 0U}})
+  assert(engine
+             .update_data(
+                 MonData::MonitorData{{MODULE_ID, 99U, 6U, 99U}, "", MonData::NumericValue{2U, 0U}})
              .changed());
 
   const std::string output = dump_records(engine);
 
-  assert_contains(output,
-                  "mid=256 lvl=? fid=6 eid=99 num=2 state=0 desc=\"\"");
-  assert_contains(output,
-                  "mid=2457 lvl=? fid=5 eid=0 num=1 state=0 desc=\"\"");
+  assert_contains(output, "mid=256 lvl=? fid=6 eid=99 num=2 state=0 desc=\"\"");
+  assert_contains(output, "mid=2457 lvl=? fid=5 eid=0 num=1 state=0 desc=\"\"");
   assert_contains(output, "2 entries\n");
 }
 
@@ -216,22 +189,18 @@ void test_registry_description_is_escaped() {
   Engine engine{MonConfig{"cli-escaped-description", 0U, 1U}};
   initialize_with_module(engine);
 
-  assert(engine.update_data(
-                   MonData::MonitorData{
-                       {MODULE_ID,
-                        static_cast<std::uint32_t>(
-                            MonitorLevel::EMERGENCY_STOP),
-                        7U,
-                        3U},
-                       "",
-                       MonData::NumericValue{3U, 0U}})
+  assert(engine
+             .update_data(MonData::MonitorData{
+                 {MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::EMERGENCY_STOP), 7U, 3U},
+                 "",
+                 MonData::NumericValue{3U, 0U}})
              .changed());
 
   const std::string output = dump_records(engine);
   assert_contains(output, "desc=\"line\\n\\\"quoted\\\"\\\\tail\"");
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_local_report_description_is_displayed();

@@ -78,8 +78,7 @@ struct AlarmSpoolStoreResult final {
    */
   [[nodiscard]]
   bool durable() const noexcept {
-    return _status == AlarmSpoolStatus::SUCCESS ||
-           _status == AlarmSpoolStatus::DUPLICATE;
+    return _status == AlarmSpoolStatus::SUCCESS || _status == AlarmSpoolStatus::DUPLICATE;
   }
 };
 
@@ -145,7 +144,7 @@ struct AlarmSpoolStatsResult final {
  * @note 文件路径由本对象管理；调用方只能操作其所属目录内的文件。
  */
 class AlarmSpool final {
-public:
+ public:
   /**
    * @brief 创建目录并恢复 Spool；通过 ready() 查询结果。
    * @param config Spool 根目录、OUTBOX/INBOX 类型及容量上限；容量为 0 表示不限制。
@@ -153,11 +152,11 @@ public:
   explicit AlarmSpool(AlarmSpoolConfig config);
   ~AlarmSpool();
 
-  AlarmSpool(const AlarmSpool &) = delete;
-  AlarmSpool &operator=(const AlarmSpool &) = delete;
+  AlarmSpool(const AlarmSpool&) = delete;
+  AlarmSpool& operator=(const AlarmSpool&) = delete;
 
-  AlarmSpool(AlarmSpool &&) = delete;
-  AlarmSpool &operator=(AlarmSpool &&) = delete;
+  AlarmSpool(AlarmSpool&&) = delete;
+  AlarmSpool& operator=(AlarmSpool&&) = delete;
 
   /**
    * @brief 判断目录是否已准备好接收操作。
@@ -185,7 +184,7 @@ public:
    * @return 构造时保存的配置引用。
    */
   [[nodiscard]]
-  const AlarmSpoolConfig &config() const noexcept;
+  const AlarmSpoolConfig& config() const noexcept;
 
   /**
    * @brief 保存完整、已经编码的 ALARM 信封。
@@ -197,9 +196,8 @@ public:
    * @return 保存状态、持久化后的路径和系统错误；重复消息返回 DUPLICATE。
    */
   [[nodiscard]]
-  AlarmSpoolStoreResult store(std::uint64_t source_id,
-                              const AlarmMessageId &message_id,
-                              const std::vector<std::uint8_t> &wire);
+  AlarmSpoolStoreResult store(std::uint64_t source_id, const AlarmMessageId& message_id,
+                              const std::vector<std::uint8_t>& wire);
 
   /**
    * @brief 返回字典序最小的待处理告警。
@@ -216,7 +214,7 @@ public:
    * @return 校验状态、文件路径与完整信封字节；损坏文件返回 CORRUPT。
    */
   [[nodiscard]]
-  AlarmSpoolReadResult read(const std::filesystem::path &path);
+  AlarmSpoolReadResult read(const std::filesystem::path& path);
 
   /**
    * @brief OUTBOX 只能在收到 ACK 后调用 remove()。
@@ -224,7 +222,7 @@ public:
    * @return 删除状态与路径；失败时包含系统错误码。
    */
   [[nodiscard]]
-  AlarmSpoolPathResult remove(const std::filesystem::path &path);
+  AlarmSpoolPathResult remove(const std::filesystem::path& path);
 
   /**
    * @brief 将指定文件移入 corrupt 目录。
@@ -232,7 +230,7 @@ public:
    * @return 隔离状态与新路径；失败时包含系统错误码。
    */
   [[nodiscard]]
-  AlarmSpoolPathResult quarantine(const std::filesystem::path &path);
+  AlarmSpoolPathResult quarantine(const std::filesystem::path& path);
 
   /**
    * @brief 读取待处理与损坏文件的统计信息。
@@ -241,12 +239,12 @@ public:
   [[nodiscard]]
   AlarmSpoolStatsResult stats() const;
 
-private:
+ private:
   struct Impl;
   std::unique_ptr<Impl> _impl;
 };
 
-} // namespace AlarmWire
-} // namespace TLSSMON
+}  // namespace AlarmWire
+}  // namespace TLSSMON
 
-#endif // __ALARM_SPOOL_H__
+#endif  // __ALARM_SPOOL_H__

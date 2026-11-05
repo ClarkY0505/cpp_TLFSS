@@ -24,49 +24,32 @@ using namespace std::chrono_literals;
 
 namespace {
 
-MonData::MonitorData make_numeric(
-    MonData::MonitorKey key,
-    std::uint32_t value,
-    std::uint32_t state = 2,
-    std::string description = {}) {
-
-    return MonData::MonitorData{
-        std::move(key),
-        std::move(description),
-        MonData::NumericValue{value, state}};
+MonData::MonitorData make_numeric(MonData::MonitorKey key, std::uint32_t value,
+                                  std::uint32_t state = 2, std::string description = {}) {
+  return MonData::MonitorData{std::move(key), std::move(description),
+                              MonData::NumericValue{value, state}};
 }
 
-const MonData::NumericValue& numeric_value(
-    const MonData::StoredRecord& record) {
-
-    return std::get<MonData::NumericValue>(
-        record._data._value);
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  return std::get<MonData::NumericValue>(record._data._value);
 }
 
-const std::string& string_value(
-    const MonData::StoredRecord& record) {
-
-    return std::get<std::string>(
-        record._data._value);
+const std::string& string_value(const MonData::StoredRecord& record) {
+  return std::get<std::string>(record._data._value);
 }
 
-bool wait_for_phase(
-    Engine& engine,
-    EnginePhase expected,
-    std::chrono::milliseconds timeout) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-    const auto deadline =
-        std::chrono::steady_clock::now() + timeout;
-
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (engine.get_phase() == expected) {
-            return true;
-        }
-
-        std::this_thread::yield();
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (engine.get_phase() == expected) {
+      return true;
     }
 
-    return engine.get_phase() == expected;
+    std::this_thread::yield();
+  }
+
+  return engine.get_phase() == expected;
 }
 
 /*
@@ -77,51 +60,43 @@ bool wait_for_phase(
  * TestPipe 才关闭 fd。
  */
 class TestPipe final {
-public:
-    TestPipe() {
-        int descriptors[2]{-1, -1};
+ public:
+  TestPipe() {
+    int descriptors[2]{-1, -1};
 
-        assert(::pipe(descriptors) == 0);
+    assert(::pipe(descriptors) == 0);
 
-        _read_fd = descriptors[0];
-        _write_fd = descriptors[1];
-    }
+    _read_fd = descriptors[0];
+    _write_fd = descriptors[1];
+  }
 
-    ~TestPipe() {
-        assert(::close(_read_fd) == 0);
-        assert(::close(_write_fd) == 0);
-    }
+  ~TestPipe() {
+    assert(::close(_read_fd) == 0);
+    assert(::close(_write_fd) == 0);
+  }
 
-    TestPipe(const TestPipe&) = delete;
-    TestPipe& operator=(const TestPipe&) = delete;
+  TestPipe(const TestPipe&) = delete;
+  TestPipe& operator=(const TestPipe&) = delete;
 
-    int read_fd() const noexcept {
-        return _read_fd;
-    }
+  int read_fd() const noexcept {
+    return _read_fd;
+  }
 
-    void signal() const {
-        const char byte = '*';
+  void signal() const {
+    const char byte = '*';
 
-        assert(::write(
-                   _write_fd,
-                   &byte,
-                   sizeof(byte)) ==
-               static_cast<ssize_t>(sizeof(byte)));
-    }
+    assert(::write(_write_fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)));
+  }
 
-    void drain_one() const {
-        char byte{};
+  void drain_one() const {
+    char byte{};
 
-        assert(::read(
-                   _read_fd,
-                   &byte,
-                   sizeof(byte)) ==
-               static_cast<ssize_t>(sizeof(byte)));
-    }
+    assert(::read(_read_fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)));
+  }
 
-private:
-    int _read_fd{-1};
-    int _write_fd{-1};
+ private:
+  int _read_fd{-1};
+  int _write_fd{-1};
 };
 
 /*
@@ -131,30 +106,28 @@ private:
  * run() 会停在等待异步 worker 退出的位置，使 Engine 稳定保持 STOPPING。
  */
 class StartGate final {
-public:
-    void wait() {
-        std::unique_lock<std::mutex> lock(_mutex);
+ public:
+  void wait() {
+    std::unique_lock<std::mutex> lock(_mutex);
 
-        _condition.wait(
-            lock,
-            [&] {
-                return _opened;
-            });
+    _condition.wait(lock, [&] {
+      return _opened;
+    });
+  }
+
+  void open() {
+    {
+      std::lock_guard<std::mutex> lock(_mutex);
+      _opened = true;
     }
 
-    void open() {
-        {
-            std::lock_guard<std::mutex> lock(_mutex);
-            _opened = true;
-        }
+    _condition.notify_all();
+  }
 
-        _condition.notify_all();
-    }
-
-private:
-    std::mutex _mutex;
-    std::condition_variable _condition;
-    bool _opened{false};
+ private:
+  std::mutex _mutex;
+  std::condition_variable _condition;
+  bool _opened{false};
 };
 
 /*
@@ -169,75 +142,38 @@ private:
  */
 using ExpectedEnginePublisher = MonitorReporter::Publisher;
 
-static_assert(
-    std::is_same_v<
-        Engine::MonitorPublisher,
-        ExpectedEnginePublisher>);
+static_assert(std::is_same_v<Engine::MonitorPublisher, ExpectedEnginePublisher>);
 
-using ExpectedSetPublisher =
-    bool (Engine::*)(Engine::MonitorPublisher);
+using ExpectedSetPublisher = bool (Engine::*)(Engine::MonitorPublisher);
 
-static_assert(
-    std::is_same_v<
-        decltype(&Engine::set_publisher),
-        ExpectedSetPublisher>);
+static_assert(std::is_same_v<decltype(&Engine::set_publisher), ExpectedSetPublisher>);
 
-using ExpectedNumericReport =
-    MonData::UpdateResult (Engine::*)(
-        MonData::MonitorKey,
-        std::uint32_t,
-        std::string);
+using ExpectedNumericReport = MonData::UpdateResult (Engine::*)(MonData::MonitorKey, std::uint32_t,
+                                                                std::string);
 
-static_assert(
-    std::is_same_v<
-        decltype(&Engine::report_count),
-        ExpectedNumericReport>);
+static_assert(std::is_same_v<decltype(&Engine::report_count), ExpectedNumericReport>);
 
-static_assert(
-    std::is_same_v<
-        decltype(&Engine::report_error),
-        ExpectedNumericReport>);
+static_assert(std::is_same_v<decltype(&Engine::report_error), ExpectedNumericReport>);
 
-using ExpectedStringReport =
-    MonData::UpdateResult (Engine::*)(
-        MonData::MonitorKey,
-        std::string,
-        std::string);
+using ExpectedStringReport = MonData::UpdateResult (Engine::*)(MonData::MonitorKey, std::string,
+                                                               std::string);
 
-static_assert(
-    std::is_same_v<
-        decltype(&Engine::report_string),
-        ExpectedStringReport>);
+static_assert(std::is_same_v<decltype(&Engine::report_string), ExpectedStringReport>);
 
-using DefaultCountResult = decltype(
-    std::declval<Engine&>().report_count(
-        std::declval<MonData::MonitorKey>(),
-        std::declval<std::uint32_t>()));
+using DefaultCountResult = decltype(std::declval<Engine&>().report_count(
+    std::declval<MonData::MonitorKey>(), std::declval<std::uint32_t>()));
 
-using DefaultErrorResult = decltype(
-    std::declval<Engine&>().report_error(
-        std::declval<MonData::MonitorKey>(),
-        std::declval<std::uint32_t>()));
+using DefaultErrorResult = decltype(std::declval<Engine&>().report_error(
+    std::declval<MonData::MonitorKey>(), std::declval<std::uint32_t>()));
 
-using DefaultStringResult = decltype(
-    std::declval<Engine&>().report_string(
-        std::declval<MonData::MonitorKey>(),
-        std::declval<std::string>()));
+using DefaultStringResult = decltype(std::declval<Engine&>().report_string(
+    std::declval<MonData::MonitorKey>(), std::declval<std::string>()));
 
-static_assert(
-    std::is_same_v<
-        DefaultCountResult,
-        MonData::UpdateResult>);
+static_assert(std::is_same_v<DefaultCountResult, MonData::UpdateResult>);
 
-static_assert(
-    std::is_same_v<
-        DefaultErrorResult,
-        MonData::UpdateResult>);
+static_assert(std::is_same_v<DefaultErrorResult, MonData::UpdateResult>);
 
-static_assert(
-    std::is_same_v<
-        DefaultStringResult,
-        MonData::UpdateResult>);
+static_assert(std::is_same_v<DefaultStringResult, MonData::UpdateResult>);
 
 /*
  * 案例 2：CREATED 状态拒绝 Publisher 注册和全部写入入口。
@@ -252,49 +188,37 @@ static_assert(
  * set_publisher() 返回 false，四个写入结果均为 INVALID 且不携带记录。
  */
 void test_created_engine_rejects_publisher_and_reports() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    const bool publisher_set = engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        });
+  const bool publisher_set = engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  });
 
-    assert(!publisher_set);
+  assert(!publisher_set);
 
-    const auto count_result =
-        engine.report_count({1, 1, 1, 1}, 10);
+  const auto count_result = engine.report_count({1, 1, 1, 1}, 10);
 
-    const auto error_result =
-        engine.report_error({1, 1, 1, 2}, 0);
+  const auto error_result = engine.report_error({1, 1, 1, 2}, 0);
 
-    const auto string_result =
-        engine.report_string({1, 1, 1, 3}, "value");
+  const auto string_result = engine.report_string({1, 1, 1, 3}, "value");
 
-    const auto update_result = engine.update_data(
-        make_numeric({1, 1, 1, 4}, 20));
+  const auto update_result = engine.update_data(make_numeric({1, 1, 1, 4}, 20));
 
-    assert(count_result._status ==
-           MonData::UpdateStatus::INVALID);
-    assert(error_result._status ==
-           MonData::UpdateStatus::INVALID);
-    assert(string_result._status ==
-           MonData::UpdateStatus::INVALID);
-    assert(update_result._status ==
-           MonData::UpdateStatus::INVALID);
+  assert(count_result._status == MonData::UpdateStatus::INVALID);
+  assert(error_result._status == MonData::UpdateStatus::INVALID);
+  assert(string_result._status == MonData::UpdateStatus::INVALID);
+  assert(update_result._status == MonData::UpdateStatus::INVALID);
 
-    assert(!count_result._record.has_value());
-    assert(!error_result._record.has_value());
-    assert(!string_result._record.has_value());
-    assert(!update_result._record.has_value());
+  assert(!count_result._record.has_value());
+  assert(!error_result._record.has_value());
+  assert(!string_result._record.has_value());
+  assert(!update_result._record.has_value());
 
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 0);
+  assert(publish_count.load(std::memory_order_relaxed) == 0);
 
-    assert(engine.get_phase() == EnginePhase::CREATED);
+  assert(engine.get_phase() == EnginePhase::CREATED);
 }
 
 /*
@@ -311,41 +235,40 @@ void test_created_engine_rejects_publisher_and_reports() {
  * 的 system_clock 区间内，Publisher 和 Store 中都存在相同记录。
  */
 void test_ready_engine_registers_publisher_and_reports_count() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
-    assert(engine.get_phase() == EnginePhase::READY);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.get_phase() == EnginePhase::READY);
 
-    std::vector<MonData::StoredRecord> published;
+  std::vector<MonData::StoredRecord> published;
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            published.push_back(std::move(record));
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    published.push_back(std::move(record));
+  }));
 
-    const MonData::MonitorKey key{2, 3, 4, 5};
-    const auto before = std::chrono::system_clock::now();
+  const MonData::MonitorKey key{2, 3, 4, 5};
+  const auto before = std::chrono::system_clock::now();
 
-    const auto result = engine.report_count(key, 10);
+  const auto result = engine.report_count(key, 10);
 
-    const auto after = std::chrono::system_clock::now();
+  const auto after = std::chrono::system_clock::now();
 
-    assert(result._status == MonData::UpdateStatus::INSERTED);
-    assert(result._record.has_value());
-    assert(result._record->_data._key == key);
-    assert(result._record->_data._description.empty());
-    assert(numeric_value(*result._record)._value == 10);
-    assert(numeric_value(*result._record)._state == 0);
-    assert(result._record->_changed_at >= before);
-    assert(result._record->_changed_at <= after);
+  assert(result._status == MonData::UpdateStatus::INSERTED);
+  assert(result._record.has_value());
+  assert(result._record->_data._key == key);
+  assert(result._record->_data._description.empty());
+  assert(numeric_value(*result._record)._value == 10);
+  assert(numeric_value(*result._record)._state == 0);
+  assert(result._record->_changed_at >= before);
+  assert(result._record->_changed_at <= after);
 
-    assert(published.size() == 1);
-    assert(published[0]._data._key == key);
-    assert(numeric_value(published[0])._value == 10);
+  assert(published.size() == 1);
+  assert(published[0]._data._key == key);
+  assert(numeric_value(published[0])._value == 10);
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 10);
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 10);
 }
 
 /*
@@ -360,45 +283,34 @@ void test_ready_engine_registers_publisher_and_reports_count() {
  * 原样保存，Publisher 收到两条记录。
  */
 void test_ready_engine_forwards_error_and_string_reports() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::vector<MonData::StoredRecord> published;
+  std::vector<MonData::StoredRecord> published;
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            published.push_back(std::move(record));
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    published.push_back(std::move(record));
+  }));
 
-    const auto error_result = engine.report_error(
-        {3, 7, 23, 45},
-        0,
-        "zero-error");
+  const auto error_result = engine.report_error({3, 7, 23, 45}, 0, "zero-error");
 
-    assert(error_result._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(error_result._record.has_value());
-    assert(numeric_value(*error_result._record)._value == 0);
-    assert(numeric_value(*error_result._record)._state == 2);
-    assert(error_result._record->_data._description ==
-           "zero-error");
+  assert(error_result._status == MonData::UpdateStatus::INSERTED);
+  assert(error_result._record.has_value());
+  assert(numeric_value(*error_result._record)._value == 0);
+  assert(numeric_value(*error_result._record)._state == 2);
+  assert(error_result._record->_data._description == "zero-error");
 
-    const auto string_result = engine.report_string(
-        {3, 8, 24, 46},
-        "",
-        "empty-string");
+  const auto string_result = engine.report_string({3, 8, 24, 46}, "", "empty-string");
 
-    assert(string_result._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(string_result._record.has_value());
-    assert(string_value(*string_result._record).empty());
-    assert(string_result._record->_data._description ==
-           "empty-string");
+  assert(string_result._status == MonData::UpdateStatus::INSERTED);
+  assert(string_result._record.has_value());
+  assert(string_value(*string_result._record).empty());
+  assert(string_result._record->_data._description == "empty-string");
 
-    assert(published.size() == 2);
-    assert(numeric_value(published[0])._state == 2);
-    assert(string_value(published[1]).empty());
+  assert(published.size() == 2);
+  assert(numeric_value(published[0])._state == 2);
+  assert(string_value(published[1]).empty());
 }
 
 /*
@@ -415,41 +327,34 @@ void test_ready_engine_forwards_error_and_string_reports() {
  * 数值变化。如果 update_data() 仍直接调用 Store，本案例的发布次数会失败。
  */
 void test_update_data_uses_reporter_publish_gate() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::vector<MonData::StoredRecord> published;
+  std::vector<MonData::StoredRecord> published;
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            published.push_back(std::move(record));
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    published.push_back(std::move(record));
+  }));
 
-    const MonData::MonitorKey key{4, 4, 4, 4};
+  const MonData::MonitorKey key{4, 4, 4, 4};
 
-    const auto inserted = engine.update_data(
-        make_numeric(key, 10, 2, "inserted"));
+  const auto inserted = engine.update_data(make_numeric(key, 10, 2, "inserted"));
 
-    assert(inserted._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(published.size() == 1);
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(published.size() == 1);
 
-    const auto unchanged = engine.update_data(
-        make_numeric(key, 10, 0, "duplicate"));
+  const auto unchanged = engine.update_data(make_numeric(key, 10, 0, "duplicate"));
 
-    assert(unchanged._status ==
-           MonData::UpdateStatus::UNCHANGED);
-    assert(published.size() == 1);
+  assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
+  assert(published.size() == 1);
 
-    const auto updated = engine.update_data(
-        make_numeric(key, 20, 1, "updated"));
+  const auto updated = engine.update_data(make_numeric(key, 20, 1, "updated"));
 
-    assert(updated._status ==
-           MonData::UpdateStatus::UPDATED);
-    assert(published.size() == 2);
-    assert(numeric_value(published[0])._value == 10);
-    assert(numeric_value(published[1])._value == 20);
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
+  assert(published.size() == 2);
+  assert(numeric_value(published[0])._value == 10);
+  assert(numeric_value(published[1])._value == 20);
 }
 
 /*
@@ -464,42 +369,33 @@ void test_update_data_uses_reporter_publish_gate() {
  * Store 保存最新值。
  */
 void test_ready_engine_can_unregister_publisher() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    const MonData::MonitorKey key{5, 5, 5, 5};
+  const MonData::MonitorKey key{5, 5, 5, 5};
 
-    const auto inserted =
-        engine.report_count(key, 1, "first");
+  const auto inserted = engine.report_count(key, 1, "first");
 
-    assert(inserted._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
-    assert(engine.set_publisher({}));
+  assert(engine.set_publisher({}));
 
-    const auto updated =
-        engine.report_count(key, 2, "after-unregister");
+  const auto updated = engine.report_count(key, 2, "after-unregister");
 
-    assert(updated._status ==
-           MonData::UpdateStatus::UPDATED);
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 2);
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 2);
 }
 
 /*
@@ -516,64 +412,49 @@ void test_ready_engine_can_unregister_publisher() {
  * 最后记录仍然可读取。
  */
 void test_running_engine_accepts_publisher_and_reports() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::promise<ENGINESTATE> run_promise;
-    std::future<ENGINESTATE> run_future =
-        run_promise.get_future();
+  std::promise<ENGINESTATE> run_promise;
+  std::future<ENGINESTATE> run_future = run_promise.get_future();
 
-    std::thread runner([&] {
-        run_promise.set_value(engine.run());
-    });
+  std::thread runner([&] {
+    run_promise.set_value(engine.run());
+  });
 
-    assert(wait_for_phase(
-        engine,
-        EnginePhase::RUNNING,
-        1s));
+  assert(wait_for_phase(engine, EnginePhase::RUNNING, 1s));
 
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    const MonData::MonitorKey key{6, 6, 6, 6};
+  const MonData::MonitorKey key{6, 6, 6, 6};
 
-    const auto result = engine.report_string(
-        key,
-        "running",
-        "running-report");
+  const auto result = engine.report_string(key, "running", "running-report");
 
-    assert(result._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
+  assert(result._status == MonData::UpdateStatus::INSERTED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
+  engine.stop();
+
+  const bool completed = run_future.wait_for(2s) == std::future_status::ready;
+
+  if (!completed) {
     engine.stop();
+  }
 
-    const bool completed =
-        run_future.wait_for(2s) ==
-        std::future_status::ready;
+  runner.join();
 
-    if (!completed) {
-        engine.stop();
-    }
+  assert(completed);
+  assert(run_future.get() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.get_phase() == EnginePhase::STOPPED);
 
-    runner.join();
-
-    assert(completed);
-    assert(run_future.get() ==
-           ENGINESTATE::SUCCESSFUL);
-    assert(engine.get_phase() == EnginePhase::STOPPED);
-
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(string_value(*stored) == "running");
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(string_value(*stored) == "running");
 }
 
 /*
@@ -592,139 +473,105 @@ void test_running_engine_accepts_publisher_and_reports() {
  * set_publisher() 返回 false，四个写入均返回 INVALID，Store 未被清空或覆盖。
  */
 void test_stopping_engine_rejects_publisher_and_reports() {
-    TestPipe input;
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  TestPipe input;
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    const MonData::MonitorKey retained_key{7, 7, 7, 7};
+  const MonData::MonitorKey retained_key{7, 7, 7, 7};
 
-    const auto inserted = engine.report_count(
-        retained_key,
-        10,
-        "retained");
+  const auto inserted = engine.report_count(retained_key, 10, "retained");
 
-    assert(inserted._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
-    StartGate callback_gate;
-    std::promise<void> callback_entered_promise;
-    std::future<void> callback_entered =
-        callback_entered_promise.get_future();
-    std::atomic<bool> callback_claimed{false};
+  StartGate callback_gate;
+  std::promise<void> callback_entered_promise;
+  std::future<void> callback_entered = callback_entered_promise.get_future();
+  std::atomic<bool> callback_claimed{false};
 
-    const auto handle = engine.add_aio(
-        input.read_fd(),
-        MonCallback{
-            "hold-stopping",
-            [&]() -> int {
-                /*
-                 * select() 是电平触发的。只允许第一个激活进入阻塞读取和启动门，
-                 * 避免同一 fd 被重复调度后再次读取空管道。
-                 */
-                if (callback_claimed.exchange(
-                        true,
-                        std::memory_order_acq_rel)) {
-                    return 0;
-                }
+  const auto handle =
+      engine.add_aio(input.read_fd(),
+                     MonCallback{"hold-stopping",
+                                 [&]() -> int {
+                                   /*
+                                    * select() 是电平触发的。只允许第一个激活进入阻塞读取和启动门，
+                                    * 避免同一 fd 被重复调度后再次读取空管道。
+                                    */
+                                   if (callback_claimed.exchange(true, std::memory_order_acq_rel)) {
+                                     return 0;
+                                   }
 
-                input.drain_one();
-                callback_entered_promise.set_value();
-                callback_gate.wait();
-                return 0;
-            },
-            true});
+                                   input.drain_one();
+                                   callback_entered_promise.set_value();
+                                   callback_gate.wait();
+                                   return 0;
+                                 },
+                                 true});
 
-    assert(handle.has_value());
+  assert(handle.has_value());
 
-    std::promise<ENGINESTATE> run_promise;
-    std::future<ENGINESTATE> run_future =
-        run_promise.get_future();
+  std::promise<ENGINESTATE> run_promise;
+  std::future<ENGINESTATE> run_future = run_promise.get_future();
 
-    std::thread runner([&] {
-        run_promise.set_value(engine.run());
-    });
+  std::thread runner([&] {
+    run_promise.set_value(engine.run());
+  });
 
-    assert(wait_for_phase(
-        engine,
-        EnginePhase::RUNNING,
-        1s));
+  assert(wait_for_phase(engine, EnginePhase::RUNNING, 1s));
 
-    input.signal();
+  input.signal();
 
-    const bool callback_started =
-        callback_entered.wait_for(1s) ==
-        std::future_status::ready;
+  const bool callback_started = callback_entered.wait_for(1s) == std::future_status::ready;
 
-    if (!callback_started) {
-        callback_gate.open();
-        engine.stop();
-        runner.join();
-        assert(callback_started);
-    }
-
-    engine.stop();
-
-    assert(engine.get_phase() == EnginePhase::STOPPING);
-
-    assert(!engine.set_publisher(
-        [](MonData::StoredRecord) {}));
-
-    assert(engine.report_count(
-               {7, 7, 7, 8},
-               1)._status ==
-           MonData::UpdateStatus::INVALID);
-
-    assert(engine.report_error(
-               {7, 7, 7, 9},
-               1)._status ==
-           MonData::UpdateStatus::INVALID);
-
-    assert(engine.report_string(
-               {7, 7, 7, 10},
-               "rejected")._status ==
-           MonData::UpdateStatus::INVALID);
-
-    assert(engine.update_data(
-               make_numeric(
-                   {7, 7, 7, 11},
-                   1))._status ==
-           MonData::UpdateStatus::INVALID);
-
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
-
-    const auto retained = engine.find_data(retained_key);
-    assert(retained.has_value());
-    assert(numeric_value(*retained)._value == 10);
-
+  if (!callback_started) {
     callback_gate.open();
-
-    const bool completed =
-        run_future.wait_for(2s) ==
-        std::future_status::ready;
-
-    if (!completed) {
-        engine.stop();
-    }
-
+    engine.stop();
     runner.join();
+    assert(callback_started);
+  }
 
-    assert(completed);
-    assert(run_future.get() ==
-           ENGINESTATE::SUCCESSFUL);
-    assert(engine.get_phase() == EnginePhase::STOPPED);
+  engine.stop();
+
+  assert(engine.get_phase() == EnginePhase::STOPPING);
+
+  assert(!engine.set_publisher([](MonData::StoredRecord) {
+  }));
+
+  assert(engine.report_count({7, 7, 7, 8}, 1)._status == MonData::UpdateStatus::INVALID);
+
+  assert(engine.report_error({7, 7, 7, 9}, 1)._status == MonData::UpdateStatus::INVALID);
+
+  assert(engine.report_string({7, 7, 7, 10}, "rejected")._status == MonData::UpdateStatus::INVALID);
+
+  assert(engine.update_data(make_numeric({7, 7, 7, 11}, 1))._status ==
+         MonData::UpdateStatus::INVALID);
+
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
+
+  const auto retained = engine.find_data(retained_key);
+  assert(retained.has_value());
+  assert(numeric_value(*retained)._value == 10);
+
+  callback_gate.open();
+
+  const bool completed = run_future.wait_for(2s) == std::future_status::ready;
+
+  if (!completed) {
+    engine.stop();
+  }
+
+  runner.join();
+
+  assert(completed);
+  assert(run_future.get() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.get_phase() == EnginePhase::STOPPED);
 }
 
 /*
@@ -741,89 +588,64 @@ void test_stopping_engine_rejects_publisher_and_reports() {
  * query_data() 仍返回停止前的数据。
  */
 void test_stopped_engine_rejects_reports_and_preserves_data() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    const MonData::MonitorKey key{8, 8, 8, 8};
+  const MonData::MonitorKey key{8, 8, 8, 8};
 
-    const auto inserted = engine.report_string(
-        key,
-        "final-state",
-        "before-stop");
+  const auto inserted = engine.report_string(key, "final-state", "before-stop");
 
-    assert(inserted._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
-    std::promise<ENGINESTATE> run_promise;
-    std::future<ENGINESTATE> run_future =
-        run_promise.get_future();
+  std::promise<ENGINESTATE> run_promise;
+  std::future<ENGINESTATE> run_future = run_promise.get_future();
 
-    std::thread runner([&] {
-        run_promise.set_value(engine.run());
-    });
+  std::thread runner([&] {
+    run_promise.set_value(engine.run());
+  });
 
-    assert(wait_for_phase(
-        engine,
-        EnginePhase::RUNNING,
-        1s));
+  assert(wait_for_phase(engine, EnginePhase::RUNNING, 1s));
 
+  engine.stop();
+
+  const bool completed = run_future.wait_for(2s) == std::future_status::ready;
+
+  if (!completed) {
     engine.stop();
+  }
 
-    const bool completed =
-        run_future.wait_for(2s) ==
-        std::future_status::ready;
+  runner.join();
 
-    if (!completed) {
-        engine.stop();
-    }
+  assert(completed);
+  assert(run_future.get() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.get_phase() == EnginePhase::STOPPED);
 
-    runner.join();
+  assert(!engine.set_publisher([](MonData::StoredRecord) {
+  }));
 
-    assert(completed);
-    assert(run_future.get() ==
-           ENGINESTATE::SUCCESSFUL);
-    assert(engine.get_phase() == EnginePhase::STOPPED);
+  assert(engine.report_count({8, 8, 8, 9}, 1)._status == MonData::UpdateStatus::INVALID);
 
-    assert(!engine.set_publisher(
-        [](MonData::StoredRecord) {}));
+  assert(engine.report_error({8, 8, 8, 10}, 1)._status == MonData::UpdateStatus::INVALID);
 
-    assert(engine.report_count(
-               {8, 8, 8, 9},
-               1)._status ==
-           MonData::UpdateStatus::INVALID);
+  assert(engine.report_string({8, 8, 8, 11}, "rejected")._status == MonData::UpdateStatus::INVALID);
 
-    assert(engine.report_error(
-               {8, 8, 8, 10},
-               1)._status ==
-           MonData::UpdateStatus::INVALID);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 
-    assert(engine.report_string(
-               {8, 8, 8, 11},
-               "rejected")._status ==
-           MonData::UpdateStatus::INVALID);
+  const auto retained = engine.find_data(key);
+  assert(retained.has_value());
+  assert(string_value(*retained) == "final-state");
 
-    assert(publish_count.load(
-               std::memory_order_relaxed) == 1);
-
-    const auto retained = engine.find_data(key);
-    assert(retained.has_value());
-    assert(string_value(*retained) == "final-state");
-
-    const auto snapshot = engine.query_data();
-    assert(snapshot.size() == 1);
-    assert(snapshot[0]._data._key == key);
+  const auto snapshot = engine.query_data();
+  assert(snapshot.size() == 1);
+  assert(snapshot[0]._data._key == key);
 }
 
 /*
@@ -843,42 +665,35 @@ void test_stopped_engine_rejects_reports_and_preserves_data() {
  * Engine 析构后，两个快照仍保留完整 Key、description 和字符串值。
  */
 void test_reporter_snapshots_survive_engine_destruction() {
-    const MonData::MonitorKey key{9, 9, 9, 9};
+  const MonData::MonitorKey key{9, 9, 9, 9};
 
-    std::optional<MonData::StoredRecord> retained_record;
-    std::vector<MonData::StoredRecord> retained_snapshot;
+  std::optional<MonData::StoredRecord> retained_record;
+  std::vector<MonData::StoredRecord> retained_snapshot;
 
-    {
-        Engine engine(MonConfig{"monitor", 9000, 1});
+  {
+    Engine engine(MonConfig{"monitor", 9000, 1});
 
-        assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-        const auto inserted = engine.report_string(
-            key,
-            "retained-value",
-            "retained-description");
+    const auto inserted = engine.report_string(key, "retained-value", "retained-description");
 
-        assert(inserted._status ==
-               MonData::UpdateStatus::INSERTED);
+    assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-        retained_record = engine.find_data(key);
-        retained_snapshot = engine.query_data();
-
-        assert(retained_record.has_value());
-        assert(retained_snapshot.size() == 1);
-    }
+    retained_record = engine.find_data(key);
+    retained_snapshot = engine.query_data();
 
     assert(retained_record.has_value());
-    assert(retained_record->_data._key == key);
-    assert(retained_record->_data._description ==
-           "retained-description");
-    assert(string_value(*retained_record) ==
-           "retained-value");
-
     assert(retained_snapshot.size() == 1);
-    assert(retained_snapshot[0]._data._key == key);
-    assert(string_value(retained_snapshot[0]) ==
-           "retained-value");
+  }
+
+  assert(retained_record.has_value());
+  assert(retained_record->_data._key == key);
+  assert(retained_record->_data._description == "retained-description");
+  assert(string_value(*retained_record) == "retained-value");
+
+  assert(retained_snapshot.size() == 1);
+  assert(retained_snapshot[0]._data._key == key);
+  assert(string_value(retained_snapshot[0]) == "retained-value");
 }
 
 /*
@@ -902,204 +717,157 @@ void test_reporter_snapshots_survive_engine_destruction() {
  * 返回 INVALID；runner.join() 后 Engine 为 STOPPED，最后记录仍然可读取。
  */
 void test_inflight_aio_report_finishes_during_stopping() {
-    /*
-     * Engine 不拥有用户注册的 fd。TestPipe 先构造、后析构，保证 Engine
-     * 清理 AIO 注册期间管道仍然有效。
-     */
-    TestPipe input;
-    Engine engine(MonConfig{"monitor", 9000, 1});
+  /*
+   * Engine 不拥有用户注册的 fd。TestPipe 先构造、后析构，保证 Engine
+   * 清理 AIO 注册期间管道仍然有效。
+   */
+  TestPipe input;
+  Engine engine(MonConfig{"monitor", 9000, 1});
 
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    const MonData::MonitorKey accepted_key{11, 1, 1, 1};
-    const MonData::MonitorKey rejected_key{11, 1, 1, 2};
+  const MonData::MonitorKey accepted_key{11, 1, 1, 1};
+  const MonData::MonitorKey rejected_key{11, 1, 1, 2};
 
-    std::atomic<std::size_t> publish_count{0};
-    std::promise<void> publisher_entered_promise;
-    std::future<void> publisher_entered =
-        publisher_entered_promise.get_future();
-    StartGate publisher_gate;
+  std::atomic<std::size_t> publish_count{0};
+  std::promise<void> publisher_entered_promise;
+  std::future<void> publisher_entered = publisher_entered_promise.get_future();
+  StartGate publisher_gate;
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            assert(record._data._key == accepted_key);
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    assert(record._data._key == accepted_key);
 
-            publish_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-
-            /*
-             * set_value() 证明 Store 更新已经完成且 Publisher 已经进入。
-             * 随后的等待用于人为延长这次已接受调用的执行时间。
-             */
-            publisher_entered_promise.set_value();
-            publisher_gate.wait();
-        }));
-
-    std::promise<MonData::UpdateResult> report_result_promise;
-    std::future<MonData::UpdateResult> report_result =
-        report_result_promise.get_future();
-    std::atomic<bool> callback_claimed{false};
-
-    const auto aio_handle = engine.add_aio(
-        input.read_fd(),
-        MonCallback{
-            "inflight-reporter-stop",
-            [&]() -> int {
-                /*
-                 * select() 是电平触发的。只让第一次激活处理管道并上报，
-                 * 避免同一 fd 重复激活后再次读取空管道。
-                 */
-                if (callback_claimed.exchange(
-                        true,
-                        std::memory_order_acq_rel)) {
-                    return 0;
-                }
-
-                input.drain_one();
-
-                MonData::UpdateResult result =
-                    engine.report_count(
-                        accepted_key,
-                        42,
-                        "accepted-before-stop");
-
-                /* report_count() 只有在 Publisher 被放行后才会返回。 */
-                report_result_promise.set_value(
-                    std::move(result));
-                return 0;
-            },
-            true});
-
-    assert(aio_handle.has_value());
-
-    std::promise<ENGINESTATE> run_promise;
-    std::future<ENGINESTATE> run_result =
-        run_promise.get_future();
-
-    std::thread runner([&] {
-        run_promise.set_value(engine.run());
-    });
-
-    assert(wait_for_phase(
-        engine,
-        EnginePhase::RUNNING,
-        1s));
-
-    input.signal();
-
-    /* Publisher 已进入，说明本次调用已在 RUNNING 阶段被接受。 */
-    assert(
-        publisher_entered.wait_for(1s) ==
-        std::future_status::ready);
-
-    assert(
-        publish_count.load(
-            std::memory_order_relaxed) == 1);
-
-    /* Publisher 仍被阻塞，所以 report_count() 尚未返回。 */
-    assert(
-        report_result.wait_for(0ms) ==
-        std::future_status::timeout);
-
-    engine.stop();
-
-    assert(engine.get_phase() ==
-           EnginePhase::STOPPING);
-
-    const MonData::UpdateResult rejected =
-        engine.report_count(
-            rejected_key,
-            99,
-            "rejected-after-stop");
-
-    assert(rejected._status ==
-           MonData::UpdateStatus::INVALID);
-    assert(!rejected._record.has_value());
-
-    assert(!engine.set_publisher(
-        [](MonData::StoredRecord) {}));
+    publish_count.fetch_add(1, std::memory_order_relaxed);
 
     /*
-     * run() 清理时会等待异步 AIO worker。Publisher 尚未放行，因此
-     * Engine 必须继续停留在 STOPPING，run() 不能提前返回。
+     * set_value() 证明 Store 更新已经完成且 Publisher 已经进入。
+     * 随后的等待用于人为延长这次已接受调用的执行时间。
      */
-    assert(
-        run_result.wait_for(0ms) ==
-        std::future_status::timeout);
-    assert(engine.get_phase() ==
-           EnginePhase::STOPPING);
+    publisher_entered_promise.set_value();
+    publisher_gate.wait();
+  }));
 
-    publisher_gate.open();
+  std::promise<MonData::UpdateResult> report_result_promise;
+  std::future<MonData::UpdateResult> report_result = report_result_promise.get_future();
+  std::atomic<bool> callback_claimed{false};
 
-    assert(
-        report_result.wait_for(2s) ==
-        std::future_status::ready);
+  const auto aio_handle =
+      engine.add_aio(input.read_fd(),
+                     MonCallback{"inflight-reporter-stop",
+                                 [&]() -> int {
+                                   /*
+                                    * select() 是电平触发的。只让第一次激活处理管道并上报，
+                                    * 避免同一 fd 重复激活后再次读取空管道。
+                                    */
+                                   if (callback_claimed.exchange(true, std::memory_order_acq_rel)) {
+                                     return 0;
+                                   }
 
-    const MonData::UpdateResult accepted =
-        report_result.get();
+                                   input.drain_one();
 
-    assert(accepted._status ==
-           MonData::UpdateStatus::INSERTED);
-    assert(accepted._record.has_value());
-    assert(numeric_value(*accepted._record)._value == 42);
+                                   MonData::UpdateResult result = engine.report_count(
+                                       accepted_key, 42, "accepted-before-stop");
 
-    assert(
-        run_result.wait_for(2s) ==
-        std::future_status::ready);
+                                   /* report_count() 只有在 Publisher 被放行后才会返回。 */
+                                   report_result_promise.set_value(std::move(result));
+                                   return 0;
+                                 },
+                                 true});
 
-    runner.join();
+  assert(aio_handle.has_value());
 
-    assert(run_result.get() ==
-           ENGINESTATE::SUCCESSFUL);
-    assert(engine.get_phase() ==
-           EnginePhase::STOPPED);
-    assert(
-        publish_count.load(
-            std::memory_order_relaxed) == 1);
+  std::promise<ENGINESTATE> run_promise;
+  std::future<ENGINESTATE> run_result = run_promise.get_future();
 
-    const auto stored = engine.find_data(accepted_key);
+  std::thread runner([&] {
+    run_promise.set_value(engine.run());
+  });
 
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 42);
-    assert(stored->_data._description ==
-           "accepted-before-stop");
+  assert(wait_for_phase(engine, EnginePhase::RUNNING, 1s));
 
-    /* STOPPING 中被拒绝的 Key 不能产生记录。 */
-    assert(!engine.find_data(rejected_key).has_value());
+  input.signal();
 
-    const MonData::UpdateResult stopped_result =
-        engine.report_error(
-            {11, 1, 1, 3},
-            1,
-            "rejected-after-join");
+  /* Publisher 已进入，说明本次调用已在 RUNNING 阶段被接受。 */
+  assert(publisher_entered.wait_for(1s) == std::future_status::ready);
 
-    assert(stopped_result._status ==
-           MonData::UpdateStatus::INVALID);
-    assert(!stopped_result._record.has_value());
-    assert(
-        publish_count.load(
-            std::memory_order_relaxed) == 1);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
+
+  /* Publisher 仍被阻塞，所以 report_count() 尚未返回。 */
+  assert(report_result.wait_for(0ms) == std::future_status::timeout);
+
+  engine.stop();
+
+  assert(engine.get_phase() == EnginePhase::STOPPING);
+
+  const MonData::UpdateResult rejected =
+      engine.report_count(rejected_key, 99, "rejected-after-stop");
+
+  assert(rejected._status == MonData::UpdateStatus::INVALID);
+  assert(!rejected._record.has_value());
+
+  assert(!engine.set_publisher([](MonData::StoredRecord) {
+  }));
+
+  /*
+   * run() 清理时会等待异步 AIO worker。Publisher 尚未放行，因此
+   * Engine 必须继续停留在 STOPPING，run() 不能提前返回。
+   */
+  assert(run_result.wait_for(0ms) == std::future_status::timeout);
+  assert(engine.get_phase() == EnginePhase::STOPPING);
+
+  publisher_gate.open();
+
+  assert(report_result.wait_for(2s) == std::future_status::ready);
+
+  const MonData::UpdateResult accepted = report_result.get();
+
+  assert(accepted._status == MonData::UpdateStatus::INSERTED);
+  assert(accepted._record.has_value());
+  assert(numeric_value(*accepted._record)._value == 42);
+
+  assert(run_result.wait_for(2s) == std::future_status::ready);
+
+  runner.join();
+
+  assert(run_result.get() == ENGINESTATE::SUCCESSFUL);
+  assert(engine.get_phase() == EnginePhase::STOPPED);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
+
+  const auto stored = engine.find_data(accepted_key);
+
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 42);
+  assert(stored->_data._description == "accepted-before-stop");
+
+  /* STOPPING 中被拒绝的 Key 不能产生记录。 */
+  assert(!engine.find_data(rejected_key).has_value());
+
+  const MonData::UpdateResult stopped_result =
+      engine.report_error({11, 1, 1, 3}, 1, "rejected-after-join");
+
+  assert(stopped_result._status == MonData::UpdateStatus::INVALID);
+  assert(!stopped_result._record.has_value());
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
-    test_created_engine_rejects_publisher_and_reports();
+  test_created_engine_rejects_publisher_and_reports();
 
-    test_ready_engine_registers_publisher_and_reports_count();
-    test_ready_engine_forwards_error_and_string_reports();
-    test_update_data_uses_reporter_publish_gate();
-    test_ready_engine_can_unregister_publisher();
+  test_ready_engine_registers_publisher_and_reports_count();
+  test_ready_engine_forwards_error_and_string_reports();
+  test_update_data_uses_reporter_publish_gate();
+  test_ready_engine_can_unregister_publisher();
 
-    test_running_engine_accepts_publisher_and_reports();
+  test_running_engine_accepts_publisher_and_reports();
 
-    test_stopping_engine_rejects_publisher_and_reports();
-    test_stopped_engine_rejects_reports_and_preserves_data();
+  test_stopping_engine_rejects_publisher_and_reports();
+  test_stopped_engine_rejects_reports_and_preserves_data();
 
-    test_reporter_snapshots_survive_engine_destruction();
+  test_reporter_snapshots_survive_engine_destruction();
 
-    test_inflight_aio_report_finishes_during_stopping();
+  test_inflight_aio_report_finishes_during_stopping();
 
-    return 0;
+  return 0;
 }

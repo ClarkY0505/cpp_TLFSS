@@ -1,13 +1,13 @@
 #ifndef __MONITOR_STORE_H__
 #define __MONITOR_STORE_H__
 
-#include "monitor_data.h"
 #include <cstddef>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <vector>
+#include "monitor_data.h"
 
 namespace TLSSMON {
 /**
@@ -15,7 +15,7 @@ namespace TLSSMON {
  * @note 查询返回值副本；不暴露受互斥锁保护的内部记录。
  */
 class MonitorStore final {
-public:
+ public:
   /**
    * @brief prepare 返回 true：
    *   候选记录已经完成持久化，可以提交 Store。
@@ -31,15 +31,15 @@ public:
    *
    * 它只允许执行有界的本地持久化操作。
    */
-  using PrepareUpdate = std::function<bool(const MonData::StoredRecord &)>;
+  using PrepareUpdate = std::function<bool(const MonData::StoredRecord&)>;
   MonitorStore() = default;
   ~MonitorStore() = default;
 
-  MonitorStore(const MonitorStore &) = delete;
-  MonitorStore &operator=(const MonitorStore &) = delete;
+  MonitorStore(const MonitorStore&) = delete;
+  MonitorStore& operator=(const MonitorStore&) = delete;
 
-  MonitorStore(MonitorStore &&) = delete;
-  MonitorStore &operator=(MonitorStore &&) = delete;
+  MonitorStore(MonitorStore&&) = delete;
+  MonitorStore& operator=(MonitorStore&&) = delete;
 
   /**
    * @brief 插入或更新记录，并在值变化时写入 timestamp。
@@ -62,23 +62,21 @@ public:
    */
   MonData::UpdateResult update_prepared(MonData::MonitorData data, bool force,
                                         MonData::MonitorTimestamp timestamp,
-                                        const PrepareUpdate &prepare);
+                                        const PrepareUpdate& prepare);
 
   /**
    * @brief 按完整主键查询记录；未找到时返回 std::nullopt。
    * @param key 监控记录的完整主键。
    * @return 成功时返回结果；失败或未找到时返回 std::nullopt。
    */
-  std::optional<MonData::StoredRecord>
-  find(const MonData::MonitorKey &key) const;
+  std::optional<MonData::StoredRecord> find(const MonData::MonitorKey& key) const;
 
   /**
    * @brief 返回匹配过滤条件的独立快照，按主键顺序排列。
    * @param filter 用于匹配主键字段的过滤条件。
    * @return 独立的结果快照。
    */
-  std::vector<MonData::StoredRecord>
-  query(const MonData::MonitorFilter &filter = {}) const;
+  std::vector<MonData::StoredRecord> query(const MonData::MonitorFilter& filter = {}) const;
 
   /**
    * @brief 返回当前记录数。
@@ -89,7 +87,7 @@ public:
   /** @brief 清空 Store 中的全部记录。 */
   void clear();
 
-private:
+ private:
   /**
    * @brief 执行普通更新或带持久化门禁的更新。
    * @param data 要写入的完整监控记录。
@@ -100,11 +98,11 @@ private:
    */
   MonData::UpdateResult update_impl(MonData::MonitorData data, bool force,
                                     MonData::MonitorTimestamp timestamp,
-                                    const PrepareUpdate *prepare);
+                                    const PrepareUpdate* prepare);
 
   mutable std::mutex _mutex;
   std::map<MonData::MonitorKey, MonData::StoredRecord> _records;
 };
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __MONITOR_STORE_H__
+#endif  // __MONITOR_STORE_H__

@@ -60,12 +60,13 @@ struct UdpPublisherConfig final {
    * @param version 监控线协议版本。
    */
   UdpPublisherConfig(UdpEndpoint endpoint, WireVersion version)
-      : _endpoint(std::move(endpoint)), _version(version) {}
+      : _endpoint(std::move(endpoint))
+      , _version(version) {}
 };
 
 /** @brief 将监控记录编码并发送到固定 UDP 目标。 */
 class UdpPublisher final {
-public:
+ public:
   /**
    * @brief 按配置创建发送 socket；通过 ready() 查询初始化结果。
    * @param config 目标 IPv4 地址与非零端口，以及 V1/V2 协议版本。
@@ -73,11 +74,11 @@ public:
   explicit UdpPublisher(UdpPublisherConfig config);
   ~UdpPublisher();
 
-  UdpPublisher(const UdpPublisher &) = delete;
-  UdpPublisher &operator=(const UdpPublisher &) = delete;
+  UdpPublisher(const UdpPublisher&) = delete;
+  UdpPublisher& operator=(const UdpPublisher&) = delete;
 
-  UdpPublisher(UdpPublisher &&) = delete;
-  UdpPublisher &operator=(UdpPublisher &&) = delete;
+  UdpPublisher(UdpPublisher&&) = delete;
+  UdpPublisher& operator=(UdpPublisher&&) = delete;
   /**
    * @brief 判断目标和 socket 是否初始化成功。
    * @return 初始化完成并可执行操作时返回 true。
@@ -102,7 +103,7 @@ public:
    * @brief 返回目标地址和协议版本配置。
    * @return 构造时保存的配置引用。
    */
-  [[nodiscard]] const UdpPublisherConfig &config() const noexcept {
+  [[nodiscard]] const UdpPublisherConfig& config() const noexcept {
     return _config;
   }
 
@@ -111,9 +112,9 @@ public:
    * @param record 要编码、发送或保存的监控记录。
    * @return 编码和发送状态、已发送字节数及系统错误。
    */
-  [[nodiscard]] UdpPublishResult send(const MonData::StoredRecord &record) const;
+  [[nodiscard]] UdpPublishResult send(const MonData::StoredRecord& record) const;
 
-private:
+ private:
   struct Impl;
   const UdpPublisherConfig _config;
   /**
@@ -122,7 +123,7 @@ private:
   std::unique_ptr<Impl> _impl;
 };
 
-} // namespace Wire
-} // namespace TLSSMON
+}  // namespace Wire
+}  // namespace TLSSMON
 
-#endif // __UDP_PUBLISHER_H__
+#endif  // __UDP_PUBLISHER_H__

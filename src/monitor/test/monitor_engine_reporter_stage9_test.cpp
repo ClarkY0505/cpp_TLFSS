@@ -16,11 +16,8 @@ using namespace TLSSMON;
 
 namespace {
 
-const MonData::NumericValue& numeric_value(
-    const MonData::StoredRecord& record) {
-
-    return std::get<MonData::NumericValue>(
-        record._data._value);
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  return std::get<MonData::NumericValue>(record._data._value);
 }
 
 /*
@@ -31,66 +28,51 @@ const MonData::NumericValue& numeric_value(
  * 丢弃并发 Reporter 调用。
  */
 void test_multiple_threads_report_different_keys() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    constexpr std::size_t writer_count = 8;
-    constexpr std::size_t writes_per_writer = 200;
-    constexpr std::size_t expected =
-        writer_count * writes_per_writer;
+  constexpr std::size_t writer_count = 8;
+  constexpr std::size_t writes_per_writer = 200;
+  constexpr std::size_t expected = writer_count * writes_per_writer;
 
-    std::atomic<std::size_t> inserted{0};
-    std::atomic<std::size_t> publish_count{0};
-    std::atomic<bool> start{false};
+  std::atomic<std::size_t> inserted{0};
+  std::atomic<std::size_t> publish_count{0};
+  std::atomic<bool> start{false};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            publish_count.fetch_add(1, std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    std::vector<std::thread> writers;
-    writers.reserve(writer_count);
+  std::vector<std::thread> writers;
+  writers.reserve(writer_count);
 
-    for (std::size_t writer = 0;
-         writer < writer_count;
-         ++writer) {
+  for (std::size_t writer = 0; writer < writer_count; ++writer) {
+    writers.emplace_back([&, writer] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
 
-        writers.emplace_back([&, writer] {
-            while (!start.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
+      for (std::size_t index = 0; index < writes_per_writer; ++index) {
+        const auto result = engine.report_count(
+            {90, 1, static_cast<std::uint32_t>(writer), static_cast<std::uint32_t>(index)}, 1,
+            "different-key");
 
-            for (std::size_t index = 0;
-                 index < writes_per_writer;
-                 ++index) {
+        if (result._status == MonData::UpdateStatus::INSERTED) {
+          inserted.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
 
-                const auto result = engine.report_count(
-                    {90,
-                     1,
-                     static_cast<std::uint32_t>(writer),
-                     static_cast<std::uint32_t>(index)},
-                    1,
-                    "different-key");
+  start.store(true, std::memory_order_release);
 
-                if (result._status ==
-                    MonData::UpdateStatus::INSERTED) {
-                    inserted.fetch_add(
-                        1,
-                        std::memory_order_relaxed);
-                }
-            }
-        });
-    }
+  for (std::thread& writer : writers) {
+    writer.join();
+  }
 
-    start.store(true, std::memory_order_release);
-
-    for (std::thread& writer : writers) {
-        writer.join();
-    }
-
-    assert(inserted.load(std::memory_order_relaxed) == expected);
-    assert(publish_count.load(std::memory_order_relaxed) == expected);
-    assert(engine.query_data().size() == expected);
+  assert(inserted.load(std::memory_order_relaxed) == expected);
+  assert(publish_count.load(std::memory_order_relaxed) == expected);
+  assert(engine.query_data().size() == expected);
 }
 
 /*
@@ -100,65 +82,55 @@ void test_multiple_threads_report_different_keys() {
  * UNCHANGED；Publisher 只收到一次实际变化，Store 不产生重复节点。
  */
 void test_multiple_threads_same_key_publish_once() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    constexpr std::size_t writer_count = 16;
-    const MonData::MonitorKey key{90, 2, 1, 1};
+  constexpr std::size_t writer_count = 16;
+  const MonData::MonitorKey key{90, 2, 1, 1};
 
-    std::atomic<bool> start{false};
-    std::atomic<std::size_t> inserted{0};
-    std::atomic<std::size_t> unchanged{0};
-    std::atomic<std::size_t> publish_count{0};
+  std::atomic<bool> start{false};
+  std::atomic<std::size_t> inserted{0};
+  std::atomic<std::size_t> unchanged{0};
+  std::atomic<std::size_t> publish_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            assert(record._data._key == key);
-            publish_count.fetch_add(1, std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    assert(record._data._key == key);
+    publish_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    std::vector<std::thread> writers;
-    writers.reserve(writer_count);
+  std::vector<std::thread> writers;
+  writers.reserve(writer_count);
 
-    for (std::size_t index = 0;
-         index < writer_count;
-         ++index) {
+  for (std::size_t index = 0; index < writer_count; ++index) {
+    writers.emplace_back([&] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
 
-        writers.emplace_back([&] {
-            while (!start.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
+      const auto result = engine.report_count(key, 42, "same-key");
 
-            const auto result = engine.report_count(
-                key,
-                42,
-                "same-key");
+      if (result._status == MonData::UpdateStatus::INSERTED) {
+        inserted.fetch_add(1, std::memory_order_relaxed);
+      } else if (result._status == MonData::UpdateStatus::UNCHANGED) {
+        unchanged.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
 
-            if (result._status ==
-                MonData::UpdateStatus::INSERTED) {
-                inserted.fetch_add(1, std::memory_order_relaxed);
-            } else if (result._status ==
-                       MonData::UpdateStatus::UNCHANGED) {
-                unchanged.fetch_add(1, std::memory_order_relaxed);
-            }
-        });
-    }
+  start.store(true, std::memory_order_release);
 
-    start.store(true, std::memory_order_release);
+  for (std::thread& writer : writers) {
+    writer.join();
+  }
 
-    for (std::thread& writer : writers) {
-        writer.join();
-    }
+  assert(inserted.load(std::memory_order_relaxed) == 1);
+  assert(unchanged.load(std::memory_order_relaxed) == writer_count - 1);
+  assert(publish_count.load(std::memory_order_relaxed) == 1);
+  assert(engine.query_data().size() == 1);
 
-    assert(inserted.load(std::memory_order_relaxed) == 1);
-    assert(unchanged.load(std::memory_order_relaxed) ==
-           writer_count - 1);
-    assert(publish_count.load(std::memory_order_relaxed) == 1);
-    assert(engine.query_data().size() == 1);
-
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 42);
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 42);
 }
 
 /*
@@ -168,35 +140,33 @@ void test_multiple_threads_same_key_publish_once() {
  * 数值主体变化才能越过去重门。本案例固定 Publisher 看到的值序列为 1、2、3。
  */
 void test_publisher_receives_only_value_changes() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    const MonData::MonitorKey key{90, 3, 1, 1};
-    std::mutex values_mutex;
-    std::vector<std::uint32_t> published_values;
+  const MonData::MonitorKey key{90, 3, 1, 1};
+  std::mutex values_mutex;
+  std::vector<std::uint32_t> published_values;
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            std::lock_guard<std::mutex> lock(values_mutex);
-            published_values.push_back(numeric_value(record)._value);
-        }));
-
-    const auto inserted = engine.report_count(key, 1, "first");
-    const auto same_value =
-        engine.report_count(key, 1, "description-changed");
-    const auto updated = engine.report_count(key, 2, "second");
-    const auto state_only = engine.report_error(key, 2, "fresh-state");
-    const auto error_updated = engine.report_error(key, 3, "third");
-
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    assert(same_value._status == MonData::UpdateStatus::UNCHANGED);
-    assert(updated._status == MonData::UpdateStatus::UPDATED);
-    assert(state_only._status == MonData::UpdateStatus::UNCHANGED);
-    assert(error_updated._status == MonData::UpdateStatus::UPDATED);
-
-    const std::vector<std::uint32_t> expected{1, 2, 3};
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
     std::lock_guard<std::mutex> lock(values_mutex);
-    assert(published_values == expected);
+    published_values.push_back(numeric_value(record)._value);
+  }));
+
+  const auto inserted = engine.report_count(key, 1, "first");
+  const auto same_value = engine.report_count(key, 1, "description-changed");
+  const auto updated = engine.report_count(key, 2, "second");
+  const auto state_only = engine.report_error(key, 2, "fresh-state");
+  const auto error_updated = engine.report_error(key, 3, "third");
+
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(same_value._status == MonData::UpdateStatus::UNCHANGED);
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
+  assert(state_only._status == MonData::UpdateStatus::UNCHANGED);
+  assert(error_updated._status == MonData::UpdateStatus::UPDATED);
+
+  const std::vector<std::uint32_t> expected{1, 2, 3};
+  std::lock_guard<std::mutex> lock(values_mutex);
+  assert(published_values == expected);
 }
 
 /*
@@ -206,32 +176,27 @@ void test_publisher_receives_only_value_changes() {
  * 和 query_data()；若 Publisher 在 Store 锁内执行，本案例会发生自锁死锁。
  */
 void test_publisher_can_query_engine() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    const MonData::MonitorKey key{90, 4, 1, 1};
-    std::atomic<bool> find_succeeded{false};
-    std::atomic<bool> query_succeeded{false};
+  const MonData::MonitorKey key{90, 4, 1, 1};
+  std::atomic<bool> find_succeeded{false};
+  std::atomic<bool> query_succeeded{false};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            const auto found = engine.find_data(record._data._key);
-            const auto snapshot = engine.query_data();
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    const auto found = engine.find_data(record._data._key);
+    const auto snapshot = engine.query_data();
 
-            find_succeeded.store(
-                found.has_value() &&
-                    numeric_value(*found)._value == 7,
-                std::memory_order_relaxed);
-            query_succeeded.store(
-                snapshot.size() == 1,
-                std::memory_order_relaxed);
-        }));
+    find_succeeded.store(found.has_value() && numeric_value(*found)._value == 7,
+                         std::memory_order_relaxed);
+    query_succeeded.store(snapshot.size() == 1, std::memory_order_relaxed);
+  }));
 
-    const auto result = engine.report_count(key, 7, "query-engine");
+  const auto result = engine.report_count(key, 7, "query-engine");
 
-    assert(result._status == MonData::UpdateStatus::INSERTED);
-    assert(find_succeeded.load(std::memory_order_relaxed));
-    assert(query_succeeded.load(std::memory_order_relaxed));
+  assert(result._status == MonData::UpdateStatus::INSERTED);
+  assert(find_succeeded.load(std::memory_order_relaxed));
+  assert(query_succeeded.load(std::memory_order_relaxed));
 }
 
 /*
@@ -241,46 +206,34 @@ void test_publisher_can_query_engine() {
  * 会再次进入 Publisher。原子门只限制外层派生一次，不阻止内层正常发布。
  */
 void test_publisher_can_reenter_engine_reporter() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    const MonData::MonitorKey outer_key{90, 5, 1, 1};
-    const MonData::MonitorKey inner_key{90, 5, 1, 2};
-    std::atomic<bool> nested_started{false};
-    std::atomic<std::size_t> publish_count{0};
-    std::atomic<bool> nested_inserted{false};
+  const MonData::MonitorKey outer_key{90, 5, 1, 1};
+  const MonData::MonitorKey inner_key{90, 5, 1, 2};
+  std::atomic<bool> nested_started{false};
+  std::atomic<std::size_t> publish_count{0};
+  std::atomic<bool> nested_inserted{false};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord record) {
-            publish_count.fetch_add(1, std::memory_order_relaxed);
+  assert(engine.set_publisher([&](MonData::StoredRecord record) {
+    publish_count.fetch_add(1, std::memory_order_relaxed);
 
-            if (record._data._key == outer_key &&
-                !nested_started.exchange(
-                    true,
-                    std::memory_order_acq_rel)) {
+    if (record._data._key == outer_key &&
+        !nested_started.exchange(true, std::memory_order_acq_rel)) {
+      const auto nested = engine.report_string(inner_key, "nested", "publisher-reentry");
 
-                const auto nested = engine.report_string(
-                    inner_key,
-                    "nested",
-                    "publisher-reentry");
+      nested_inserted.store(nested._status == MonData::UpdateStatus::INSERTED,
+                            std::memory_order_relaxed);
+    }
+  }));
 
-                nested_inserted.store(
-                    nested._status ==
-                        MonData::UpdateStatus::INSERTED,
-                    std::memory_order_relaxed);
-            }
-        }));
+  const auto outer = engine.report_count(outer_key, 1, "outer");
 
-    const auto outer = engine.report_count(
-        outer_key,
-        1,
-        "outer");
-
-    assert(outer._status == MonData::UpdateStatus::INSERTED);
-    assert(nested_inserted.load(std::memory_order_relaxed));
-    assert(publish_count.load(std::memory_order_relaxed) == 2);
-    assert(engine.query_data().size() == 2);
-    assert(engine.find_data(inner_key).has_value());
+  assert(outer._status == MonData::UpdateStatus::INSERTED);
+  assert(nested_inserted.load(std::memory_order_relaxed));
+  assert(publish_count.load(std::memory_order_relaxed) == 2);
+  assert(engine.query_data().size() == 2);
+  assert(engine.find_data(inner_key).has_value());
 }
 
 /*
@@ -290,32 +243,29 @@ void test_publisher_can_reenter_engine_reporter() {
  * 保存新值，但旧 Publisher 的调用次数保持不变。
  */
 void test_unregister_stops_future_old_publisher_calls() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    const MonData::MonitorKey key{90, 6, 1, 1};
-    std::atomic<std::size_t> old_publisher_count{0};
+  const MonData::MonitorKey key{90, 6, 1, 1};
+  std::atomic<std::size_t> old_publisher_count{0};
 
-    assert(engine.set_publisher(
-        [&](MonData::StoredRecord) {
-            old_publisher_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }));
+  assert(engine.set_publisher([&](MonData::StoredRecord) {
+    old_publisher_count.fetch_add(1, std::memory_order_relaxed);
+  }));
 
-    const auto inserted = engine.report_count(key, 1, "before-unregister");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    assert(old_publisher_count.load(std::memory_order_relaxed) == 1);
+  const auto inserted = engine.report_count(key, 1, "before-unregister");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(old_publisher_count.load(std::memory_order_relaxed) == 1);
 
-    assert(engine.set_publisher({}));
+  assert(engine.set_publisher({}));
 
-    const auto updated = engine.report_count(key, 2, "after-unregister");
-    assert(updated._status == MonData::UpdateStatus::UPDATED);
-    assert(old_publisher_count.load(std::memory_order_relaxed) == 1);
+  const auto updated = engine.report_count(key, 2, "after-unregister");
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
+  assert(old_publisher_count.load(std::memory_order_relaxed) == 1);
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 2);
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 2);
 }
 
 /*
@@ -325,31 +275,27 @@ void test_unregister_stops_future_old_publisher_calls() {
  * Engine 离开作用域后 MonContext/Reporter/Publisher 自动析构，weak_ptr 必须过期。
  */
 void test_engine_destruction_releases_publisher() {
-    std::weak_ptr<int> retained;
+  std::weak_ptr<int> retained;
 
-    {
-        Engine engine(MonConfig{"monitor", 9000, 1});
-        assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  {
+    Engine engine(MonConfig{"monitor", 9000, 1});
+    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-        auto lifetime = std::make_shared<int>(42);
-        retained = lifetime;
+    auto lifetime = std::make_shared<int>(42);
+    retained = lifetime;
 
-        assert(engine.set_publisher(
-            [lifetime](MonData::StoredRecord) {
-                assert(*lifetime == 42);
-            }));
+    assert(engine.set_publisher([lifetime](MonData::StoredRecord) {
+      assert(*lifetime == 42);
+    }));
 
-        lifetime.reset();
-        assert(!retained.expired());
+    lifetime.reset();
+    assert(!retained.expired());
 
-        const auto inserted = engine.report_count(
-            {90, 7, 1, 1},
-            1,
-            "publisher-lifetime");
-        assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    }
+    const auto inserted = engine.report_count({90, 7, 1, 1}, 1, "publisher-lifetime");
+    assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  }
 
-    assert(retained.expired());
+  assert(retained.expired());
 }
 
 /*
@@ -360,107 +306,85 @@ void test_engine_destruction_releases_publisher() {
  * 该案例主要配合 TSan 验证 std::function 注册和复制没有数据竞争。
  */
 void test_concurrent_publisher_registration_and_engine_reports() {
-    Engine engine(MonConfig{"monitor", 9000, 1});
-    assert(engine.init() == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"monitor", 9000, 1});
+  assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-    constexpr std::size_t writer_count = 4;
-    constexpr std::size_t writes_per_writer = 250;
-    constexpr std::size_t expected =
-        writer_count * writes_per_writer;
+  constexpr std::size_t writer_count = 4;
+  constexpr std::size_t writes_per_writer = 250;
+  constexpr std::size_t expected = writer_count * writes_per_writer;
 
-    std::atomic<std::size_t> publisher_a_count{0};
-    std::atomic<std::size_t> publisher_b_count{0};
-    std::atomic<std::size_t> inserted{0};
-    std::atomic<bool> start{false};
+  std::atomic<std::size_t> publisher_a_count{0};
+  std::atomic<std::size_t> publisher_b_count{0};
+  std::atomic<std::size_t> inserted{0};
+  std::atomic<bool> start{false};
 
-    Engine::MonitorPublisher publisher_a =
-        [&](MonData::StoredRecord) {
-            publisher_a_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        };
+  Engine::MonitorPublisher publisher_a = [&](MonData::StoredRecord) {
+    publisher_a_count.fetch_add(1, std::memory_order_relaxed);
+  };
 
-    Engine::MonitorPublisher publisher_b =
-        [&](MonData::StoredRecord) {
-            publisher_b_count.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        };
+  Engine::MonitorPublisher publisher_b = [&](MonData::StoredRecord) {
+    publisher_b_count.fetch_add(1, std::memory_order_relaxed);
+  };
 
-    assert(engine.set_publisher(publisher_a));
+  assert(engine.set_publisher(publisher_a));
 
-    std::thread setter([&] {
-        while (!start.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
+  std::thread setter([&] {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+
+    for (std::size_t index = 0; index < 5000; ++index) {
+      const bool accepted = engine.set_publisher((index % 2 == 0) ? publisher_a : publisher_b);
+      assert(accepted);
+    }
+  });
+
+  std::vector<std::thread> writers;
+  writers.reserve(writer_count);
+
+  for (std::size_t writer = 0; writer < writer_count; ++writer) {
+    writers.emplace_back([&, writer] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      for (std::size_t index = 0; index < writes_per_writer; ++index) {
+        const auto result = engine.report_count(
+            {90, 8, static_cast<std::uint32_t>(writer), static_cast<std::uint32_t>(index)}, 1,
+            "registration-race");
+
+        if (result._status == MonData::UpdateStatus::INSERTED) {
+          inserted.fetch_add(1, std::memory_order_relaxed);
         }
-
-        for (std::size_t index = 0; index < 5000; ++index) {
-            const bool accepted = engine.set_publisher(
-                (index % 2 == 0) ? publisher_a : publisher_b);
-            assert(accepted);
-        }
+      }
     });
+  }
 
-    std::vector<std::thread> writers;
-    writers.reserve(writer_count);
+  start.store(true, std::memory_order_release);
 
-    for (std::size_t writer = 0;
-         writer < writer_count;
-         ++writer) {
+  setter.join();
+  for (std::thread& writer : writers) {
+    writer.join();
+  }
 
-        writers.emplace_back([&, writer] {
-            while (!start.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
+  const std::size_t total_published = publisher_a_count.load(std::memory_order_relaxed) +
+                                      publisher_b_count.load(std::memory_order_relaxed);
 
-            for (std::size_t index = 0;
-                 index < writes_per_writer;
-                 ++index) {
-
-                const auto result = engine.report_count(
-                    {90,
-                     8,
-                     static_cast<std::uint32_t>(writer),
-                     static_cast<std::uint32_t>(index)},
-                    1,
-                    "registration-race");
-
-                if (result._status ==
-                    MonData::UpdateStatus::INSERTED) {
-                    inserted.fetch_add(
-                        1,
-                        std::memory_order_relaxed);
-                }
-            }
-        });
-    }
-
-    start.store(true, std::memory_order_release);
-
-    setter.join();
-    for (std::thread& writer : writers) {
-        writer.join();
-    }
-
-    const std::size_t total_published =
-        publisher_a_count.load(std::memory_order_relaxed) +
-        publisher_b_count.load(std::memory_order_relaxed);
-
-    assert(inserted.load(std::memory_order_relaxed) == expected);
-    assert(total_published == expected);
-    assert(engine.query_data().size() == expected);
+  assert(inserted.load(std::memory_order_relaxed) == expected);
+  assert(total_published == expected);
+  assert(engine.query_data().size() == expected);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
-    test_multiple_threads_report_different_keys();
-    test_multiple_threads_same_key_publish_once();
-    test_publisher_receives_only_value_changes();
-    test_publisher_can_query_engine();
-    test_publisher_can_reenter_engine_reporter();
-    test_unregister_stops_future_old_publisher_calls();
-    test_engine_destruction_releases_publisher();
-    test_concurrent_publisher_registration_and_engine_reports();
-    return 0;
+  test_multiple_threads_report_different_keys();
+  test_multiple_threads_same_key_publish_once();
+  test_publisher_receives_only_value_changes();
+  test_publisher_can_query_engine();
+  test_publisher_can_reenter_engine_reporter();
+  test_unregister_stops_future_old_publisher_calls();
+  test_engine_destruction_releases_publisher();
+  test_concurrent_publisher_registration_and_engine_reports();
+  return 0;
 }

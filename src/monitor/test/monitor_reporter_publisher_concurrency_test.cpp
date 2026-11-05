@@ -15,7 +15,6 @@
 using namespace TLSSMON;
 
 MonData::MonitorTimestamp timestamp_at(std::int64_t seconds) {
-
   return MonData::MonitorTimestamp{std::chrono::seconds{seconds}};
 }
 
@@ -90,8 +89,7 @@ void test_empty_publisher_unregisters_current_publisher() {
 
   const MonData::MonitorKey key{2, 1, 1, 1};
 
-  const MonData::UpdateResult inserted =
-      reporter.report_count(key, 1, "first", timestamp_at(200));
+  const MonData::UpdateResult inserted = reporter.report_count(key, 1, "first", timestamp_at(200));
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
@@ -102,8 +100,7 @@ void test_empty_publisher_unregisters_current_publisher() {
    */
   reporter.set_publisher({});
 
-  const MonData::UpdateResult updated =
-      reporter.report_count(key, 2, "updated", timestamp_at(300));
+  const MonData::UpdateResult updated = reporter.report_count(key, 2, "updated", timestamp_at(300));
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 
@@ -149,8 +146,7 @@ void test_replacing_publisher_affects_future_updates() {
 
   const MonData::MonitorKey key{3, 1, 1, 1};
 
-  const auto first =
-      reporter.report_count(key, 1, "publisher-a", timestamp_at(400));
+  const auto first = reporter.report_count(key, 1, "publisher-a", timestamp_at(400));
 
   assert(first._status == MonData::UpdateStatus::INSERTED);
 
@@ -158,13 +154,11 @@ void test_replacing_publisher_affects_future_updates() {
     publisher_b_count.fetch_add(1, std::memory_order_relaxed);
   });
 
-  const auto second =
-      reporter.report_count(key, 2, "publisher-b-first", timestamp_at(500));
+  const auto second = reporter.report_count(key, 2, "publisher-b-first", timestamp_at(500));
 
   assert(second._status == MonData::UpdateStatus::UPDATED);
 
-  const auto third =
-      reporter.report_count(key, 3, "publisher-b-second", timestamp_at(600));
+  const auto third = reporter.report_count(key, 3, "publisher-b-second", timestamp_at(600));
 
   assert(third._status == MonData::UpdateStatus::UPDATED);
 
@@ -219,14 +213,15 @@ void test_inflight_update_uses_publisher_snapshot() {
     old_publisher_entered = true;
     state_condition.notify_all();
 
-    state_condition.wait(lock, [&] { return release_old_publisher; });
+    state_condition.wait(lock, [&] {
+      return release_old_publisher;
+    });
   });
 
   const MonData::MonitorKey key{4, 1, 1, 1};
 
   std::thread updater([&] {
-    const auto result =
-        reporter.report_count(key, 1, "old-publisher", timestamp_at(700));
+    const auto result = reporter.report_count(key, 1, "old-publisher", timestamp_at(700));
 
     assert(result._status == MonData::UpdateStatus::INSERTED);
   });
@@ -237,8 +232,9 @@ void test_inflight_update_uses_publisher_snapshot() {
   {
     std::unique_lock<std::mutex> lock(state_mutex);
 
-    const bool entered = state_condition.wait_for(
-        lock, std::chrono::seconds{2}, [&] { return old_publisher_entered; });
+    const bool entered = state_condition.wait_for(lock, std::chrono::seconds{2}, [&] {
+      return old_publisher_entered;
+    });
 
     assert(entered);
   }
@@ -265,8 +261,9 @@ void test_inflight_update_uses_publisher_snapshot() {
   {
     std::unique_lock<std::mutex> lock(state_mutex);
 
-    setter_completed_before_release = state_condition.wait_for(
-        lock, std::chrono::seconds{2}, [&] { return setter_completed; });
+    setter_completed_before_release = state_condition.wait_for(lock, std::chrono::seconds{2}, [&] {
+      return setter_completed;
+    });
 
     /*
      * 无论测试是否成功，都释放旧 Publisher，
@@ -293,8 +290,7 @@ void test_inflight_update_uses_publisher_snapshot() {
   /*
    * 后续变化应使用新 Publisher。
    */
-  const auto updated =
-      reporter.report_count(key, 2, "new-publisher", timestamp_at(800));
+  const auto updated = reporter.report_count(key, 2, "new-publisher", timestamp_at(800));
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 
@@ -339,13 +335,11 @@ void test_publisher_can_unregister_itself() {
 
   const MonData::MonitorKey key{5, 1, 1, 1};
 
-  const auto inserted =
-      reporter.report_count(key, 1, "self-unregister", timestamp_at(900));
+  const auto inserted = reporter.report_count(key, 1, "self-unregister", timestamp_at(900));
 
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-  const auto updated =
-      reporter.report_count(key, 2, "after-unregister", timestamp_at(1000));
+  const auto updated = reporter.report_count(key, 2, "after-unregister", timestamp_at(1000));
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 
@@ -393,15 +387,13 @@ void test_publisher_can_reenter_reporter() {
     if (!nested_started) {
       nested_started = true;
 
-      const auto nested =
-          reporter.report_count(nested_key, 20, "nested", timestamp_at(1100));
+      const auto nested = reporter.report_count(nested_key, 20, "nested", timestamp_at(1100));
 
       assert(nested._status == MonData::UpdateStatus::INSERTED);
     }
   });
 
-  const auto outer =
-      reporter.report_count(outer_key, 10, "outer", timestamp_at(1200));
+  const auto outer = reporter.report_count(outer_key, 10, "outer", timestamp_at(1200));
 
   assert(outer._status == MonData::UpdateStatus::INSERTED);
 
@@ -461,7 +453,6 @@ void test_concurrent_publisher_replacement_and_updates() {
     }
 
     for (std::size_t index = 0; index < 10000; ++index) {
-
       if ((index % 2) == 0) {
         reporter.set_publisher(publisher_a);
       } else {
@@ -474,19 +465,16 @@ void test_concurrent_publisher_replacement_and_updates() {
   writers.reserve(writer_count);
 
   for (std::size_t writer = 0; writer < writer_count; ++writer) {
-
     writers.emplace_back([&, writer] {
       while (!start.load(std::memory_order_acquire)) {
         std::this_thread::yield();
       }
 
       for (std::size_t index = 0; index < writes_per_writer; ++index) {
-
         const MonData::MonitorKey key{7, 1, static_cast<std::uint32_t>(writer),
                                       static_cast<std::uint32_t>(index)};
 
-        const auto result =
-            reporter.report_count(key, 1, "concurrent", timestamp_at(1300));
+        const auto result = reporter.report_count(key, 1, "concurrent", timestamp_at(1300));
 
         assert(result._status == MonData::UpdateStatus::INSERTED);
       }
@@ -497,7 +485,7 @@ void test_concurrent_publisher_replacement_and_updates() {
 
   setter.join();
 
-  for (std::thread &writer : writers) {
+  for (std::thread& writer : writers) {
     writer.join();
   }
 
@@ -505,9 +493,8 @@ void test_concurrent_publisher_replacement_and_updates() {
 
   assert(store.size() == expected);
 
-  const std::size_t total_published =
-      publisher_a_count.load(std::memory_order_relaxed) +
-      publisher_b_count.load(std::memory_order_relaxed);
+  const std::size_t total_published = publisher_a_count.load(std::memory_order_relaxed) +
+                                      publisher_b_count.load(std::memory_order_relaxed);
 
   assert(total_published == expected);
 }
@@ -553,19 +540,19 @@ void test_multiple_publishers_can_execute_concurrently() {
      * 等待时会释放 gate_mutex，
      * 因此第二个 Publisher 可以进入。
      */
-    gate_condition.wait(lock, [&] { return release; });
+    gate_condition.wait(lock, [&] {
+      return release;
+    });
   });
 
   std::thread first([&] {
-    const auto result =
-        reporter.report_count({8, 1, 1, 1}, 1, "first", timestamp_at(1400));
+    const auto result = reporter.report_count({8, 1, 1, 1}, 1, "first", timestamp_at(1400));
 
     assert(result._status == MonData::UpdateStatus::INSERTED);
   });
 
   std::thread second([&] {
-    const auto result =
-        reporter.report_count({8, 1, 1, 2}, 1, "second", timestamp_at(1500));
+    const auto result = reporter.report_count({8, 1, 1, 2}, 1, "second", timestamp_at(1500));
 
     assert(result._status == MonData::UpdateStatus::INSERTED);
   });
@@ -575,8 +562,9 @@ void test_multiple_publishers_can_execute_concurrently() {
   {
     std::unique_lock<std::mutex> lock(gate_mutex);
 
-    both_entered = gate_condition.wait_for(lock, std::chrono::seconds{2},
-                                           [&] { return entered == 2; });
+    both_entered = gate_condition.wait_for(lock, std::chrono::seconds{2}, [&] {
+      return entered == 2;
+    });
 
     /*
      * 即使失败也释放已经进入的回调，
@@ -637,22 +625,19 @@ void test_publisher_protects_its_shared_state() {
   writers.reserve(writer_count);
 
   for (std::size_t writer = 0; writer < writer_count; ++writer) {
-
     writers.emplace_back([&, writer] {
       for (std::size_t index = 0; index < writes_per_writer; ++index) {
-
         const MonData::MonitorKey key{9, 1, static_cast<std::uint32_t>(writer),
                                       static_cast<std::uint32_t>(index)};
 
-        const auto result =
-            reporter.report_count(key, 1, "shared-state", timestamp_at(1600));
+        const auto result = reporter.report_count(key, 1, "shared-state", timestamp_at(1600));
 
         assert(result._status == MonData::UpdateStatus::INSERTED);
       }
     });
   }
 
-  for (std::thread &writer : writers) {
+  for (std::thread& writer : writers) {
     writer.join();
   }
 
@@ -702,8 +687,7 @@ void test_publisher_exception_is_contained() {
   MonData::UpdateResult inserted;
 
   try {
-    inserted =
-        reporter.report_count(key, 1, "throwing-publisher", timestamp_at(1700));
+    inserted = reporter.report_count(key, 1, "throwing-publisher", timestamp_at(1700));
   } catch (...) {
     exception_escaped = true;
   }
@@ -726,8 +710,7 @@ void test_publisher_exception_is_contained() {
     normal_count.fetch_add(1, std::memory_order_relaxed);
   });
 
-  const auto updated =
-      reporter.report_count(key, 2, "normal-publisher", timestamp_at(1800));
+  const auto updated = reporter.report_count(key, 2, "normal-publisher", timestamp_at(1800));
 
   assert(updated._status == MonData::UpdateStatus::UPDATED);
 

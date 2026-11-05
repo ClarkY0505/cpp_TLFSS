@@ -4,5 +4,5 @@
 namespace TLSS::FileStorage {
 // Preserve source compatibility for existing users and cache regressions.
 using StorageEngine = MetadataService;
-}
+}  // namespace TLSS::FileStorage
 #endif

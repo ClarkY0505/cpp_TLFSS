@@ -1,8 +1,8 @@
+#include "common/base/current_thread.h"
 #include <cxxabi.h>
 #include <execinfo.h>
 #include <stdlib.h>
 #include <string>
-#include "common/base/current_thread.h"
 
 namespace TLSS::BASE::CurrentThread {
 __thread int t_cached_tid = 0;

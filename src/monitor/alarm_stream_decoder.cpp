@@ -1,5 +1,5 @@
-#include "alarm_protocol.h"
 #include "alarm_stream_decoder.h"
+#include "alarm_protocol.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -12,13 +12,11 @@
 namespace TLSSMON {
 namespace AlarmWire {
 bool AlarmStreamFeedResult::success() const noexcept {
-  return _status == AlarmStreamStatus::SUCCESS ||
-         _status == AlarmStreamStatus::NEED_MORE_DATA;
+  return _status == AlarmStreamStatus::SUCCESS || _status == AlarmStreamStatus::NEED_MORE_DATA;
 }
 
-AlarmStreamFeedResult
-AlarmStreamDecoder::fail_protocol(AlarmProtocolStatus status,
-                                  std::vector<AlarmFrame> completed) noexcept {
+AlarmStreamFeedResult AlarmStreamDecoder::fail_protocol(
+    AlarmProtocolStatus status, std::vector<AlarmFrame> completed) noexcept {
   // 已完成的前序帧仍返回调用方；错误连接进入失败态，必须 reset 后复用。
   _failed = true;
   _failure_status = AlarmStreamStatus::PROTOCOL_ERROR;
@@ -26,13 +24,11 @@ AlarmStreamDecoder::fail_protocol(AlarmProtocolStatus status,
 
   _buffer.clear();
   _expected_frame_size.reset();
-  return AlarmStreamFeedResult{AlarmStreamStatus::PROTOCOL_ERROR,
-                               std::move(completed), status};
+  return AlarmStreamFeedResult{AlarmStreamStatus::PROTOCOL_ERROR, std::move(completed), status};
 }
 
-AlarmStreamFeedResult
-AlarmStreamDecoder::fail_stream(AlarmStreamStatus status,
-                                std::vector<AlarmFrame> completed) noexcept {
+AlarmStreamFeedResult AlarmStreamDecoder::fail_stream(AlarmStreamStatus status,
+                                                      std::vector<AlarmFrame> completed) noexcept {
   _failed = true;
   _failure_status = status;
   _protocol_error.reset();
@@ -43,22 +39,20 @@ AlarmStreamDecoder::fail_stream(AlarmStreamStatus status,
   return AlarmStreamFeedResult{status, std::move(completed), std::nullopt};
 }
 
-AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t *data,
+AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t* data,
                                                std::size_t size) noexcept {
   // 一次 feed 可以补齐半帧，也可以连续解析多个完整帧。
   std::vector<AlarmFrame> completed;
 
   if (_failed) {
-    return AlarmStreamFeedResult{
-        AlarmStreamStatus::ALREADY_FAILED, {}, _protocol_error};
+    return AlarmStreamFeedResult{AlarmStreamStatus::ALREADY_FAILED, {}, _protocol_error};
   }
 
   if (data == nullptr && size != 0U) {
     /*
      * 调用参数错误不应污染连接解析状态。
      */
-    return AlarmStreamFeedResult{
-        AlarmStreamStatus::INVALID_INPUT, {}, std::nullopt};
+    return AlarmStreamFeedResult{AlarmStreamStatus::INVALID_INPUT, {}, std::nullopt};
   }
 
   try {
@@ -95,15 +89,13 @@ AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t *data,
          * - payload_length；
          * - 最大 4096 字节限制。
          */
-        const AlarmFrameSizeResult size_result =
-            alarm_frame_size(_buffer.data(), _buffer.size());
+        const AlarmFrameSizeResult size_result = alarm_frame_size(_buffer.data(), _buffer.size());
         if (!size_result.success()) {
           return fail_protocol(size_result._status, std::move(completed));
         }
 
         if (*size_result._frame_size > ALARM_STREAM_BUFFER_LIMIT) {
-          return fail_stream(AlarmStreamStatus::BUFFER_LIMIT_EXCEEDED,
-                             std::move(completed));
+          return fail_stream(AlarmStreamStatus::BUFFER_LIMIT_EXCEEDED, std::move(completed));
         }
 
         _expected_frame_size = *size_result._frame_size;
@@ -131,22 +123,19 @@ AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t *data,
        * 这里保留防御式检查。
        */
       if (_buffer.size() > ALARM_STREAM_BUFFER_LIMIT) {
-        return fail_stream(AlarmStreamStatus::BUFFER_LIMIT_EXCEEDED,
-                           std::move(completed));
+        return fail_stream(AlarmStreamStatus::BUFFER_LIMIT_EXCEEDED, std::move(completed));
       }
       /*
        * 第三步：对完整帧执行 CRC 和字段解码。
        */
-      AlarmDecodeResult decoded =
-          decode_alarm_frame(_buffer.data(), _buffer.size());
+      AlarmDecodeResult decoded = decode_alarm_frame(_buffer.data(), _buffer.size());
 
       if (!decoded.success()) {
         /*
          * 内存分配失败不是对端协议错误。
          */
         if (decoded._status == AlarmProtocolStatus::ALLOCATION_FAILED) {
-          return fail_stream(AlarmStreamStatus::ALLOCATION_FAILED,
-                             std::move(completed));
+          return fail_stream(AlarmStreamStatus::ALLOCATION_FAILED, std::move(completed));
         }
 
         return fail_protocol(decoded._status, std::move(completed));
@@ -160,22 +149,19 @@ AlarmStreamFeedResult AlarmStreamDecoder::feed(const std::uint8_t *data,
       _buffer.clear();
       _expected_frame_size.reset();
     }
-  } catch (const std::bad_alloc &) {
-    return fail_stream(AlarmStreamStatus::ALLOCATION_FAILED,
-                       std::move(completed));
+  } catch (const std::bad_alloc&) {
+    return fail_stream(AlarmStreamStatus::ALLOCATION_FAILED, std::move(completed));
   }
 
-  const AlarmStreamStatus status = _buffer.empty()
-                                       ? AlarmStreamStatus::SUCCESS
-                                       : AlarmStreamStatus::NEED_MORE_DATA;
+  const AlarmStreamStatus status =
+      _buffer.empty() ? AlarmStreamStatus::SUCCESS : AlarmStreamStatus::NEED_MORE_DATA;
 
   return AlarmStreamFeedResult{status, std::move(completed), std::nullopt};
 }
 
 AlarmStreamFeedResult AlarmStreamDecoder::finish() noexcept {
   if (_failed) {
-    return AlarmStreamFeedResult{
-        AlarmStreamStatus::ALREADY_FAILED, {}, _protocol_error};
+    return AlarmStreamFeedResult{AlarmStreamStatus::ALREADY_FAILED, {}, _protocol_error};
   }
 
   /*
@@ -206,21 +192,21 @@ void AlarmStreamDecoder::reset() noexcept {
   _protocol_error.reset();
 }
 
-bool AlarmStreamDecoder::failed() const noexcept { return _failed; }
+bool AlarmStreamDecoder::failed() const noexcept {
+  return _failed;
+}
 
 std::size_t AlarmStreamDecoder::buffered_size() const noexcept {
   return _buffer.size();
 }
 
-std::optional<std::size_t>
-AlarmStreamDecoder::expected_frame_size() const noexcept {
+std::optional<std::size_t> AlarmStreamDecoder::expected_frame_size() const noexcept {
   return _expected_frame_size;
 }
 
-std::optional<AlarmProtocolStatus>
-AlarmStreamDecoder::protocol_error() const noexcept {
+std::optional<AlarmProtocolStatus> AlarmStreamDecoder::protocol_error() const noexcept {
   return _protocol_error;
 }
 
-} // namespace AlarmWire
-} // namespace TLSSMON
+}  // namespace AlarmWire
+}  // namespace TLSSMON

@@ -1,11 +1,19 @@
+#include "cli_server.h"
 #include "aio_types.h"
 #include "cli_prompt.h"
 #include "cli_registry.h"
-#include "cli_server.h"
 #include "cli_types.h"
 #include "engine.h"
 #include "engine_type.h"
 
+#include <fcntl.h>
+#include <linux/falloc.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -14,20 +22,12 @@
 #include <cstdint>
 #include <ctime>
 #include <exception>
-#include <fcntl.h>
-#include <linux/falloc.h>
 #include <memory>
 #include <mutex>
-#include <netinet/in.h>
 #include <new>
 #include <optional>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 
@@ -49,16 +49,20 @@ constexpr bool accepts_cli_work(EnginePhase phase) noexcept {
  * 都能自动关闭尚未转交的 fd。
  */
 class UniqueFd final {
-public:
-  explicit UniqueFd(int fd = -1) noexcept : _fd(fd) {}
-  ~UniqueFd() { reset(); }
+ public:
+  explicit UniqueFd(int fd = -1) noexcept
+      : _fd(fd) {}
+  ~UniqueFd() {
+    reset();
+  }
 
-  UniqueFd(const UniqueFd &) = delete;
-  UniqueFd &operator=(UniqueFd &) = delete;
+  UniqueFd(const UniqueFd&) = delete;
+  UniqueFd& operator=(UniqueFd&) = delete;
 
-  UniqueFd(UniqueFd &&other) noexcept : _fd(other.release()) {}
+  UniqueFd(UniqueFd&& other) noexcept
+      : _fd(other.release()) {}
 
-  UniqueFd &operator=(UniqueFd &&other) noexcept {
+  UniqueFd& operator=(UniqueFd&& other) noexcept {
     if (this != &other) {
       reset(other.release());
     }
@@ -66,7 +70,9 @@ public:
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
   int release() noexcept {
     const int result = _fd;
@@ -80,7 +86,7 @@ public:
     _fd = fd;
   }
 
-private:
+ private:
   int _fd;
 };
 
@@ -135,7 +141,7 @@ bool set_nonblocking(int fd) noexcept {
   return ::fcntl(fd, F_SETFL, old_flags | O_NONBLOCK) == 0;
 }
 
-} // namespace
+}  // namespace
 
 /*
  * Listener fd 的真正所有者。
@@ -144,15 +150,16 @@ bool set_nonblocking(int fd) noexcept {
  * 只有最后一个 shared_ptr 被释放时，fd 才会关闭。
  */
 struct CliServer::ListenerResource final {
-  explicit ListenerResource(int fd) noexcept : _fd(fd) {}
+  explicit ListenerResource(int fd) noexcept
+      : _fd(fd) {}
   ~ListenerResource() {
     if (_fd >= 0) {
       ::close(_fd);
     }
   }
 
-  ListenerResource(const ListenerResource &) = delete;
-  ListenerResource &operator=(const ListenerResource &) = delete;
+  ListenerResource(const ListenerResource&) = delete;
+  ListenerResource& operator=(const ListenerResource&) = delete;
 
   const int _fd;
 };
@@ -175,13 +182,15 @@ struct CliServer::ClientSession final {
 };
 
 struct CliServer::ServerState final {
-  ServerState(Engine &engine, CliRegistry &registry, std::size_t max_clients,
+  ServerState(Engine& engine, CliRegistry& registry, std::size_t max_clients,
               std::string prompt_name)
-      : _engine(engine), _registry(registry), _max_clients(max_clients),
-        _prompt_name(std::move(prompt_name)) {}
+      : _engine(engine)
+      , _registry(registry)
+      , _max_clients(max_clients)
+      , _prompt_name(std::move(prompt_name)) {}
 
-  Engine &_engine;
-  CliRegistry &_registry;
+  Engine& _engine;
+  CliRegistry& _registry;
 
   const std::size_t _max_clients;
   const std::string _prompt_name;
@@ -191,12 +200,15 @@ struct CliServer::ServerState final {
   std::unordered_map<int, std::shared_ptr<ClientSession>> _sessions;
 };
 
-CliServer::CliServer(Engine &engine, CliRegistry &registry,
-                     CliServerConfig config)
-    : _engine(engine), _registry(registry), _config(config),
-      _state(std::make_shared<ServerState>(
-          engine, registry, config._max_clients, config._prompt_name)) {}
-CliServer::~CliServer() { close(); }
+CliServer::CliServer(Engine& engine, CliRegistry& registry, CliServerConfig config)
+    : _engine(engine)
+    , _registry(registry)
+    , _config(config)
+    , _state(std::make_shared<ServerState>(engine, registry, config._max_clients,
+                                           config._prompt_name)) {}
+CliServer::~CliServer() {
+  close();
+}
 
 bool CliServer::start() {
   // Listener 只启动一次；连接会话由 Engine AIO 管理。
@@ -240,8 +252,7 @@ bool CliServer::start() {
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(_config._port);
 
-  if (::bind(socket_fd.get(), reinterpret_cast<const sockaddr *>(&address),
-             sizeof(address)) != 0) {
+  if (::bind(socket_fd.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
     return false;
   }
 
@@ -251,14 +262,12 @@ bool CliServer::start() {
 
   sockaddr_in bound_address{};
   socklen_t bound_address_size = sizeof(bound_address);
-  if (::getsockname(socket_fd.get(),
-                    reinterpret_cast<sockaddr *>(&bound_address),
+  if (::getsockname(socket_fd.get(), reinterpret_cast<sockaddr*>(&bound_address),
                     &bound_address_size) != 0) {
     return false;
   }
 
-  if (bound_address_size < sizeof(sockaddr_in) ||
-      bound_address.sin_family != AF_INET) {
+  if (bound_address_size < sizeof(sockaddr_in) || bound_address.sin_family != AF_INET) {
     return false;
   }
 
@@ -274,7 +283,7 @@ bool CliServer::start() {
      * 失败时因为提前 release() 造成 Listener fd 泄漏。
      */
     listener = std::make_shared<ListenerResource>(socket_fd.get());
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     return false;
   }
 
@@ -289,12 +298,10 @@ bool CliServer::start() {
 
   MonCallback callback{"cli-listener",
                        [state, listener]() noexcept -> int {
-                         return CliServer::handle_listener_ready(state,
-                                                                 listener);
+                         return CliServer::handle_listener_ready(state, listener);
                        },
                        false};
-  const std::optional<AioHandle> handle =
-      _engine.add_aio(listener->_fd, std::move(callback));
+  const std::optional<AioHandle> handle = _engine.add_aio(listener->_fd, std::move(callback));
 
   if (!handle.has_value()) {
     return false;
@@ -370,9 +377,8 @@ std::uint16_t CliServer::bound_port() const noexcept {
   return _bound_port;
 }
 
-int CliServer::handle_listener_ready(
-    const std::shared_ptr<ServerState> &state,
-    const std::shared_ptr<ListenerResource> &listener) noexcept {
+int CliServer::handle_listener_ready(const std::shared_ptr<ServerState>& state,
+                                     const std::shared_ptr<ListenerResource>& listener) noexcept {
   if (!state || !listener || listener->_fd < 0) {
     return 0;
   }
@@ -381,24 +387,21 @@ int CliServer::handle_listener_ready(
     for (;;) {
       sockaddr_storage peer_address{};
       socklen_t peer_address_size = sizeof(peer_address);
-      UniqueFd accepted{
-          ::accept4(listener->_fd, reinterpret_cast<sockaddr *>(&peer_address),
-                    &peer_address_size, SOCK_NONBLOCK | SOCK_CLOEXEC)};
+      UniqueFd accepted{::accept4(listener->_fd, reinterpret_cast<sockaddr*>(&peer_address),
+                                  &peer_address_size, SOCK_NONBLOCK | SOCK_CLOEXEC)};
 
       if (accepted.get() >= 0) {
         if (!accepts_cli_work(state->_engine.get_phase())) {
           continue;
         }
-        std::shared_ptr<ClientSession> session =
-            std::make_shared<ClientSession>();
+        std::shared_ptr<ClientSession> session = std::make_shared<ClientSession>();
         session->_fd = accepted.release();
         bool admitted = false;
         {
           std::lock_guard<std::mutex> lock(state->_sessions_mutex);
           if (!state->_closing.load(std::memory_order_acquire) &&
               state->_sessions.size() < state->_max_clients) {
-            const auto insertion =
-                state->_sessions.emplace(session->_fd, session);
+            const auto insertion = state->_sessions.emplace(session->_fd, session);
             admitted = insertion.second;
           }
         }
@@ -410,19 +413,16 @@ int CliServer::handle_listener_ready(
         // 注册锁确保客户端回调不会早于 _aio_handle 写入而关闭会话。
         std::optional<AioHandle> handle;
         {
-          std::lock_guard<std::mutex> registration_lock(
-              session->_registration_mutex);
+          std::lock_guard<std::mutex> registration_lock(session->_registration_mutex);
           if (!session->_closing.load(std::memory_order_acquire)) {
             try {
               MonCallback callback{"cli-client",
                                    [state, session]() noexcept -> int {
-                                     return CliServer::handle_client_ready(
-                                         state, session);
+                                     return CliServer::handle_client_ready(state, session);
                                    },
                                    false};
 
-              handle =
-                  state->_engine.add_aio(session->_fd, std::move(callback));
+              handle = state->_engine.add_aio(session->_fd, std::move(callback));
               if (handle.has_value()) {
                 session->_aio_handle = *handle;
               }
@@ -466,9 +466,8 @@ int CliServer::handle_listener_ready(
   }
 }
 
-int CliServer::handle_client_ready(
-    const std::shared_ptr<ServerState> &state,
-    const std::shared_ptr<ClientSession> &session) noexcept {
+int CliServer::handle_client_ready(const std::shared_ptr<ServerState>& state,
+                                   const std::shared_ptr<ClientSession>& session) noexcept {
   if (!state || !session || session->_fd < 0) {
     return 0;
   }
@@ -482,9 +481,7 @@ int CliServer::handle_client_ready(
    * 等待add_aio完成保存
    * 如果说能获取到注册锁说明已经完成保存
    * */
-  {
-    std::lock_guard<std::mutex> registration_lock(session->_registration_mutex);
-  }
+  { std::lock_guard<std::mutex> registration_lock(session->_registration_mutex); }
 
   if (session->_closing.load(std::memory_order_acquire)) {
     return 0;
@@ -493,8 +490,7 @@ int CliServer::handle_client_ready(
   try {
     char buffer[CLI_READ_BUFFER_SIZE];
     for (;;) {
-      const ssize_t received =
-          ::recv(session->_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+      const ssize_t received = ::recv(session->_fd, buffer, sizeof(buffer), MSG_DONTWAIT);
       if (received > 0) {
         session->_input.append(buffer, static_cast<std::size_t>(received));
         if (!process_input(state, session)) {
@@ -530,8 +526,8 @@ int CliServer::handle_client_ready(
   }
 }
 
-bool CliServer::process_input(const std::shared_ptr<ServerState> &state,
-                              const std::shared_ptr<ClientSession> &session) {
+bool CliServer::process_input(const std::shared_ptr<ServerState>& state,
+                              const std::shared_ptr<ClientSession>& session) {
   // 输入缓冲可能一次收到多行；逐行分派并保留最后的不完整行。
   for (;;) {
     if (state->_closing.load(std::memory_order_acquire) ||
@@ -541,9 +537,8 @@ bool CliServer::process_input(const std::shared_ptr<ServerState> &state,
     }
     const std::size_t newline = session->_input.find('\n');
     if (newline == std::string::npos) {
-      const bool possible_crlf =
-          session->_input.size() == CLI_MAX_LINE_SIZE + 1U &&
-          !session->_input.empty() && session->_input.back() == '\r';
+      const bool possible_crlf = session->_input.size() == CLI_MAX_LINE_SIZE + 1U &&
+                                 !session->_input.empty() && session->_input.back() == '\r';
 
       if (session->_input.size() > CLI_MAX_LINE_SIZE && !possible_crlf) {
         send_all(session, CLI_LINE_TOO_LONG_RESPONSE);
@@ -575,8 +570,7 @@ bool CliServer::process_input(const std::shared_ptr<ServerState> &state,
       continue;
     }
 
-    const CliDispatchResult result =
-        state->_registry.dispatch(line, session->_context);
+    const CliDispatchResult result = state->_registry.dispatch(line, session->_context);
     if (!result._output.empty()) {
       const std::string reply = format_system_reply(result._output);
 
@@ -591,9 +585,8 @@ bool CliServer::process_input(const std::shared_ptr<ServerState> &state,
   }
 }
 
-bool CliServer::send_prompt(
-    const std::shared_ptr<ServerState> &state,
-    const std::shared_ptr<ClientSession> &session) noexcept {
+bool CliServer::send_prompt(const std::shared_ptr<ServerState>& state,
+                            const std::shared_ptr<ClientSession>& session) noexcept {
   if (!state || !session || session->_fd < 0) {
     return false;
   }
@@ -605,8 +598,7 @@ bool CliServer::send_prompt(
   }
 
   try {
-    const std::string prompt =
-        make_cli_prompt(state->_prompt_name, session->_context);
+    const std::string prompt = make_cli_prompt(state->_prompt_name, session->_context);
     if (prompt.empty()) {
       return false;
     }
@@ -622,7 +614,7 @@ bool CliServer::send_prompt(
   }
 }
 
-bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
+bool CliServer::send_all(const std::shared_ptr<ClientSession>& session,
                          std::string_view output) noexcept {
   // 慢客户端最多占用固定发送时间，避免阻塞 Engine 的 AIO 回调。
   if (!session || session->_fd < 0) {
@@ -654,8 +646,7 @@ bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
     }
 
     const auto remaining_nanoseconds =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now)
-            .count();
+        std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now).count();
 
     /*
      * 正数毫秒向上取整：
@@ -667,8 +658,7 @@ bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
     constexpr std::int64_t nanoseconds_per_millisecond = INT64_C(1'000'000);
 
     const std::int64_t remaining_milliseconds =
-        (remaining_nanoseconds + nanoseconds_per_millisecond - 1) /
-        nanoseconds_per_millisecond;
+        (remaining_nanoseconds + nanoseconds_per_millisecond - 1) / nanoseconds_per_millisecond;
 
     return static_cast<int>(remaining_milliseconds);
   };
@@ -682,9 +672,8 @@ bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
       return false;
     }
 
-    const ssize_t sent =
-        ::send(session->_fd, output.data() + offset, output.size() - offset,
-               MSG_NOSIGNAL | MSG_DONTWAIT);
+    const ssize_t sent = ::send(session->_fd, output.data() + offset, output.size() - offset,
+                                MSG_NOSIGNAL | MSG_DONTWAIT);
 
     if (sent > 0) {
       offset += static_cast<std::size_t>(sent);
@@ -755,9 +744,8 @@ bool CliServer::send_all(const std::shared_ptr<ClientSession> &session,
   return true;
 }
 
-void CliServer::close_session(
-    const std::shared_ptr<ServerState> &state,
-    const std::shared_ptr<ClientSession> &session) noexcept {
+void CliServer::close_session(const std::shared_ptr<ServerState>& state,
+                              const std::shared_ptr<ClientSession>& session) noexcept {
   if (!state || !session) {
     return;
   }
@@ -777,8 +765,7 @@ void CliServer::close_session(
     }
   }
 
-  const bool already_closing =
-      session->_closing.exchange(true, std::memory_order_acq_rel);
+  const bool already_closing = session->_closing.exchange(true, std::memory_order_acq_rel);
   if (already_closing) {
     return;
   }
@@ -794,4 +781,4 @@ void CliServer::close_session(
   }
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

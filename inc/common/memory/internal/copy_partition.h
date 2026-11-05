@@ -2,7 +2,6 @@
 #define __COPY_PARTITION_H__
 #include <cstddef>
 
-
 namespace TLSS::MEMORY::INTERNAL {
 
 struct CopyPartition {
@@ -11,10 +10,8 @@ struct CopyPartition {
   std::size_t tail_size{0};
 };
 
-CopyPartition make_copy_partition(
-    const void* dst,
-    std::size_t size,
-    std::size_t worker_count) noexcept;
+CopyPartition make_copy_partition(const void* dst, std::size_t size,
+                                  std::size_t worker_count) noexcept;
 
 }  // namespace TLSS::MEMORY::INTERNAL
-#endif // __COPY_PARTITION_H__
+#endif  // __COPY_PARTITION_H__

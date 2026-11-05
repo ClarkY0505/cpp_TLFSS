@@ -29,10 +29,10 @@ namespace {
 
 constexpr std::uint16_t METRIC_UDP_PORT = 9300U;
 constexpr std::uint16_t ALARM_TCP_PORT = 9400U;
-constexpr const char *COLLECTOR_HOST = "127.0.0.1";
+constexpr const char* COLLECTOR_HOST = "127.0.0.1";
 
 struct NodeOptions final {
-  const TLSSMON::MonitorModuleInfo *_module{nullptr};
+  const TLSSMON::MonitorModuleInfo* _module{nullptr};
   std::uint64_t _source_id{0U};
   std::filesystem::path _outbox;
   std::uint16_t _cli_port{0U};
@@ -40,8 +40,7 @@ struct NodeOptions final {
 
 struct NodeState final {
   std::atomic<bool> _sampling{true};
-  std::chrono::steady_clock::time_point _started{
-      std::chrono::steady_clock::now()};
+  std::chrono::steady_clock::time_point _started{std::chrono::steady_clock::now()};
 
   std::uint64_t _tick{0U};
   std::uint32_t _network_error_total{0U};
@@ -56,18 +55,18 @@ struct NodeState final {
       TLSSMON::make_times_per_period_policy(0U, 3U, TLSSMON::PolicyTime{3000})};
 
   TLSSMON::PolicyTime logical_time() const {
-    return std::chrono::duration_cast<TLSSMON::PolicyTime>(
-        std::chrono::steady_clock::now() - _started);
+    return std::chrono::duration_cast<TLSSMON::PolicyTime>(std::chrono::steady_clock::now() -
+                                                           _started);
   }
 };
 
-bool parse_source_id(const char *text, std::uint64_t &result) {
+bool parse_source_id(const char* text, std::uint64_t& result) {
   if (text == nullptr || *text == '\0') {
     return false;
   }
 
   errno = 0;
-  char *end = nullptr;
+  char* end = nullptr;
   const unsigned long long parsed = std::strtoull(text, &end, 0);
 
   if (errno != 0 || end == text || *end != '\0' || parsed == 0U) {
@@ -78,17 +77,16 @@ bool parse_source_id(const char *text, std::uint64_t &result) {
   return true;
 }
 
-bool parse_port(const char *text, std::uint16_t &result) {
+bool parse_port(const char* text, std::uint16_t& result) {
   if (text == nullptr || *text == '\0') {
     return false;
   }
 
   errno = 0;
-  char *end = nullptr;
+  char* end = nullptr;
   const unsigned long parsed = std::strtoul(text, &end, 10);
 
-  if (errno != 0 || end == text || *end != '\0' || parsed == 0U ||
-      parsed > 65535U) {
+  if (errno != 0 || end == text || *end != '\0' || parsed == 0U || parsed > 65535U) {
     return false;
   }
 
@@ -96,7 +94,7 @@ bool parse_port(const char *text, std::uint16_t &result) {
   return true;
 }
 
-std::optional<NodeOptions> parse_options(int argc, char **argv) {
+std::optional<NodeOptions> parse_options(int argc, char** argv) {
   if (argc != 5) {
     return std::nullopt;
   }
@@ -130,9 +128,8 @@ std::optional<NodeOptions> parse_options(int argc, char **argv) {
   return options;
 }
 
-void print_usage(const char *program) {
-  std::cerr << "usage: " << program
-            << " <disk|network> <source-id> <outbox-dir> <cli-port>\n";
+void print_usage(const char* program) {
+  std::cerr << "usage: " << program << " <disk|network> <source-id> <outbox-dir> <cli-port>\n";
 }
 
 TLSSMON::MonData::MonitorKey make_key(std::uint32_t mid, std::uint32_t eid) {
@@ -140,47 +137,41 @@ TLSSMON::MonData::MonitorKey make_key(std::uint32_t mid, std::uint32_t eid) {
    * level 先填 0。
    * Reporter 会根据模块错误表修正 level 和 description。
    */
-  return TLSSMON::MonData::MonitorKey{mid, 0U,
-                                      TLSSMON::DemoM9::SAMPLE_FUNCTION_ID, eid};
+  return TLSSMON::MonData::MonitorKey{mid, 0U, TLSSMON::DemoM9::SAMPLE_FUNCTION_ID, eid};
 }
 
-std::shared_ptr<TLSSMON::Wire::UdpPublisher>
-install_udp_publisher(TLSSMON::Engine &engine) {
-  auto publisher = std::make_shared<TLSSMON::Wire::UdpPublisher>(
-      TLSSMON::Wire::UdpPublisherConfig{{COLLECTOR_HOST, METRIC_UDP_PORT},
-                                        TLSSMON::Wire::WireVersion::V2});
+std::shared_ptr<TLSSMON::Wire::UdpPublisher> install_udp_publisher(TLSSMON::Engine& engine) {
+  auto publisher = std::make_shared<TLSSMON::Wire::UdpPublisher>(TLSSMON::Wire::UdpPublisherConfig{
+      {COLLECTOR_HOST, METRIC_UDP_PORT}, TLSSMON::Wire::WireVersion::V2});
 
   if (!publisher->ready()) {
     std::cerr << "[node] UDP publisher initialization failed"
-              << " status=" << static_cast<int>(publisher->setup_status())
-              << '\n';
+              << " status=" << static_cast<int>(publisher->setup_status()) << '\n';
     return {};
   }
 
   const std::weak_ptr<TLSSMON::Wire::UdpPublisher> weak_publisher{publisher};
 
-  if (!engine.set_publisher(
-          [weak_publisher](TLSSMON::MonData::StoredRecord record) {
-            const auto locked = weak_publisher.lock();
+  if (!engine.set_publisher([weak_publisher](TLSSMON::MonData::StoredRecord record) {
+        const auto locked = weak_publisher.lock();
 
-            if (!locked) {
-              return;
-            }
+        if (!locked) {
+          return;
+        }
 
-            const auto result = locked->send(record);
+        const auto result = locked->send(record);
 
-            if (!result.success()) {
-              const auto &key = record._data._key;
+        if (!result.success()) {
+          const auto& key = record._data._key;
 
-              /*
-               * 不输出 description 或字符串 payload。
-               */
-              std::cerr << "[udp] send failed" << " mid=" << key._mid
-                        << " fid=" << key._fid << " eid=" << key._eid
-                        << " status=" << static_cast<int>(result._status)
-                        << " errno=" << result._system_error << '\n';
-            }
-          })) {
+          /*
+           * 不输出 description 或字符串 payload。
+           */
+          std::cerr << "[udp] send failed" << " mid=" << key._mid << " fid=" << key._fid
+                    << " eid=" << key._eid << " status=" << static_cast<int>(result._status)
+                    << " errno=" << result._system_error << '\n';
+        }
+      })) {
     std::cerr << "[node] Engine rejected UDP publisher\n";
     return {};
   }
@@ -188,12 +179,11 @@ install_udp_publisher(TLSSMON::Engine &engine) {
   return publisher;
 }
 
-std::shared_ptr<TLSSMON::ReliableAlarmPublisher>
-install_alarm_publisher(TLSSMON::Engine &engine, const NodeOptions &options) {
+std::shared_ptr<TLSSMON::ReliableAlarmPublisher> install_alarm_publisher(
+    TLSSMON::Engine& engine, const NodeOptions& options) {
   auto publisher = std::make_shared<TLSSMON::ReliableAlarmPublisher>(
-      TLSSMON::ReliableAlarmPublisherConfig{COLLECTOR_HOST, ALARM_TCP_PORT,
-                                            options._source_id, options._outbox,
-                                            64U * 1024U * 1024U, 2s, 30s});
+      TLSSMON::ReliableAlarmPublisherConfig{COLLECTOR_HOST, ALARM_TCP_PORT, options._source_id,
+                                            options._outbox, 64U * 1024U * 1024U, 2s, 30s});
 
   if (!publisher->ready()) {
     std::cerr << "[node] reliable publisher initialization failed"
@@ -202,34 +192,31 @@ install_alarm_publisher(TLSSMON::Engine &engine, const NodeOptions &options) {
     return {};
   }
 
-  const std::weak_ptr<TLSSMON::ReliableAlarmPublisher> weak_publisher{
-      publisher};
+  const std::weak_ptr<TLSSMON::ReliableAlarmPublisher> weak_publisher{publisher};
 
-  if (!engine.set_alarm_publisher([weak_publisher](
-                                      TLSSMON::MonData::StoredRecord record)
-                                      -> TLSSMON::AlarmEnqueueResult {
-        const auto locked = weak_publisher.lock();
+  if (!engine.set_alarm_publisher(
+          [weak_publisher](TLSSMON::MonData::StoredRecord record) -> TLSSMON::AlarmEnqueueResult {
+            const auto locked = weak_publisher.lock();
 
-        if (!locked) {
-          return {TLSSMON::AlarmEnqueueStatus::NOT_READY, 0};
-        }
+            if (!locked) {
+              return {TLSSMON::AlarmEnqueueStatus::NOT_READY, 0};
+            }
 
-        const TLSSMON::MonData::MonitorKey key = record._data._key;
+            const TLSSMON::MonData::MonitorKey key = record._data._key;
 
-        TLSSMON::AlarmEnqueueResult result = locked->enqueue(std::move(record));
+            TLSSMON::AlarmEnqueueResult result = locked->enqueue(std::move(record));
 
-        if (!result.durable()) {
-          /*
-           * 不输出告警字符串 payload。
-           */
-          std::cerr << "[alarm] enqueue failed" << " mid=" << key._mid
-                    << " fid=" << key._fid << " eid=" << key._eid
-                    << " status=" << static_cast<int>(result._status)
-                    << " errno=" << result._system_error << '\n';
-        }
+            if (!result.durable()) {
+              /*
+               * 不输出告警字符串 payload。
+               */
+              std::cerr << "[alarm] enqueue failed" << " mid=" << key._mid << " fid=" << key._fid
+                        << " eid=" << key._eid << " status=" << static_cast<int>(result._status)
+                        << " errno=" << result._system_error << '\n';
+            }
 
-        return result;
-      })) {
+            return result;
+          })) {
     std::cerr << "[node] Engine rejected reliable publisher\n";
     return {};
   }
@@ -237,48 +224,40 @@ install_alarm_publisher(TLSSMON::Engine &engine, const NodeOptions &options) {
   return publisher;
 }
 
-int sample_disk(TLSSMON::Engine &engine, NodeState &state) {
-  static constexpr std::array<std::uint32_t, 10U> temperatures{
-      45U, 46U, 47U, 120U, 48U, 49U, 50U, 51U, 52U, 53U};
+int sample_disk(TLSSMON::Engine& engine, NodeState& state) {
+  static constexpr std::array<std::uint32_t, 10U> temperatures{45U, 46U, 47U, 120U, 48U,
+                                                               49U, 50U, 51U, 52U,  53U};
 
-  static constexpr std::array<std::uint32_t, 10U> used_percent{
-      60U, 70U, 81U, 83U, 85U, 88U, 89U, 75U, 72U, 68U};
+  static constexpr std::array<std::uint32_t, 10U> used_percent{60U, 70U, 81U, 83U, 85U,
+                                                               88U, 89U, 75U, 72U, 68U};
 
-  const std::size_t index =
-      static_cast<std::size_t>(state._tick % temperatures.size());
+  const std::size_t index = static_cast<std::size_t>(state._tick % temperatures.size());
 
   const TLSSMON::PolicyTime now = state.logical_time();
 
   const std::uint32_t raw_temperature = temperatures[index];
 
-  const TLSSMON::PolicyFeedResult smoothed =
-      state._temperature_policy->feed(raw_temperature, now);
+  const TLSSMON::PolicyFeedResult smoothed = state._temperature_policy->feed(raw_temperature, now);
 
   if (smoothed._noteworthy) {
-    const auto result =
-        engine.report_count(make_key(TLSSMON::DemoM9::DISK_MODULE_ID,
-                                     TLSSMON::DemoM9::DISK_TEMPERATURE),
-                            smoothed._value);
+    const auto result = engine.report_count(
+        make_key(TLSSMON::DemoM9::DISK_MODULE_ID, TLSSMON::DemoM9::DISK_TEMPERATURE),
+        smoothed._value);
 
-    std::cout << "[disk] raw_temperature=" << raw_temperature
-              << " smoothed=" << smoothed._value
+    std::cout << "[disk] raw_temperature=" << raw_temperature << " smoothed=" << smoothed._value
               << " update=" << static_cast<int>(result._status) << '\n';
   }
 
   const std::uint32_t used = used_percent[index];
 
-  (void)engine.report_count(make_key(TLSSMON::DemoM9::DISK_MODULE_ID,
-                                     TLSSMON::DemoM9::DISK_USED_PERCENT),
-                            used);
+  (void)engine.report_count(
+      make_key(TLSSMON::DemoM9::DISK_MODULE_ID, TLSSMON::DemoM9::DISK_USED_PERCENT), used);
 
-  const TLSSMON::PolicyFeedResult full =
-      state._disk_full_policy->feed(used, now);
+  const TLSSMON::PolicyFeedResult full = state._disk_full_policy->feed(used, now);
 
   if (full._noteworthy) {
-    const auto result =
-        engine.report_error(make_key(TLSSMON::DemoM9::DISK_MODULE_ID,
-                                     TLSSMON::DemoM9::DISK_ALMOST_FULL),
-                            used);
+    const auto result = engine.report_error(
+        make_key(TLSSMON::DemoM9::DISK_MODULE_ID, TLSSMON::DemoM9::DISK_ALMOST_FULL), used);
 
     std::cout << "[disk] sustained usage alarm" << " used=" << used
               << " update=" << static_cast<int>(result._status) << '\n';
@@ -288,13 +267,11 @@ int sample_disk(TLSSMON::Engine &engine, NodeState &state) {
   return 0;
 }
 
-int sample_network(TLSSMON::Engine &engine, NodeState &state) {
-  static constexpr std::array<bool, 12U> errors{false, true, true, false,
-                                                true,  true, true, false,
-                                                false, true, true, true};
+int sample_network(TLSSMON::Engine& engine, NodeState& state) {
+  static constexpr std::array<bool, 12U> errors{false, true,  true,  false, true, true,
+                                                true,  false, false, true,  true, true};
 
-  const std::size_t index =
-      static_cast<std::size_t>(state._tick % errors.size());
+  const std::size_t index = static_cast<std::size_t>(state._tick % errors.size());
 
   const bool has_error = errors[index];
   const TLSSMON::PolicyTime now = state.logical_time();
@@ -302,41 +279,35 @@ int sample_network(TLSSMON::Engine &engine, NodeState &state) {
   if (has_error) {
     ++state._network_error_total;
 
-    const TLSSMON::PolicyFeedResult burst =
-        state._network_burst_policy->feed(1U, now);
+    const TLSSMON::PolicyFeedResult burst = state._network_burst_policy->feed(1U, now);
 
     if (burst._noteworthy) {
-      const auto result =
-          engine.report_error(make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID,
-                                       TLSSMON::DemoM9::NETWORK_RX_ERROR_BURST),
-                              state._network_error_total);
+      const auto result = engine.report_error(
+          make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID, TLSSMON::DemoM9::NETWORK_RX_ERROR_BURST),
+          state._network_error_total);
 
-      std::cout << "[network] receive error burst"
-                << " total=" << state._network_error_total
+      std::cout << "[network] receive error burst" << " total=" << state._network_error_total
                 << " update=" << static_cast<int>(result._status) << '\n';
     }
   }
 
-  (void)engine.report_count(make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID,
-                                     TLSSMON::DemoM9::NETWORK_RX_ERROR_COUNT),
-                            state._network_error_total);
+  (void)engine.report_count(
+      make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID, TLSSMON::DemoM9::NETWORK_RX_ERROR_COUNT),
+      state._network_error_total);
 
   const std::string link = state._tick % 8U == 7U ? "down" : "up";
 
-  (void)engine.report_string(make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID,
-                                      TLSSMON::DemoM9::NETWORK_LINK_STATUS),
-                             link);
+  (void)engine.report_string(
+      make_key(TLSSMON::DemoM9::NETWORK_MODULE_ID, TLSSMON::DemoM9::NETWORK_LINK_STATUS), link);
 
-  std::cout << "[network] error_total=" << state._network_error_total
-            << " link=" << link << '\n';
+  std::cout << "[network] error_total=" << state._network_error_total << " link=" << link << '\n';
 
   ++state._tick;
   return 0;
 }
 
-bool register_sampling_timer(TLSSMON::Engine &engine,
-                             const NodeOptions &options,
-                             const std::shared_ptr<NodeState> &state) {
+bool register_sampling_timer(TLSSMON::Engine& engine, const NodeOptions& options,
+                             const std::shared_ptr<NodeState>& state) {
   const bool disk = options._module->_mid == TLSSMON::DemoM9::DISK_MODULE_ID;
 
   const std::chrono::milliseconds interval = disk ? 1s : 700ms;
@@ -344,8 +315,7 @@ bool register_sampling_timer(TLSSMON::Engine &engine,
   const std::optional<TLSSMON::TimerHandle> timer = engine.set_timer(
       TLSSMON::MonCallback{disk ? "disk-sampler" : "network-sampler",
                            [&engine, state, disk]() -> int {
-                             if (!state->_sampling.load(
-                                     std::memory_order_acquire)) {
+                             if (!state->_sampling.load(std::memory_order_acquire)) {
                                return 0;
                              }
 
@@ -358,39 +328,33 @@ bool register_sampling_timer(TLSSMON::Engine &engine,
   return timer.has_value();
 }
 
-bool register_commands(TLSSMON::CliRegistry &registry, TLSSMON::Engine &engine,
-                       const std::shared_ptr<NodeState> &state,
-                       const TLSSMON::ReliableAlarmPublisher *alarm_publisher) {
-  if (TLSSMON::register_help_command(registry) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+bool register_commands(TLSSMON::CliRegistry& registry, TLSSMON::Engine& engine,
+                       const std::shared_ptr<NodeState>& state,
+                       const TLSSMON::ReliableAlarmPublisher* alarm_publisher) {
+  if (TLSSMON::register_help_command(registry) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_modules_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_modules_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_use_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_use_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_db_dump_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_db_dump_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_alarm_status_command(registry, alarm_publisher,
-                                             nullptr) !=
+  if (TLSSMON::register_alarm_status_command(registry, alarm_publisher, nullptr) !=
       TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
   return registry.register_command(
              "stop", "stop this monitor node",
-             [&engine,
-              state](const TLSSMON::CliArguments &arguments) -> std::string {
+             [&engine, state](const TLSSMON::CliArguments& arguments) -> std::string {
                if (!arguments.empty()) {
                  return "usage: stop\n";
                }
@@ -404,9 +368,9 @@ bool register_commands(TLSSMON::CliRegistry &registry, TLSSMON::Engine &engine,
              }) == TLSSMON::CliRegisterStatus::SUCCESS;
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   const std::optional<NodeOptions> parsed = parse_options(argc, argv);
 
   if (!parsed.has_value()) {
@@ -414,23 +378,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const NodeOptions &options = *parsed;
+  const NodeOptions& options = *parsed;
 
-  const std::uint8_t node_id =
-      options._module->_mid == TLSSMON::DemoM9::DISK_MODULE_ID
-          ? std::uint8_t{1U}
-          : std::uint8_t{2U};
+  const std::uint8_t node_id = options._module->_mid == TLSSMON::DemoM9::DISK_MODULE_ID
+                                   ? std::uint8_t{1U}
+                                   : std::uint8_t{2U};
 
-  TLSSMON::Engine engine{TLSSMON::MonConfig{
-      "monitor-m9-" + options._module->_name, options._cli_port, node_id}};
+  TLSSMON::Engine engine{
+      TLSSMON::MonConfig{"monitor-m9-" + options._module->_name, options._cli_port, node_id}};
 
   if (engine.init() != TLSSMON::ENGINESTATE::SUCCESSFUL) {
     std::cerr << "[node] Engine initialization failed\n";
     return 1;
   }
 
-  if (engine.register_module(*options._module) !=
-      TLSSMON::ModuleRegisterStatus::SUCCESS) {
+  if (engine.register_module(*options._module) != TLSSMON::ModuleRegisterStatus::SUCCESS) {
     std::cerr << "[node] module registration failed\n";
     return 1;
   }
@@ -449,8 +411,7 @@ int main(int argc, char **argv) {
 
   auto state = std::make_shared<NodeState>();
 
-  if (!state->_temperature_policy || !state->_disk_full_policy ||
-      !state->_network_burst_policy) {
+  if (!state->_temperature_policy || !state->_disk_full_policy || !state->_network_burst_policy) {
     std::cerr << "[node] policy initialization failed\n";
     return 1;
   }
@@ -463,8 +424,7 @@ int main(int argc, char **argv) {
   }
 
   TLSSMON::CliServer cli{engine, registry,
-                         TLSSMON::CliServerConfig{options._cli_port,
-                                                  TLSSMON::CLI_MAX_CLIENTS,
+                         TLSSMON::CliServerConfig{options._cli_port, TLSSMON::CLI_MAX_CLIENTS,
                                                   options._module->_name}};
 
   if (!cli.start()) {
@@ -480,10 +440,8 @@ int main(int argc, char **argv) {
 
   std::cout << "[node] module=" << options._module->_name << '\n'
             << "[node] source_id=" << options._source_id << '\n'
-            << "[node] UDP metrics -> " << COLLECTOR_HOST << ':'
-            << METRIC_UDP_PORT << '\n'
-            << "[node] TCP alarms -> " << COLLECTOR_HOST << ':'
-            << ALARM_TCP_PORT << '\n'
+            << "[node] UDP metrics -> " << COLLECTOR_HOST << ':' << METRIC_UDP_PORT << '\n'
+            << "[node] TCP alarms -> " << COLLECTOR_HOST << ':' << ALARM_TCP_PORT << '\n'
             << "[node] outbox=" << options._outbox << '\n'
             << "[node] CLI=127.0.0.1:" << cli.bound_port() << '\n'
             << "[node] commands: help modules use db_dump "
@@ -511,8 +469,7 @@ int main(int argc, char **argv) {
   cli.close();
 
   if (run_result != TLSSMON::ENGINESTATE::SUCCESSFUL) {
-    std::cerr << "[node] Engine stopped with status="
-              << static_cast<int>(run_result) << '\n';
+    std::cerr << "[node] Engine stopped with status=" << static_cast<int>(run_result) << '\n';
     return 1;
   }
 

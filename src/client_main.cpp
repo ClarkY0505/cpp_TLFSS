@@ -23,7 +23,7 @@ int main(int argc, char* argv[]) {
     TLSS::FileStorage::Client client(&loop, address);
     client.start();
     loop.loop();
-  } 
+  }
   TLSSLOG::Logger::shutdown();
   return 0;
 }

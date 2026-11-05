@@ -33,19 +33,19 @@ AlarmFrameSizeResult make_size_error(AlarmProtocolStatus status) {
  * 2. 依赖主机字节序；
  * 3. strict-aliasing 问题。
  */
-void put_u16(std::uint8_t *output, std::uint16_t value) noexcept {
+void put_u16(std::uint8_t* output, std::uint16_t value) noexcept {
   output[0] = static_cast<std::uint8_t>(value >> 8U);
   output[1] = static_cast<std::uint8_t>(value);
 }
 
-void put_u32(std::uint8_t *output, std::uint32_t value) noexcept {
+void put_u32(std::uint8_t* output, std::uint32_t value) noexcept {
   output[0] = static_cast<std::uint8_t>(value >> 24U);
   output[1] = static_cast<std::uint8_t>(value >> 16U);
   output[2] = static_cast<std::uint8_t>(value >> 8U);
   output[3] = static_cast<std::uint8_t>(value);
 }
 
-void put_u64(std::uint8_t *output, std::uint64_t value) noexcept {
+void put_u64(std::uint8_t* output, std::uint64_t value) noexcept {
   output[0] = static_cast<std::uint8_t>(value >> 56U);
   output[1] = static_cast<std::uint8_t>(value >> 48U);
   output[2] = static_cast<std::uint8_t>(value >> 40U);
@@ -56,20 +56,18 @@ void put_u64(std::uint8_t *output, std::uint64_t value) noexcept {
   output[7] = static_cast<std::uint8_t>(value);
 }
 
-std::uint16_t get_u16(const std::uint8_t *input) noexcept {
-  return static_cast<std::uint16_t>(
-      (static_cast<std::uint16_t>(input[0]) << 8U) |
-      static_cast<std::uint16_t>(input[1]));
+std::uint16_t get_u16(const std::uint8_t* input) noexcept {
+  return static_cast<std::uint16_t>((static_cast<std::uint16_t>(input[0]) << 8U) |
+                                    static_cast<std::uint16_t>(input[1]));
 }
 
-std::uint32_t get_u32(const std::uint8_t *input) noexcept {
+std::uint32_t get_u32(const std::uint8_t* input) noexcept {
   return (static_cast<std::uint32_t>(input[0]) << 24U) |
          (static_cast<std::uint32_t>(input[1]) << 16U) |
-         (static_cast<std::uint32_t>(input[2]) << 8U) |
-         static_cast<std::uint32_t>(input[3]);
+         (static_cast<std::uint32_t>(input[2]) << 8U) | static_cast<std::uint32_t>(input[3]);
 }
 
-std::uint64_t get_u64(const std::uint8_t *input) noexcept {
+std::uint64_t get_u64(const std::uint8_t* input) noexcept {
   std::uint64_t value = 0U;
 
   for (std::size_t i = 0U; i < sizeof(std::uint64_t); ++i) {
@@ -79,9 +77,8 @@ std::uint64_t get_u64(const std::uint8_t *input) noexcept {
   return value;
 }
 
-bool has_valid_magic(const std::uint8_t *data) noexcept {
-  return std::equal(ALARM_MAGIC.begin(), ALARM_MAGIC.end(),
-                    data + ALARM_MAGIC_OFFSET);
+bool has_valid_magic(const std::uint8_t* data) noexcept {
+  return std::equal(ALARM_MAGIC.begin(), ALARM_MAGIC.end(), data + ALARM_MAGIC_OFFSET);
 }
 
 bool is_valid_raw_type(std::uint8_t raw_type) noexcept {
@@ -89,14 +86,13 @@ bool is_valid_raw_type(std::uint8_t raw_type) noexcept {
          raw_type <= static_cast<std::uint8_t>(AlarmFrameType::PONG);
 }
 
-std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t *data,
-                           std::size_t size) noexcept {
+std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t* data, std::size_t size) noexcept {
   for (std::size_t i = 0U; i < size; ++i) {
     crc ^= static_cast<std::uint32_t>(data[i]);
 
     for (unsigned int bit = 0U; bit < 8U; ++bit) {
-      const std::uint32_t mask = static_cast<std::uint32_t>(
-          -static_cast<std::int32_t>(crc & UINT32_C(1)));
+      const std::uint32_t mask =
+          static_cast<std::uint32_t>(-static_cast<std::int32_t>(crc & UINT32_C(1)));
 
       crc = (crc >> 1U) ^ (CRC32_POLYNOMIAL & mask);
     }
@@ -113,8 +109,7 @@ std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t *data,
  *
  * bytes[44, 48) CRC 字段本身不参与计算。
  */
-std::uint32_t calculate_frame_crc(const std::uint8_t *data,
-                                  std::size_t payload_size) noexcept {
+std::uint32_t calculate_frame_crc(const std::uint8_t* data, std::size_t payload_size) noexcept {
   std::uint32_t crc = crc32_update(CRC32_INITIAL, data, ALARM_CRC32_OFFSET);
 
   crc = crc32_update(crc, data + ALARM_HEADER_SIZE, payload_size);
@@ -122,9 +117,8 @@ std::uint32_t calculate_frame_crc(const std::uint8_t *data,
   return crc ^ CRC32_INITIAL;
 }
 
-AlarmProtocolStatus
-validate_frame_description(AlarmFrameType type,
-                           std::size_t payload_size) noexcept {
+AlarmProtocolStatus validate_frame_description(AlarmFrameType type,
+                                               std::size_t payload_size) noexcept {
   if (!is_valid_alarm_frame_type(type)) {
     return AlarmProtocolStatus::INVALID_TYPE;
   }
@@ -144,11 +138,10 @@ validate_frame_description(AlarmFrameType type,
   return AlarmProtocolStatus::SUCCESS;
 }
 
-} // namespace
+}  // namespace
 
 bool AlarmEncodeResult::success() const noexcept {
-  return _status == AlarmProtocolStatus::SUCCESS &&
-         _bytes.size() >= ALARM_HEADER_SIZE &&
+  return _status == AlarmProtocolStatus::SUCCESS && _bytes.size() >= ALARM_HEADER_SIZE &&
          _bytes.size() <= ALARM_MAX_FRAME_SIZE;
 }
 
@@ -158,11 +151,10 @@ bool AlarmDecodeResult::success() const noexcept {
 
 bool AlarmFrameSizeResult::success() const noexcept {
   return _status == AlarmProtocolStatus::SUCCESS && _frame_size.has_value() &&
-         *_frame_size >= ALARM_HEADER_SIZE &&
-         *_frame_size <= ALARM_MAX_FRAME_SIZE;
+         *_frame_size >= ALARM_HEADER_SIZE && *_frame_size <= ALARM_MAX_FRAME_SIZE;
 }
 
-std::uint32_t alarm_crc32(const std::uint8_t *data, std::size_t size) noexcept {
+std::uint32_t alarm_crc32(const std::uint8_t* data, std::size_t size) noexcept {
   /*
    * 非零长度却没有输入地址属于调用错误。
    *
@@ -175,7 +167,7 @@ std::uint32_t alarm_crc32(const std::uint8_t *data, std::size_t size) noexcept {
   return crc32_update(CRC32_INITIAL, data, size) ^ CRC32_INITIAL;
 }
 
-AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
+AlarmFrameSizeResult alarm_frame_size(const std::uint8_t* prefix,
                                       std::size_t prefix_size) noexcept {
   // 只解析固定头即可得出帧边界；TCP 流解码器随后按该长度收齐 payload。
   if (prefix == nullptr || prefix_size == 0U) {
@@ -207,13 +199,11 @@ AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
     return make_size_error(AlarmProtocolStatus::INVALID_FLAGS);
   }
 
-  const std::uint32_t payload_length =
-      get_u32(prefix + ALARM_PAYLOAD_LENGTH_OFFSET);
+  const std::uint32_t payload_length = get_u32(prefix + ALARM_PAYLOAD_LENGTH_OFFSET);
 
   const AlarmFrameType type = static_cast<AlarmFrameType>(raw_type);
 
-  const AlarmProtocolStatus validation =
-      validate_frame_description(type, payload_length);
+  const AlarmProtocolStatus validation = validate_frame_description(type, payload_length);
 
   if (validation != AlarmProtocolStatus::SUCCESS) {
     return make_size_error(validation);
@@ -222,8 +212,7 @@ AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
   /*
    * payload_length 已经限制为不超过 4096，因此加法不会溢出。
    */
-  const std::size_t total_size =
-      ALARM_HEADER_SIZE + static_cast<std::size_t>(payload_length);
+  const std::size_t total_size = ALARM_HEADER_SIZE + static_cast<std::size_t>(payload_length);
 
   /*
    * prefix 只需要包含完整头部。
@@ -234,7 +223,7 @@ AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
   return AlarmFrameSizeResult{AlarmProtocolStatus::SUCCESS, total_size};
 }
 
-AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept {
+AlarmEncodeResult encode_alarm_frame(const AlarmFrame& frame) noexcept {
   const AlarmProtocolStatus validation =
       validate_frame_description(frame._type, frame._payload.size());
 
@@ -261,8 +250,7 @@ AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept {
     put_u64(bytes.data() + ALARM_SOURCE_ID_OFFSET, frame._source_id);
 
     std::copy(frame._message_id.begin(), frame._message_id.end(),
-              bytes.begin() +
-                  static_cast<std::ptrdiff_t>(ALARM_MESSAGE_ID_OFFSET));
+              bytes.begin() + static_cast<std::ptrdiff_t>(ALARM_MESSAGE_ID_OFFSET));
 
     put_u64(bytes.data() + ALARM_TIMESTAMP_OFFSET, frame._timestamp_ms);
 
@@ -271,19 +259,17 @@ AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept {
                 bytes.begin() + static_cast<std::ptrdiff_t>(ALARM_HEADER_SIZE));
     }
 
-    const std::uint32_t crc =
-        calculate_frame_crc(bytes.data(), frame._payload.size());
+    const std::uint32_t crc = calculate_frame_crc(bytes.data(), frame._payload.size());
 
     put_u32(bytes.data() + ALARM_CRC32_OFFSET, crc);
 
     return AlarmEncodeResult{AlarmProtocolStatus::SUCCESS, std::move(bytes)};
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     return make_encode_error(AlarmProtocolStatus::ALLOCATION_FAILED);
   }
 }
 
-AlarmDecodeResult decode_alarm_frame(const std::uint8_t *data,
-                                     std::size_t size) noexcept {
+AlarmDecodeResult decode_alarm_frame(const std::uint8_t* data, std::size_t size) noexcept {
   // 先验证帧长与 CRC，再构造业务字段，防止损坏帧进入后续处理。
   const AlarmFrameSizeResult size_result = alarm_frame_size(data, size);
 
@@ -312,8 +298,7 @@ AlarmDecodeResult decode_alarm_frame(const std::uint8_t *data,
 
     frame._source_id = get_u64(data + ALARM_SOURCE_ID_OFFSET);
 
-    std::copy_n(data + ALARM_MESSAGE_ID_OFFSET, ALARM_MESSAGE_ID_SIZE,
-                frame._message_id.begin());
+    std::copy_n(data + ALARM_MESSAGE_ID_OFFSET, ALARM_MESSAGE_ID_SIZE, frame._message_id.begin());
 
     frame._timestamp_ms = get_u64(data + ALARM_TIMESTAMP_OFFSET);
 
@@ -322,10 +307,10 @@ AlarmDecodeResult decode_alarm_frame(const std::uint8_t *data,
     }
 
     return AlarmDecodeResult{AlarmProtocolStatus::SUCCESS, std::move(frame)};
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     return make_decode_error(AlarmProtocolStatus::ALLOCATION_FAILED);
   }
 }
 
-} // namespace AlarmWire
-} // namespace TLSSMON
+}  // namespace AlarmWire
+}  // namespace TLSSMON

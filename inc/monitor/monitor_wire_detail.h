@@ -1,11 +1,11 @@
 #ifndef __MONITOR_WIRE_DETAIL_H__
 #define __MONITOR_WIRE_DETAIL_H__
 
-#include "monitor_wire.h"
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include "monitor_wire.h"
 
 namespace TLSSMON {
 namespace Wire {
@@ -41,8 +41,7 @@ struct V2HeaderResult final {
  * @return 头部写入和字段校验状态。
  */
 [[nodiscard]]
-WireStatus write_v2_header(std::vector<std::uint8_t> &datagram,
-                           const MonData::StoredRecord &record,
+WireStatus write_v2_header(std::vector<std::uint8_t>& datagram, const MonData::StoredRecord& record,
                            WireValueType type, std::size_t value_length);
 /**
  * @brief 校验并解析 V2 固定头部。
@@ -51,7 +50,7 @@ WireStatus write_v2_header(std::vector<std::uint8_t> &datagram,
  * @return 头部校验状态以及解析出的字段。
  */
 [[nodiscard]]
-V2HeaderResult read_v2_header(const std::uint8_t *data, std::size_t size);
+V2HeaderResult read_v2_header(const std::uint8_t* data, std::size_t size);
 
 /**
  * @brief 以网络字节序写入 16 位无符号整数。
@@ -59,7 +58,7 @@ V2HeaderResult read_v2_header(const std::uint8_t *data, std::size_t size);
  * @param output 已预留足够空间的目标字节缓冲区。
  * @param value 要写入的整数值。
  */
-void put_u16(std::uint8_t *output, std::uint16_t value) noexcept;
+void put_u16(std::uint8_t* output, std::uint16_t value) noexcept;
 
 /**
  * @brief 以网络字节序写入 32 位无符号整数。
@@ -67,7 +66,7 @@ void put_u16(std::uint8_t *output, std::uint16_t value) noexcept;
  * @param output 已预留足够空间的目标字节缓冲区。
  * @param value 要写入的整数值。
  */
-void put_u32(std::uint8_t *output, std::uint32_t value) noexcept;
+void put_u32(std::uint8_t* output, std::uint32_t value) noexcept;
 
 /**
  * @brief 以网络字节序写入 64 位无符号整数。
@@ -75,7 +74,7 @@ void put_u32(std::uint8_t *output, std::uint32_t value) noexcept;
  * @param output 已预留足够空间的目标字节缓冲区。
  * @param value 要写入的整数值。
  */
-void put_u64(std::uint8_t *output, std::uint64_t value) noexcept;
+void put_u64(std::uint8_t* output, std::uint64_t value) noexcept;
 
 /**
  * @brief 从网络字节序读取 16 位无符号整数。
@@ -84,7 +83,7 @@ void put_u64(std::uint8_t *output, std::uint64_t value) noexcept;
  * @return 从输入缓冲区读取的整数值。
  */
 [[nodiscard]]
-std::uint16_t get_u16(const std::uint8_t *input) noexcept;
+std::uint16_t get_u16(const std::uint8_t* input) noexcept;
 
 /**
  * @brief 从网络字节序读取 32 位无符号整数。
@@ -93,7 +92,7 @@ std::uint16_t get_u16(const std::uint8_t *input) noexcept;
  * @return 从输入缓冲区读取的整数值。
  */
 [[nodiscard]]
-std::uint32_t get_u32(const std::uint8_t *input) noexcept;
+std::uint32_t get_u32(const std::uint8_t* input) noexcept;
 
 /**
  * @brief 从网络字节序读取 64 位无符号整数。
@@ -102,14 +101,14 @@ std::uint32_t get_u32(const std::uint8_t *input) noexcept;
  * @return 从输入缓冲区读取的整数值。
  */
 [[nodiscard]]
-std::uint64_t get_u64(const std::uint8_t *input) noexcept;
+std::uint64_t get_u64(const std::uint8_t* input) noexcept;
 
 /**
  * @brief 以网络字节序写入 64 位补码时间戳秒数。
  * @param output 已预留足够空间的目标字节缓冲区。
  * @param value 要写入的整数值。
  */
-void put_i64_twos_complement(std::uint8_t *output, std::int64_t value) noexcept;
+void put_i64_twos_complement(std::uint8_t* output, std::int64_t value) noexcept;
 
 /**
  * @brief 从网络字节序读取 64 位补码时间戳秒数。
@@ -117,7 +116,7 @@ void put_i64_twos_complement(std::uint8_t *output, std::int64_t value) noexcept;
  * @return 从输入缓冲区读取的整数值。
  */
 [[nodiscard]]
-std::int64_t get_i64_twos_complement(const std::uint8_t *input) noexcept;
+std::int64_t get_i64_twos_complement(const std::uint8_t* input) noexcept;
 
 /**
  * @brief V2 timestamp nanoseconds 的合法范围。
@@ -127,8 +126,8 @@ std::int64_t get_i64_twos_complement(const std::uint8_t *input) noexcept;
 [[nodiscard]]
 bool is_valid_nanoseconds(std::uint32_t nanoseconds) noexcept;
 
-} // namespace Detail
-} // namespace Wire
-} // namespace TLSSMON
+}  // namespace Detail
+}  // namespace Wire
+}  // namespace TLSSMON
 
-#endif // __MONITOR_WIRE_DETAIL_H__
+#endif  // __MONITOR_WIRE_DETAIL_H__

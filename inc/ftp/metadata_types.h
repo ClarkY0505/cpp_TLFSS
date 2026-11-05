@@ -4,15 +4,15 @@
 namespace TLSS::FileStorage {
 template <typename T>
 struct StorageContext {
-    bool success = false;
-    T result{};
+  bool success = false;
+  T result{};
 };
 
 struct FileInfo {
-    std::string file_name;
-    std::string type;
-    std::string create_at;
-    std::string update_at;
+  std::string file_name;
+  std::string type;
+  std::string create_at;
+  std::string update_at;
 };
 
 }  // namespace TLSS::FileStorage

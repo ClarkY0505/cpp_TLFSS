@@ -1,19 +1,19 @@
 #include "cli_server.h"
 
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
-#include <fcntl.h>
 #include <future>
 #include <iostream>
 #include <mutex>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 namespace TLSSMON {
@@ -25,13 +25,13 @@ namespace TLSSMON {
  * 也不把原始描述符暴露成正式业务接口。
  */
 struct CliServerTestAccess final {
-  static int listener_fd(const CliServer &server) {
+  static int listener_fd(const CliServer& server) {
     std::lock_guard<std::mutex> lock(server._mutex);
     return server._listener_fd;
   }
 };
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
 namespace {
 
@@ -39,8 +39,9 @@ using namespace TLSSMON;
 using namespace std::chrono_literals;
 
 class ScopedFd final {
-public:
-  explicit ScopedFd(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit ScopedFd(int fd = -1) noexcept
+      : _fd(fd) {}
 
   ~ScopedFd() {
     if (_fd >= 0) {
@@ -48,12 +49,13 @@ public:
     }
   }
 
-  ScopedFd(const ScopedFd &) = delete;
-  ScopedFd &operator=(const ScopedFd &) = delete;
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
 
-  ScopedFd(ScopedFd &&other) noexcept : _fd(other.release()) {}
+  ScopedFd(ScopedFd&& other) noexcept
+      : _fd(other.release()) {}
 
-  ScopedFd &operator=(ScopedFd &&other) noexcept {
+  ScopedFd& operator=(ScopedFd&& other) noexcept {
     if (this != &other) {
       if (_fd >= 0) {
         (void)::close(_fd);
@@ -65,7 +67,9 @@ public:
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
   int release() noexcept {
     const int fd = _fd;
@@ -73,17 +77,16 @@ public:
     return fd;
   }
 
-private:
+ private:
   int _fd{-1};
 };
 
-void initialize(Engine &engine) {
+void initialize(Engine& engine) {
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::READY);
 }
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (std::chrono::steady_clock::now() < deadline) {
@@ -106,8 +109,8 @@ ScopedFd connect_loopback(std::uint16_t port) {
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(port);
 
-  assert(::connect(client.get(), reinterpret_cast<const sockaddr *>(&address),
-                   sizeof(address)) == 0);
+  assert(::connect(client.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) ==
+         0);
 
   return client;
 }
@@ -146,9 +149,8 @@ void test_invalid_max_clients_is_rejected() {
   assert(!zero_clients.start());
   assert(zero_clients.bound_port() == 0U);
 
-  CliServer too_many_clients{
-      engine, registry,
-      CliServerConfig{0U, CLI_MAX_CLIENTS + std::size_t{1}}};
+  CliServer too_many_clients{engine, registry,
+                             CliServerConfig{0U, CLI_MAX_CLIENTS + std::size_t{1}}};
   assert(!too_many_clients.start());
   assert(too_many_clients.bound_port() == 0U);
 }
@@ -175,8 +177,7 @@ void test_ephemeral_port_and_loopback_binding() {
 
   sockaddr_in address{};
   socklen_t address_size = sizeof(address);
-  assert(::getsockname(listener_fd, reinterpret_cast<sockaddr *>(&address),
-                       &address_size) == 0);
+  assert(::getsockname(listener_fd, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
 
   assert(address_size == sizeof(sockaddr_in));
   assert(address.sin_family == AF_INET);
@@ -264,7 +265,7 @@ void test_concurrent_start_only_succeeds_once() {
     });
   }
 
-  for (std::thread &worker : workers) {
+  for (std::thread& worker : workers) {
     worker.join();
   }
 
@@ -289,14 +290,12 @@ void test_occupied_port_is_rejected() {
   occupied_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   occupied_address.sin_port = htons(0U);
 
-  assert(::bind(blocker.get(),
-                reinterpret_cast<const sockaddr *>(&occupied_address),
+  assert(::bind(blocker.get(), reinterpret_cast<const sockaddr*>(&occupied_address),
                 sizeof(occupied_address)) == 0);
   assert(::listen(blocker.get(), 1) == 0);
 
   socklen_t address_size = sizeof(occupied_address);
-  assert(::getsockname(blocker.get(),
-                       reinterpret_cast<sockaddr *>(&occupied_address),
+  assert(::getsockname(blocker.get(), reinterpret_cast<sockaddr*>(&occupied_address),
                        &address_size) == 0);
 
   const std::uint16_t occupied_port = ntohs(occupied_address.sin_port);
@@ -374,7 +373,7 @@ void test_close_is_idempotent() {
   assert(CliServerTestAccess::listener_fd(server) == -1);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_start_requires_ready_engine();

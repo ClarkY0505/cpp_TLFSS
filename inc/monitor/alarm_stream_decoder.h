@@ -82,14 +82,14 @@ struct AlarmStreamFeedResult final {
  * @note 出错后需要调用 reset() 才能继续用于新连接。
  */
 class AlarmStreamDecoder final {
-public:
+ public:
   AlarmStreamDecoder() = default;
 
-  AlarmStreamDecoder(const AlarmStreamDecoder &) = delete;
-  AlarmStreamDecoder &operator=(const AlarmStreamDecoder &) = delete;
+  AlarmStreamDecoder(const AlarmStreamDecoder&) = delete;
+  AlarmStreamDecoder& operator=(const AlarmStreamDecoder&) = delete;
 
-  AlarmStreamDecoder(AlarmStreamDecoder &&) = delete;
-  AlarmStreamDecoder &operator=(AlarmStreamDecoder &&) = delete;
+  AlarmStreamDecoder(AlarmStreamDecoder&&) = delete;
+  AlarmStreamDecoder& operator=(AlarmStreamDecoder&&) = delete;
 
   /**
    * @brief 输入一段 TCP 字节。
@@ -105,8 +105,7 @@ public:
    * @return 本次解析状态、完整帧列表和可能的协议错误。
    */
   [[nodiscard]]
-  AlarmStreamFeedResult feed(const std::uint8_t *data,
-                             std::size_t size) noexcept;
+  AlarmStreamFeedResult feed(const std::uint8_t* data, std::size_t size) noexcept;
 
   /**
    * @brief 告知 Decoder 对端已经关闭写方向或 recv() 返回 0。
@@ -150,16 +149,15 @@ public:
   [[nodiscard]]
   std::optional<AlarmProtocolStatus> protocol_error() const noexcept;
 
-private:
+ private:
   /**
    * @brief 记录协议错误并结束当前解码。
    * @param status 本次解码发现的协议错误。
    * @param completed 本次输入中已完成的帧。
    * @return 协议错误状态及此前已完成的帧。
    */
-  AlarmStreamFeedResult
-  fail_protocol(AlarmProtocolStatus status,
-                std::vector<AlarmFrame> completed) noexcept;
+  AlarmStreamFeedResult fail_protocol(AlarmProtocolStatus status,
+                                      std::vector<AlarmFrame> completed) noexcept;
 
   /**
    * @brief 记录流处理错误并结束当前解码。
@@ -184,6 +182,6 @@ private:
   std::optional<AlarmProtocolStatus> _protocol_error;
 };
 
-} // namespace AlarmWire
-} // namespace TLSSMON
-#endif // __ALARM_STREAM_DECODER_H__
+}  // namespace AlarmWire
+}  // namespace TLSSMON
+#endif  // __ALARM_STREAM_DECODER_H__

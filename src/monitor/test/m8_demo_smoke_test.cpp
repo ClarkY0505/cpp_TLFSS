@@ -1,16 +1,16 @@
 #include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <iostream>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
@@ -25,7 +25,7 @@ constexpr std::uint16_t DEMO_PORT = 9001U;
  * 留下后台进程占用 9001 端口。
  */
 class ChildProcess final {
-public:
+ public:
   ~ChildProcess() {
     terminate();
 
@@ -34,12 +34,12 @@ public:
     }
   }
 
-  ChildProcess(const ChildProcess &) = delete;
-  ChildProcess &operator=(const ChildProcess &) = delete;
+  ChildProcess(const ChildProcess&) = delete;
+  ChildProcess& operator=(const ChildProcess&) = delete;
 
   ChildProcess() = default;
 
-  bool start(const char *executable) {
+  bool start(const char* executable) {
     int output[2]{-1, -1};
 
     if (::pipe(output) != 0) {
@@ -57,13 +57,12 @@ public:
     if (child == 0) {
       (void)::close(output[0]);
 
-      if (::dup2(output[1], STDOUT_FILENO) < 0 ||
-          ::dup2(output[1], STDERR_FILENO) < 0) {
+      if (::dup2(output[1], STDOUT_FILENO) < 0 || ::dup2(output[1], STDERR_FILENO) < 0) {
         _exit(126);
       }
 
       (void)::close(output[1]);
-      ::execl(executable, executable, static_cast<char *>(nullptr));
+      ::execl(executable, executable, static_cast<char*>(nullptr));
       _exit(127);
     }
 
@@ -73,7 +72,7 @@ public:
     return true;
   }
 
-  bool wait_for_exit(std::chrono::milliseconds timeout, int &exit_code) {
+  bool wait_for_exit(std::chrono::milliseconds timeout, int& exit_code) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
     while (std::chrono::steady_clock::now() < deadline) {
@@ -116,7 +115,7 @@ public:
     }
   }
 
-private:
+ private:
   void terminate() noexcept {
     if (_pid <= 0) {
       return;
@@ -135,7 +134,7 @@ private:
   int _output_fd{-1};
 };
 
-bool contains(const std::string &text, std::string_view expected) {
+bool contains(const std::string& text, std::string_view expected) {
   return text.find(expected) != std::string::npos;
 }
 
@@ -155,8 +154,7 @@ int connect_to_demo() {
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(DEMO_PORT);
 
-    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address),
-                  sizeof(address)) == 0) {
+    if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
       return fd;
     }
 
@@ -171,10 +169,8 @@ bool send_all(int fd, std::string_view text) {
   std::size_t offset = 0U;
   const auto deadline = std::chrono::steady_clock::now() + 1s;
 
-  while (offset < text.size() &&
-         std::chrono::steady_clock::now() < deadline) {
-    const ssize_t count =
-        ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
+  while (offset < text.size() && std::chrono::steady_clock::now() < deadline) {
+    const ssize_t count = ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
 
     if (count > 0) {
       offset += static_cast<std::size_t>(count);
@@ -200,8 +196,7 @@ std::string receive_until(int fd, std::string_view terminator,
   std::string response;
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-  while (!contains(response, terminator) &&
-         std::chrono::steady_clock::now() < deadline) {
+  while (!contains(response, terminator) && std::chrono::steady_clock::now() < deadline) {
     pollfd descriptor{};
     descriptor.fd = fd;
     descriptor.events = POLLIN;
@@ -209,8 +204,7 @@ std::string receive_until(int fd, std::string_view terminator,
     int ready;
     do {
       ready = ::poll(&descriptor, 1, 200);
-    } while (ready < 0 && errno == EINTR &&
-             std::chrono::steady_clock::now() < deadline);
+    } while (ready < 0 && errno == EINTR && std::chrono::steady_clock::now() < deadline);
 
     if (ready <= 0) {
       continue;
@@ -234,9 +228,9 @@ std::string receive_until(int fd, std::string_view terminator,
   return response;
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   if (argc != 2) {
     std::cerr << "usage: m8_demo_smoke_test <demo-executable>\n";
     return 2;
@@ -277,12 +271,12 @@ int main(int argc, char *argv[]) {
     }
 
     dump = receive_until(client, "[storage]> ");
-    records_ready =
-        contains(dump, "* mid=256 lvl=info fid=1 eid=0 ") &&
-        contains(dump, "state=0 desc=\"heartbeat\"") &&
-        contains(dump, "* mid=256 lvl=warn fid=1 eid=1 num=0 state=2 "
-                       "desc=\"metadata timeout\"") &&
-        contains(dump, "* 2 entries\n") && !contains(dump, "lvl=?");
+    records_ready = contains(dump, "* mid=256 lvl=info fid=1 eid=0 ") &&
+                    contains(dump, "state=0 desc=\"heartbeat\"") &&
+                    contains(dump,
+                             "* mid=256 lvl=warn fid=1 eid=1 num=0 state=2 "
+                             "desc=\"metadata timeout\"") &&
+                    contains(dump, "* 2 entries\n") && !contains(dump, "lvl=?");
 
     if (records_ready) {
       break;
@@ -293,8 +287,7 @@ int main(int argc, char *argv[]) {
 
   /* use 必须读取 Engine 内部注册表并更新当前 Session 的提示符。 */
   const bool use_sent = send_all(client, "use module-a\n");
-  const std::string use_response =
-      use_sent ? receive_until(client, "[module-a]> ") : std::string{};
+  const std::string use_response = use_sent ? receive_until(client, "[module-a]> ") : std::string{};
 
   const bool module_dump_sent = send_all(client, "db_dump\n");
   const std::string module_dump =
@@ -308,14 +301,12 @@ int main(int argc, char *argv[]) {
 
   const bool cli_valid =
       initial_prompt == "[storage]> " && modules_sent &&
-      contains(modules_response, "* module-a mid=256\n") && records_ready &&
-      use_sent &&
-      contains(use_response, "* using module: module-a\n[module-a]> ") &&
-      module_dump_sent &&
+      contains(modules_response, "* module-a mid=256\n") && records_ready && use_sent &&
+      contains(use_response, "* using module: module-a\n[module-a]> ") && module_dump_sent &&
       contains(module_dump, "* mid=256 lvl=info fid=1 eid=0 ") &&
       contains(module_dump, "* mid=256 lvl=warn fid=1 eid=1 ") &&
-      contains(module_dump, "* 2 entries\n") && !contains(module_dump, "lvl=?") &&
-      stop_sent && contains(stop_response, "* stopping\n");
+      contains(module_dump, "* 2 entries\n") && !contains(module_dump, "lvl=?") && stop_sent &&
+      contains(stop_response, "* stopping\n");
 
   if (!cli_valid) {
     std::cerr << "M8 CLI response was incomplete:\n"
@@ -337,26 +328,20 @@ int main(int argc, char *argv[]) {
 
   const std::string process_output = demo.read_output();
   const std::string_view required_output[] = {
-      "[demo] M8 module registered",
-      "[demo] CLI listening on 127.0.0.1:9001",
-      "[demo] module: module-a",
-      "[module-a] heartbeat=",
-      "[demo] stop requested from CLI",
-      "[demo] Engine stopped successfully",
-      "[demo] final records=2",
-      "callbacks=m8-heartbeat count=",
+      "[demo] M8 module registered",    "[demo] CLI listening on 127.0.0.1:9001",
+      "[demo] module: module-a",        "[module-a] heartbeat=",
+      "[demo] stop requested from CLI", "[demo] Engine stopped successfully",
+      "[demo] final records=2",         "callbacks=m8-heartbeat count=",
       "callbacks=cli-listener count="};
 
   if (exit_code != 0) {
-    std::cerr << "M8 demo exited with code " << exit_code << '\n'
-              << process_output;
+    std::cerr << "M8 demo exited with code " << exit_code << '\n' << process_output;
     return 1;
   }
 
   for (const std::string_view expected : required_output) {
     if (!contains(process_output, expected)) {
-      std::cerr << "missing demo output: " << expected << '\n'
-                << process_output;
+      std::cerr << "missing demo output: " << expected << '\n' << process_output;
       return 1;
     }
   }

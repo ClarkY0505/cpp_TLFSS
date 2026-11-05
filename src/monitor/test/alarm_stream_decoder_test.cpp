@@ -1,5 +1,5 @@
-#include "alarm_protocol.h"
 #include "alarm_stream_decoder.h"
+#include "alarm_protocol.h"
 
 #include <algorithm>
 #include <array>
@@ -14,7 +14,7 @@ using namespace TLSSMON::AlarmWire;
 
 namespace {
 
-void put_u32(std::uint8_t *output, std::uint32_t value) {
+void put_u32(std::uint8_t* output, std::uint32_t value) {
   output[0] = static_cast<std::uint8_t>(value >> 24U);
   output[1] = static_cast<std::uint8_t>(value >> 16U);
   output[2] = static_cast<std::uint8_t>(value >> 8U);
@@ -45,7 +45,7 @@ AlarmFrame make_control(AlarmFrameType type, std::uint8_t seed) {
   return frame;
 }
 
-std::vector<std::uint8_t> encode_checked(const AlarmFrame &frame) {
+std::vector<std::uint8_t> encode_checked(const AlarmFrame& frame) {
   const AlarmEncodeResult result = encode_alarm_frame(frame);
   assert(result.success());
   return result._bytes;
@@ -73,8 +73,7 @@ void test_single_byte_fragmentation() {
   for (std::size_t i = 0U; i < bytes.size(); ++i) {
     AlarmStreamFeedResult result = decoder.feed(&bytes[i], 1U);
     assert(result.success());
-    received.insert(received.end(),
-                    std::make_move_iterator(result._frames.begin()),
+    received.insert(received.end(), std::make_move_iterator(result._frames.begin()),
                     std::make_move_iterator(result._frames.end()));
     if (i + 1U < bytes.size()) {
       assert(result._status == AlarmStreamStatus::NEED_MORE_DATA);
@@ -94,12 +93,10 @@ void test_irregular_fragmentation() {
   std::size_t offset = 0U;
   std::size_t index = 0U;
   while (offset < bytes.size()) {
-    const std::size_t amount =
-        std::min(chunks[index % chunks.size()], bytes.size() - offset);
+    const std::size_t amount = std::min(chunks[index % chunks.size()], bytes.size() - offset);
     AlarmStreamFeedResult result = decoder.feed(bytes.data() + offset, amount);
     assert(result.success());
-    received.insert(received.end(),
-                    std::make_move_iterator(result._frames.begin()),
+    received.insert(received.end(), std::make_move_iterator(result._frames.begin()),
                     std::make_move_iterator(result._frames.end()));
     offset += amount;
     ++index;
@@ -110,11 +107,11 @@ void test_irregular_fragmentation() {
 
 /* 一次输入多帧，验证 TCP 粘包以及输出顺序。 */
 void test_multiple_frames_in_one_feed() {
-  const std::array<AlarmFrame, 4U> expected{
-      make_alarm(4U), make_control(AlarmFrameType::ACK, 5U),
-      make_control(AlarmFrameType::PING, 6U), make_alarm(7U, 200U)};
+  const std::array<AlarmFrame, 4U> expected{make_alarm(4U), make_control(AlarmFrameType::ACK, 5U),
+                                            make_control(AlarmFrameType::PING, 6U),
+                                            make_alarm(7U, 200U)};
   std::vector<std::uint8_t> input;
-  for (const AlarmFrame &frame : expected) {
+  for (const AlarmFrame& frame : expected) {
     const auto bytes = encode_checked(frame);
     input.insert(input.end(), bytes.begin(), bytes.end());
   }
@@ -138,8 +135,7 @@ void test_complete_frame_with_partial_tail() {
                second_bytes.begin() + static_cast<std::ptrdiff_t>(partial_size));
 
   AlarmStreamDecoder decoder;
-  const AlarmStreamFeedResult first_result =
-      decoder.feed(input.data(), input.size());
+  const AlarmStreamFeedResult first_result = decoder.feed(input.data(), input.size());
   assert(first_result.success());
   assert(first_result._status == AlarmStreamStatus::NEED_MORE_DATA);
   assert(first_result._frames.size() == 1U);
@@ -148,8 +144,7 @@ void test_complete_frame_with_partial_tail() {
   assert(!decoder.expected_frame_size().has_value());
 
   const AlarmStreamFeedResult second_result =
-      decoder.feed(second_bytes.data() + partial_size,
-                   second_bytes.size() - partial_size);
+      decoder.feed(second_bytes.data() + partial_size, second_bytes.size() - partial_size);
   assert(second_result.success());
   assert(second_result._frames.size() == 1U);
   assert(second_result._frames[0] == second);
@@ -160,8 +155,7 @@ void test_complete_frame_with_partial_tail() {
 void test_header_determines_expected_size() {
   const auto bytes = encode_checked(make_alarm(10U, 700U));
   AlarmStreamDecoder decoder;
-  const AlarmStreamFeedResult result =
-      decoder.feed(bytes.data(), ALARM_HEADER_SIZE);
+  const AlarmStreamFeedResult result = decoder.feed(bytes.data(), ALARM_HEADER_SIZE);
   assert(result.success());
   assert(result._status == AlarmStreamStatus::NEED_MORE_DATA);
   assert(result._frames.empty());
@@ -198,8 +192,7 @@ void test_rejects_oversized_payload_before_allocation() {
   put_u32(bytes.data() + ALARM_PAYLOAD_LENGTH_OFFSET,
           static_cast<std::uint32_t>(ALARM_MAX_PAYLOAD_SIZE + 1U));
   AlarmStreamDecoder decoder;
-  const AlarmStreamFeedResult result =
-      decoder.feed(bytes.data(), ALARM_HEADER_SIZE);
+  const AlarmStreamFeedResult result = decoder.feed(bytes.data(), ALARM_HEADER_SIZE);
   assert(!result.success());
   assert(result._status == AlarmStreamStatus::PROTOCOL_ERROR);
   assert(result._protocol_status == AlarmProtocolStatus::PAYLOAD_TOO_LARGE);
@@ -292,7 +285,7 @@ void test_clean_eof() {
   assert(!decoder.failed());
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_complete_frame();

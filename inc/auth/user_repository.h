@@ -11,7 +11,7 @@
 namespace TLSS::BASE {
 class DbConnectionPool;
 class DbConnection;
-}
+}  // namespace TLSS::BASE
 
 namespace TLSS::AUTH {
 
@@ -33,15 +33,15 @@ struct UserLookupResult {
 };
 
 enum class UserCreateStatus {
-    k_created,
-    k_username_taken,
-    k_backend_unavailable,
-    k_outcome_unknown,
+  k_created,
+  k_username_taken,
+  k_backend_unavailable,
+  k_outcome_unknown,
 };
 
 struct UserCreateResult {
-    UserCreateStatus status = UserCreateStatus::k_backend_unavailable;
-    std::uint64_t user_id = 0;
+  UserCreateStatus status = UserCreateStatus::k_backend_unavailable;
+  std::uint64_t user_id = 0;
 };
 
 class UserRepository {
@@ -52,8 +52,8 @@ class UserRepository {
   // 实现类应支持并发查询。
   virtual UserLookupResult find_active_user(const std::string& username) = 0;
   // 用户与虚拟根目录必须原子创建；仅提交成功时返回 user_id。
-  virtual UserCreateResult create_user_with_root(
-      const std::string& username, const PasswordCredentials& credentials) = 0;
+  virtual UserCreateResult create_user_with_root(const std::string& username,
+                                                 const PasswordCredentials& credentials) = 0;
 };
 
 class MySqlUserRepository final : public UserRepository {
@@ -65,8 +65,8 @@ class MySqlUserRepository final : public UserRepository {
   explicit MySqlUserRepository(ConnectionProvider provider);
 
   UserLookupResult find_active_user(const std::string& username) override;
-  UserCreateResult create_user_with_root(
-      const std::string& username, const PasswordCredentials& credentials) override;
+  UserCreateResult create_user_with_root(const std::string& username,
+                                         const PasswordCredentials& credentials) override;
 
  private:
   ConnectionProvider connection_provider_;

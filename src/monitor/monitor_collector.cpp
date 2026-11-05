@@ -5,11 +5,10 @@
 
 namespace TLSSMON {
 
-MonData::UpdateResult
-ingest_decoded_record(Engine &engine, Wire::DecodedRecord record, bool force) {
+MonData::UpdateResult ingest_decoded_record(Engine& engine, Wire::DecodedRecord record,
+                                            bool force) {
   // 两版报文共用 Store 入口；仅 V2 能保留生产端的变化时间。
-  const std::optional<MonData::MonitorTimestamp> changed_at =
-      record._changed_at;
+  const std::optional<MonData::MonitorTimestamp> changed_at = record._changed_at;
 
   if (changed_at.has_value()) {
     /*
@@ -26,4 +25,4 @@ ingest_decoded_record(Engine &engine, Wire::DecodedRecord record, bool force) {
   return engine.update_data(std::move(record._data), force);
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

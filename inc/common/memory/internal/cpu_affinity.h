@@ -8,4 +8,4 @@ namespace TLSS::MEMORY::INTERNAL {
 std::vector<int> detect_available_cpu_ids();
 
 }  // namespace TLSS::MEMORY::INTERNAL
-#endif // __CPU_AFFINITY_H__
+#endif  // __CPU_AFFINITY_H__

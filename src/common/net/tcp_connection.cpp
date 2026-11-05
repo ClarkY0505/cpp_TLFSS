@@ -23,8 +23,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace TLSS::NET {
@@ -268,9 +268,8 @@ void TcpConnection::send_file(int fd, off_t offset, uint64_t count, FileSendCall
   /* std::move(task), prepare_error)); */
 }
 
-
-void TcpConnection::send_file_async(off_t offset, std::uint64_t count,
-                                    FileReadFunction reader, FileSendCallback cb) {
+void TcpConnection::send_file_async(off_t offset, std::uint64_t count, FileReadFunction reader,
+                                    FileSendCallback cb) {
   PendingWrite task;
   task.kind = PendingWrite::Kind::buffered_file;
   task.file_offset = offset;
@@ -305,8 +304,8 @@ void TcpConnection::request_file_read() {
   assert(!task.read_pending && task.data.empty() && task.remaining != 0);
   const auto sequence = ++_next_read_sequence;
   const auto offset = task.file_offset;
-  const auto count = static_cast<std::size_t>(
-      std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
+  const auto count =
+      static_cast<std::size_t>(std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
   auto reader = task.reader;
   task.read_pending = true;
   task.read_sequence = sequence;
@@ -318,7 +317,7 @@ void TcpConnection::request_file_read() {
   }
   auto weak = weak_from_this();
   FileReadCompletion completion = [weak, sequence](std::error_code error,
-                                                  std::string data) mutable {
+                                                   std::string data) mutable {
     if (auto conn = weak.lock()) {
       // 即使 reader 同步完成，也不重入当前发送队列操作。
       conn->_loop->queue_in_loop([weak, sequence, error, data = std::move(data)]() mutable {
@@ -338,8 +337,7 @@ void TcpConnection::request_file_read() {
   }
 }
 
-void TcpConnection::on_file_read(std::uint64_t sequence, std::error_code error,
-                                 std::string data) {
+void TcpConnection::on_file_read(std::uint64_t sequence, std::error_code error, std::string data) {
   assert(_loop->is_in_loop_thread());
   // disconnecting 仍需要排空已有任务。
   if (_state.load() == k_disconnected || _writes.empty()) {
@@ -583,8 +581,7 @@ void TcpConnection::handle_write() {
 
     ssize_t n;
     if (task.kind == PendingWrite::Kind::file) {
-      const auto count = static_cast<std::size_t>(
-          std::min<std::uint64_t>(task.remaining, budget));
+      const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(task.remaining, budget));
       n = sendfile_no_sigpipe(_channel->fd(), task.file->fd, &task.file_offset, count);
     } else {
       const auto count = std::min(task.data.size() - task.data_offset, budget);
@@ -613,7 +610,8 @@ void TcpConnection::handle_write() {
         task.file_sent += written;
         completed = task.remaining == 0;
       }
-      if (completed) complete_front();
+      if (completed)
+        complete_front();
       continue;
     }
     if (n == 0) {
@@ -621,20 +619,26 @@ void TcpConnection::handle_write() {
       return;
     }
     const int error = errno;
-    if (error == EINTR) continue;
-    if (error == EAGAIN || error == EWOULDBLOCK) return;
+    if (error == EINTR)
+      continue;
+    if (error == EAGAIN || error == EWOULDBLOCK)
+      return;
     fail_writes(error);
     return;
   }
 
-  if (!_writes.empty()) return;
+  if (!_writes.empty())
+    return;
   _channel->disable_writing();
   if (_write_cb) {
     auto self = shared_from_this();
     auto callback = _write_cb;
-    _loop->queue_in_loop([self, callback] { callback(self); });
+    _loop->queue_in_loop([self, callback] {
+      callback(self);
+    });
   }
-  if (_state.load() == k_disconnecting) shutdown_in_loop();
+  if (_state.load() == k_disconnecting)
+    shutdown_in_loop();
 }
 
 // 使用高水位设置后的修改函数
@@ -724,8 +728,8 @@ void TcpConnection::send_file_in_loop(PendingWrite task, int prepare_error) {
     return;
   }
   if (task.kind == PendingWrite::Kind::buffered_file) {
-    task.read_reservation = static_cast<std::size_t>(
-        std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
+    task.read_reservation =
+        static_cast<std::size_t>(std::min<std::uint64_t>(task.remaining, kAsyncFileChunk));
     if (task.read_reservation > kMaxPendingBytes - _pending_memory_bytes) {
       notify_file(std::move(task), ENOBUFS);
       fail_writes(ENOBUFS);
@@ -742,7 +746,9 @@ void TcpConnection::send_file_in_loop(PendingWrite task, int prepare_error) {
     auto self = shared_from_this();
     auto callback = _high_water_cb;
     const auto size = _pending_memory_bytes;
-    _loop->queue_in_loop([self, callback, size] { callback(self, size); });
+    _loop->queue_in_loop([self, callback, size] {
+      callback(self, size);
+    });
   }
 }
 

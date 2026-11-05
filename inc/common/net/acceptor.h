@@ -24,7 +24,6 @@ class Acceptor : NoCopy {
   }
 
  private:
-
   void handle_read();
   //
   // acceptor 用的是用户定义的baseloop，

@@ -1,8 +1,8 @@
+#include <dlfcn.h>
+#include <pthread.h>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
-#include <dlfcn.h>
-#include <pthread.h>
 #include <system_error>
 
 #include "common/base/tlss_thread_pool.h"
@@ -31,7 +31,8 @@ bool check_failed_start(int fail_at) {
 
   pool.stop();
   pool.stop();
-  if (pool.run([] {})) {
+  if (pool.run([] {
+      })) {
     std::fprintf(stderr, "pool accepted a task after failed start\n");
     return false;
   }

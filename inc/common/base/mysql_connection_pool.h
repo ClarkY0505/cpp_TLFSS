@@ -2,8 +2,8 @@
 #define __INC_COMMON_BASE_MYSQL_CONNECTION_POOL_H__
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <condition_variable>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -74,24 +74,24 @@ class DbConnectionPool : public NoCopy {
   int _init_size;           // 初始连接数量，也是空闲回收保留的总容量下限。
   int _max_size;            // 连接总数上限，包含借出连接和正在创建的容量。
   int _max_idle_time;       // 空闲超时及扫描间隔，单位：秒。
-  int _connection_timeout; // 获取连接的条件等待期限，单位：毫秒。
-  int _connect_timeout;    // MySQL 建连超时，单位：秒。
-  int _read_timeout;       // MySQL 单次读取超时，单位：秒。
-  int _write_timeout;      // MySQL 单次写入超时，单位：秒。
+  int _connection_timeout;  // 获取连接的条件等待期限，单位：毫秒。
+  int _connect_timeout;     // MySQL 建连超时，单位：秒。
+  int _read_timeout;        // MySQL 单次读取超时，单位：秒。
+  int _write_timeout;       // MySQL 单次写入超时，单位：秒。
 
   // 线程回调会访问 this，因此池销毁成员前必须等待它们结束。
   Thread _produce_thread;
   Thread _scanner_thread;
 
-  std::queue<std::unique_ptr<DbConnection>> _connection_queue; // 独占持有空闲连接。
-  std::mutex _mutex; // 保护队列、关闭标志和下方两个生命周期计数。
-  std::condition_variable _cond; // 用于获取、生产、扫描、重试和析构等待。
-  std::mutex _shutdown_mutex; // 串行化停止操作，防止重复 join 同一个线程。
-  std::atomic<int> _connection_cnt; // 总容量计数，生产失败时也会在锁外修改。
-  bool _stopping; // 在 _mutex 下访问；关闭后不再借出或归还入队。
-  bool _threads_joined; // 在 _shutdown_mutex 下访问；标记后台线程已完成 join。
-  std::size_t _borrowed_count; // 在 _mutex 下访问；包含取出后正在 ping 的连接。
-  std::size_t _active_getters; // 在 _mutex 下访问；已登记且尚未退出的获取调用。
+  std::queue<std::unique_ptr<DbConnection>> _connection_queue;  // 独占持有空闲连接。
+  std::mutex _mutex;              // 保护队列、关闭标志和下方两个生命周期计数。
+  std::condition_variable _cond;  // 用于获取、生产、扫描、重试和析构等待。
+  std::mutex _shutdown_mutex;     // 串行化停止操作，防止重复 join 同一个线程。
+  std::atomic<int> _connection_cnt;  // 总容量计数，生产失败时也会在锁外修改。
+  bool _stopping;        // 在 _mutex 下访问；关闭后不再借出或归还入队。
+  bool _threads_joined;  // 在 _shutdown_mutex 下访问；标记后台线程已完成 join。
+  std::size_t _borrowed_count;  // 在 _mutex 下访问；包含取出后正在 ping 的连接。
+  std::size_t _active_getters;  // 在 _mutex 下访问；已登记且尚未退出的获取调用。
 };
 }  // namespace TLSS::BASE
 #endif  // __INC_COMMON_BASE_MYSQL_CONNECTION_POOL_H__

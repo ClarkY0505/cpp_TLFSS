@@ -7,7 +7,7 @@ namespace TLSS::FileStorage::Transfer {
 inline constexpr const char* kResponsePrefix = "\n@TLSS ";
 inline constexpr std::size_t kMaxControlBytes = 4096;
 inline void send_control(const NET::TcpConnectionPtr& conn, const std::string& payload) {
-    conn->send(std::string(kResponsePrefix) + payload + "\n");
+  conn->send(std::string(kResponsePrefix) + payload + "\n");
 }
 }  // namespace TLSS::FileStorage::Transfer
 #endif

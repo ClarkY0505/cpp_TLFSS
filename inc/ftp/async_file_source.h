@@ -28,8 +28,8 @@ class AsyncFileSource : public std::enable_shared_from_this<AsyncFileSource> {
   using Failed = std::function<void(std::string)>;
 
   static std::shared_ptr<AsyncFileSource> open(DiskExecutor& executor,
-                                               const NET::TcpConnectionPtr& conn,
-                                               Factory factory, Ready ready, Failed failed);
+                                               const NET::TcpConnectionPtr& conn, Factory factory,
+                                               Ready ready, Failed failed);
   ~AsyncFileSource();
   AsyncFileSource(const AsyncFileSource&) = delete;
   AsyncFileSource& operator=(const AsyncFileSource&) = delete;
@@ -71,8 +71,8 @@ class AsyncFileSource : public std::enable_shared_from_this<AsyncFileSource> {
     bool post_enabled = true;
   };
 
-  AsyncFileSource(const NET::TcpConnectionPtr& conn, std::shared_ptr<State> state,
-                  Ready ready, Failed failed);
+  AsyncFileSource(const NET::TcpConnectionPtr& conn, std::shared_ptr<State> state, Ready ready,
+                  Failed failed);
   void on_opened(Info info, std::string error);
   void report_error(const NET::TcpConnectionPtr& conn, std::string error);
 

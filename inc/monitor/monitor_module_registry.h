@@ -24,18 +24,18 @@ namespace TLSSMON {
  * 两张表由同一个互斥锁保护，保证注册操作是一个整体。
  */
 class MonitorModuleRegistry final {
-public:
+ public:
   /** @brief 创建空模块注册表。 */
   MonitorModuleRegistry() = default;
   ~MonitorModuleRegistry() = default;
 
-  MonitorModuleRegistry(const MonitorModuleRegistry &) = delete;
+  MonitorModuleRegistry(const MonitorModuleRegistry&) = delete;
 
-  MonitorModuleRegistry &operator=(const MonitorModuleRegistry &) = delete;
+  MonitorModuleRegistry& operator=(const MonitorModuleRegistry&) = delete;
 
-  MonitorModuleRegistry(MonitorModuleRegistry &&) = delete;
+  MonitorModuleRegistry(MonitorModuleRegistry&&) = delete;
 
-  MonitorModuleRegistry &operator=(MonitorModuleRegistry &&) = delete;
+  MonitorModuleRegistry& operator=(MonitorModuleRegistry&&) = delete;
 
   /**
    * @brief 注册一个模块。
@@ -91,7 +91,7 @@ public:
    */
   std::vector<MonitorModuleInfo> modules() const;
 
-private:
+ private:
   mutable std::mutex _mutex;
 
   /**
@@ -105,6 +105,6 @@ private:
   std::map<std::string, std::uint32_t> _id_by_name;
 };
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __MONITOR_MODULE_REGISTRY_H__
+#endif  // __MONITOR_MODULE_REGISTRY_H__

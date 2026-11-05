@@ -5,7 +5,7 @@
 #include <iostream>
 #include <memory>
 
-    using namespace TLSSMON;
+using namespace TLSSMON;
 
 namespace {
 
@@ -34,7 +34,7 @@ bool demonstrate_cont_for() {
 
   std::cout << "== CONT_FOR: temperature > 80 for 3000ms ==\n";
 
-  for (const Sample &sample : samples) {
+  for (const Sample& sample : samples) {
     const PolicyFeedResult result = policy->feed(sample._value, sample._time);
 
     std::cout << "t=" << sample._time.count() << "ms value=" << sample._value
@@ -59,8 +59,7 @@ bool demonstrate_times_per_period() {
   }
 
   const std::array<PolicyTime, 5U> event_times{
-      PolicyTime{0},    PolicyTime{200},  PolicyTime{5000},
-      PolicyTime{5100}, PolicyTime{5200},
+      PolicyTime{0}, PolicyTime{200}, PolicyTime{5000}, PolicyTime{5100}, PolicyTime{5200},
   };
 
   std::size_t alarms = 0U;
@@ -90,8 +89,7 @@ bool demonstrate_smooth_trim() {
     return false;
   }
 
-  const std::array<std::uint32_t, 6U> samples{300U,  310U, 320U,
-                                              9999U, 330U, 340U};
+  const std::array<std::uint32_t, 6U> samples{300U, 310U, 320U, 9999U, 330U, 340U};
 
   std::cout << "\n== SMOOTH_TRIM: window=4 trim=50 ==\n";
 
@@ -109,7 +107,7 @@ bool demonstrate_smooth_trim() {
   return policy->value() == 325U;
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   const bool cont_for_ok = demonstrate_cont_for();

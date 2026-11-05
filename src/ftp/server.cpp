@@ -1,11 +1,11 @@
+#include "ftp/server.h"
 #include "common/base/tlss_thread_pool.h"
 #include "common/net/callbacks.h"
 #include "common/net/event_loop.h"
 #include "common/net/tcp_connection.h"
 #include "ftp/context.h"
-#include "ftp/transfer_protocol.h"
-#include "ftp/server.h"
 #include "ftp/service_logger.h"
+#include "ftp/transfer_protocol.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -191,7 +191,8 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
       }
     }
 
-    if (session && session->transfer) session->transfer->cancel();
+    if (session && session->transfer)
+      session->transfer->cancel();
 
     return;
   }
@@ -834,7 +835,8 @@ void StorageService::finish_authentication(std::weak_ptr<ConnectionSession> orig
 void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& error) {
-  if (session->transfer) session->transfer->cancel();
+  if (session->transfer)
+    session->transfer->cancel();
   ++session->transfer_generation;
   session->transfer.reset();
   Transfer::send_control(conn, "ERROR " + Transfer::quote(Transfer::safe_error(error)));
@@ -843,13 +845,18 @@ void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
 
 TransferContext StorageService::transfer_context(
     const NET::TcpConnectionPtr& conn, const std::shared_ptr<ConnectionSession>& session) {
-  return {conn, session, ++session->transfer_generation, session->user_id,
-          session->name, session->current_directory};
+  return {conn,
+          session,
+          ++session->transfer_generation,
+          session->user_id,
+          session->name,
+          session->current_directory};
 }
 
 void StorageService::on_transfer_event(const TransferContext& context, TransferEvent event) {
   auto [conn, session] = context.current();
-  if (!conn) return;
+  if (!conn)
+    return;
   if (_stopping.load() || event.close_connection) {
     conn->force_close();
     return;
@@ -884,23 +891,33 @@ void StorageService::handle_download(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& args) {
   try {
-    if (_stopping.load()) { conn->force_close(); return; }
-    if (session->login_state != LoginState::k_authenticated) {
-      transfer_failed(conn, session, "login required"); return;
+    if (_stopping.load()) {
+      conn->force_close();
+      return;
     }
-    if (session->transfer) { conn->force_close(); return; }
+    if (session->login_state != LoginState::k_authenticated) {
+      transfer_failed(conn, session, "login required");
+      return;
+    }
+    if (session->transfer) {
+      conn->force_close();
+      return;
+    }
     if (session->directory_change_pending) {
-      transfer_failed(conn, session, "session is busy"); return;
+      transfer_failed(conn, session, "session is busy");
+      return;
     }
     std::istringstream input(args);
     const auto name = Transfer::read_field(input);
     Transfer::require_end(input);
     if (!Transfer::valid_name(name)) {
-      transfer_failed(conn, session, "invalid remote filename"); return;
+      transfer_failed(conn, session, "invalid remote filename");
+      return;
     }
     const auto context = transfer_context(conn, session);
-    const auto task = _download_engine.create(context, name,
-        [this, context](TransferEvent event) { on_transfer_event(context, std::move(event)); });
+    const auto task = _download_engine.create(context, name, [this, context](TransferEvent event) {
+      on_transfer_event(context, std::move(event));
+    });
     session->transfer = task;
     task->start();
   } catch (const std::exception& exception) {
@@ -916,28 +933,39 @@ void StorageService::handle_transfer_control(const NET::TcpConnectionPtr& conn,
   input >> verb;
   if (session->transfer && session->transfer->phase() == TransferPhase::waiting_download_ack) {
     Transfer::require_end(input);
-    if (verb != "ACK") { conn->force_close(); return; }
+    if (verb != "ACK") {
+      conn->force_close();
+      return;
+    }
     const auto task = session->transfer;
     task->acknowledge();
     return;
   }
-  if (session->transfer) { conn->force_close(); return; }
+  if (session->transfer) {
+    conn->force_close();
+    return;
+  }
   std::string args;
   std::getline(input >> std::ws, args);
-  if (verb == "UPLOAD") handle_upload(conn, session, args);
-  else if (verb == "DOWNLOAD") handle_download(conn, session, args);
-  else transfer_failed(conn, session, "unknown transfer command");
+  if (verb == "UPLOAD")
+    handle_upload(conn, session, args);
+  else if (verb == "DOWNLOAD")
+    handle_download(conn, session, args);
+  else
+    transfer_failed(conn, session, "unknown transfer command");
 }
 
 UploadRequest StorageService::parse_upload_request(const std::string& args) {
   std::istringstream input(args);
   std::string size_text;
-  if (!(input >> size_text)) throw std::runtime_error("missing file size");
+  if (!(input >> size_text))
+    throw std::runtime_error("missing file size");
   UploadRequest request;
   request.size = Transfer::parse_size(size_text);
   request.name = Transfer::read_field(input);
   Transfer::require_end(input);
-  if (!Transfer::valid_name(request.name)) throw std::runtime_error("invalid remote filename");
+  if (!Transfer::valid_name(request.name))
+    throw std::runtime_error("invalid remote filename");
   return request;
 }
 
@@ -945,18 +973,28 @@ void StorageService::handle_upload(const NET::TcpConnectionPtr& conn,
                                    const std::shared_ptr<ConnectionSession>& session,
                                    const std::string& args) {
   try {
-    if (_stopping.load()) { conn->force_close(); return; }
-    if (session->login_state != LoginState::k_authenticated) {
-      transfer_failed(conn, session, "login required"); return;
+    if (_stopping.load()) {
+      conn->force_close();
+      return;
     }
-    if (session->transfer) { conn->force_close(); return; }
+    if (session->login_state != LoginState::k_authenticated) {
+      transfer_failed(conn, session, "login required");
+      return;
+    }
+    if (session->transfer) {
+      conn->force_close();
+      return;
+    }
     if (session->directory_change_pending) {
-      transfer_failed(conn, session, "session is busy"); return;
+      transfer_failed(conn, session, "session is busy");
+      return;
     }
     auto request = parse_upload_request(args);
     const auto context = transfer_context(conn, session);
-    const auto task = _upload_engine.create(context, std::move(request),
-        [this, context](TransferEvent event) { on_transfer_event(context, std::move(event)); });
+    const auto task =
+        _upload_engine.create(context, std::move(request), [this, context](TransferEvent event) {
+          on_transfer_event(context, std::move(event));
+        });
     session->transfer = task;
     task->start();
   } catch (const std::exception& exception) {

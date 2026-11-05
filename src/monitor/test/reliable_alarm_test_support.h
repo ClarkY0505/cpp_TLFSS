@@ -14,8 +14,8 @@
 #include <array>
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -31,14 +31,12 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 class TemporaryDirectory final {
-public:
-  explicit TemporaryDirectory(const std::string &name) {
+ public:
+  explicit TemporaryDirectory(const std::string& name) {
     static std::atomic<std::uint64_t> sequence{0U};
-    const auto tick =
-        std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
     _path = fs::temp_directory_path() /
-            ("monitor-" + name + "-" +
-             std::to_string(static_cast<long long>(::getpid())) + "-" +
+            ("monitor-" + name + "-" + std::to_string(static_cast<long long>(::getpid())) + "-" +
              std::to_string(static_cast<long long>(tick)) + "-" +
              std::to_string(sequence.fetch_add(1U)));
     std::error_code error;
@@ -50,18 +48,21 @@ public:
     fs::remove_all(_path, error);
   }
 
-  TemporaryDirectory(const TemporaryDirectory &) = delete;
-  TemporaryDirectory &operator=(const TemporaryDirectory &) = delete;
+  TemporaryDirectory(const TemporaryDirectory&) = delete;
+  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
 
-  const fs::path &path() const noexcept { return _path; }
+  const fs::path& path() const noexcept {
+    return _path;
+  }
 
-private:
+ private:
   fs::path _path;
 };
 
 class UniqueSocket final {
-public:
-  explicit UniqueSocket(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit UniqueSocket(int fd = -1) noexcept
+      : _fd(fd) {}
 
   ~UniqueSocket() {
     if (_fd >= 0) {
@@ -69,12 +70,13 @@ public:
     }
   }
 
-  UniqueSocket(const UniqueSocket &) = delete;
-  UniqueSocket &operator=(const UniqueSocket &) = delete;
+  UniqueSocket(const UniqueSocket&) = delete;
+  UniqueSocket& operator=(const UniqueSocket&) = delete;
 
-  UniqueSocket(UniqueSocket &&other) noexcept : _fd(other.release()) {}
+  UniqueSocket(UniqueSocket&& other) noexcept
+      : _fd(other.release()) {}
 
-  UniqueSocket &operator=(UniqueSocket &&other) noexcept {
+  UniqueSocket& operator=(UniqueSocket&& other) noexcept {
     if (this != &other) {
       if (_fd >= 0) {
         (void)::close(_fd);
@@ -84,7 +86,9 @@ public:
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
   int release() noexcept {
     const int fd = _fd;
@@ -92,12 +96,12 @@ public:
     return fd;
   }
 
-private:
+ private:
   int _fd{-1};
 };
 
 class BoundTcpListener final {
-public:
+ public:
   BoundTcpListener() {
     _socket = UniqueSocket(::socket(AF_INET, SOCK_STREAM, 0));
     assert(_socket.get() >= 0);
@@ -106,41 +110,39 @@ public:
     address.sin_family = AF_INET;
     address.sin_port = htons(0U);
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    assert(::bind(_socket.get(), reinterpret_cast<const sockaddr *>(&address),
+    assert(::bind(_socket.get(), reinterpret_cast<const sockaddr*>(&address),
                   static_cast<socklen_t>(sizeof(address))) == 0);
     assert(::listen(_socket.get(), 4) == 0);
 
     socklen_t size = static_cast<socklen_t>(sizeof(address));
-    assert(::getsockname(_socket.get(), reinterpret_cast<sockaddr *>(&address),
-                         &size) == 0);
+    assert(::getsockname(_socket.get(), reinterpret_cast<sockaddr*>(&address), &size) == 0);
     _port = ntohs(address.sin_port);
     assert(_port != 0U);
   }
 
-  std::uint16_t port() const noexcept { return _port; }
+  std::uint16_t port() const noexcept {
+    return _port;
+  }
 
-private:
+ private:
   UniqueSocket _socket;
   std::uint16_t _port{0U};
 };
 
-inline int remaining_timeout_ms(
-    std::chrono::steady_clock::time_point deadline) {
+inline int remaining_timeout_ms(std::chrono::steady_clock::time_point deadline) {
   const auto now = std::chrono::steady_clock::now();
   if (now >= deadline) {
     return 0;
   }
   const auto remaining = deadline - now;
-  auto milliseconds =
-      std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+  auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
   if (milliseconds < remaining) {
     milliseconds += 1ms;
   }
   return std::max(1, static_cast<int>(milliseconds.count()));
 }
 
-inline bool wait_fd(int fd, short events,
-                    std::chrono::steady_clock::time_point deadline) {
+inline bool wait_fd(int fd, short events, std::chrono::steady_clock::time_point deadline) {
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd descriptor{};
     descriptor.fd = fd;
@@ -163,7 +165,7 @@ inline bool wait_fd(int fd, short events,
   return false;
 }
 
-inline bool send_all(int fd, const std::uint8_t *data, std::size_t size,
+inline bool send_all(int fd, const std::uint8_t* data, std::size_t size,
                      std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   std::size_t offset = 0U;
@@ -171,8 +173,7 @@ inline bool send_all(int fd, const std::uint8_t *data, std::size_t size,
     if (!wait_fd(fd, POLLOUT, deadline)) {
       return false;
     }
-    const ssize_t sent =
-        ::send(fd, data + offset, size - offset, MSG_NOSIGNAL);
+    const ssize_t sent = ::send(fd, data + offset, size - offset, MSG_NOSIGNAL);
     if (sent > 0) {
       offset += static_cast<std::size_t>(sent);
       continue;
@@ -185,7 +186,7 @@ inline bool send_all(int fd, const std::uint8_t *data, std::size_t size,
   return true;
 }
 
-inline bool receive_all(int fd, std::uint8_t *data, std::size_t size,
+inline bool receive_all(int fd, std::uint8_t* data, std::size_t size,
                         std::chrono::steady_clock::time_point deadline) {
   std::size_t offset = 0U;
   while (offset < size) {
@@ -205,16 +206,15 @@ inline bool receive_all(int fd, std::uint8_t *data, std::size_t size,
   return true;
 }
 
-inline std::optional<TLSSMON::AlarmWire::AlarmFrame>
-receive_frame(int fd, std::chrono::milliseconds timeout = 2s) {
+inline std::optional<TLSSMON::AlarmWire::AlarmFrame> receive_frame(
+    int fd, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   std::array<std::uint8_t, TLSSMON::AlarmWire::ALARM_HEADER_SIZE> header{};
   if (!receive_all(fd, header.data(), header.size(), deadline)) {
     return std::nullopt;
   }
 
-  const auto size = TLSSMON::AlarmWire::alarm_frame_size(
-      header.data(), header.size());
+  const auto size = TLSSMON::AlarmWire::alarm_frame_size(header.data(), header.size());
   if (!size.success()) {
     return std::nullopt;
   }
@@ -222,13 +222,11 @@ receive_frame(int fd, std::chrono::milliseconds timeout = 2s) {
   std::vector<std::uint8_t> wire(*size._frame_size);
   std::copy(header.begin(), header.end(), wire.begin());
   const std::size_t payload_size = wire.size() - header.size();
-  if (payload_size != 0U &&
-      !receive_all(fd, wire.data() + header.size(), payload_size, deadline)) {
+  if (payload_size != 0U && !receive_all(fd, wire.data() + header.size(), payload_size, deadline)) {
     return std::nullopt;
   }
 
-  auto decoded = TLSSMON::AlarmWire::decode_alarm_frame(
-      wire.data(), wire.size());
+  auto decoded = TLSSMON::AlarmWire::decode_alarm_frame(wire.data(), wire.size());
   return decoded.success() ? std::move(decoded._frame) : std::nullopt;
 }
 
@@ -242,15 +240,14 @@ inline UniqueSocket connect_loopback(std::uint16_t port) {
   address.sin_family = AF_INET;
   address.sin_port = htons(port);
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (::connect(socket.get(), reinterpret_cast<const sockaddr *>(&address),
+  if (::connect(socket.get(), reinterpret_cast<const sockaddr*>(&address),
                 static_cast<socklen_t>(sizeof(address))) != 0) {
     return UniqueSocket{};
   }
   return socket;
 }
 
-inline bool wait_for_close(int fd,
-                           std::chrono::milliseconds timeout = 2s) {
+inline bool wait_for_close(int fd, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd descriptor{};
@@ -274,8 +271,7 @@ inline bool wait_for_close(int fd,
 }
 
 template <typename Predicate>
-inline bool wait_until(Predicate predicate,
-                       std::chrono::milliseconds timeout = 3s) {
+inline bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = 3s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!predicate() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(2ms);
@@ -283,8 +279,7 @@ inline bool wait_until(Predicate predicate,
   return predicate();
 }
 
-inline TLSSMON::AlarmWire::AlarmMessageId
-make_message_id(std::uint8_t seed) {
+inline TLSSMON::AlarmWire::AlarmMessageId make_message_id(std::uint8_t seed) {
   TLSSMON::AlarmWire::AlarmMessageId id{};
   for (std::size_t index = 0U; index < id.size(); ++index) {
     id[index] = static_cast<std::uint8_t>(seed + index);
@@ -292,24 +287,20 @@ make_message_id(std::uint8_t seed) {
   return id;
 }
 
-inline TLSSMON::MonData::StoredRecord
-make_record(std::uint32_t event_id, std::uint32_t value,
-            std::int64_t seconds = 1'700'000'000,
-            std::string description = "network alarm") {
+inline TLSSMON::MonData::StoredRecord make_record(std::uint32_t event_id, std::uint32_t value,
+                                                  std::int64_t seconds = 1'700'000'000,
+                                                  std::string description = "network alarm") {
   return TLSSMON::MonData::StoredRecord{
-      TLSSMON::MonData::MonitorData{
-          TLSSMON::MonData::MonitorKey{0x100U, 2U, 0x200U, event_id},
-          std::move(description),
-          TLSSMON::MonData::NumericValue{value, 2U}},
-      TLSSMON::MonData::MonitorTimestamp{
-          std::chrono::seconds{seconds} +
-          std::chrono::nanoseconds{123'456'789}}};
+      TLSSMON::MonData::MonitorData{TLSSMON::MonData::MonitorKey{0x100U, 2U, 0x200U, event_id},
+                                    std::move(description),
+                                    TLSSMON::MonData::NumericValue{value, 2U}},
+      TLSSMON::MonData::MonitorTimestamp{std::chrono::seconds{seconds} +
+                                         std::chrono::nanoseconds{123'456'789}}};
 }
 
-inline TLSSMON::AlarmWire::AlarmFrame
-make_alarm(const TLSSMON::MonData::StoredRecord &record,
-           std::uint64_t source_id, std::uint8_t message_seed,
-           std::uint64_t envelope_timestamp_ms = 0U) {
+inline TLSSMON::AlarmWire::AlarmFrame make_alarm(const TLSSMON::MonData::StoredRecord& record,
+                                                 std::uint64_t source_id, std::uint8_t message_seed,
+                                                 std::uint64_t envelope_timestamp_ms = 0U) {
   const auto payload = TLSSMON::Wire::encode_v2(record);
   assert(payload._status == TLSSMON::Wire::WireStatus::SUCCESS);
 
@@ -317,31 +308,28 @@ make_alarm(const TLSSMON::MonData::StoredRecord &record,
   frame._type = TLSSMON::AlarmWire::AlarmFrameType::ALARM;
   frame._source_id = source_id;
   frame._message_id = make_message_id(message_seed);
-  frame._timestamp_ms = envelope_timestamp_ms != 0U
-                            ? envelope_timestamp_ms
-                            : static_cast<std::uint64_t>(
-                                  std::chrono::duration_cast<
-                                      std::chrono::milliseconds>(
-                                      record._changed_at.time_since_epoch())
-                                      .count());
+  frame._timestamp_ms =
+      envelope_timestamp_ms != 0U
+          ? envelope_timestamp_ms
+          : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           record._changed_at.time_since_epoch())
+                                           .count());
   frame._payload = payload._bytes;
   return frame;
 }
 
-inline std::vector<std::uint8_t>
-encode_frame(const TLSSMON::AlarmWire::AlarmFrame &frame) {
+inline std::vector<std::uint8_t> encode_frame(const TLSSMON::AlarmWire::AlarmFrame& frame) {
   const auto encoded = TLSSMON::AlarmWire::encode_alarm_frame(frame);
   assert(encoded.success());
   return encoded._bytes;
 }
 
-inline bool send_fragmented(int fd, const std::vector<std::uint8_t> &bytes) {
+inline bool send_fragmented(int fd, const std::vector<std::uint8_t>& bytes) {
   const std::array<std::size_t, 6U> chunks{1U, 2U, 5U, 13U, 3U, 37U};
   std::size_t offset = 0U;
   std::size_t index = 0U;
   while (offset < bytes.size()) {
-    const std::size_t amount =
-        std::min(chunks[index % chunks.size()], bytes.size() - offset);
+    const std::size_t amount = std::min(chunks[index % chunks.size()], bytes.size() - offset);
     if (!send_all(fd, bytes.data() + offset, amount)) {
       return false;
     }
@@ -351,6 +339,6 @@ inline bool send_fragmented(int fd, const std::vector<std::uint8_t> &bytes) {
   return true;
 }
 
-} // namespace ReliableAlarmTest
+}  // namespace ReliableAlarmTest
 
-#endif // TLSSMON_TEST_RELIABLE_ALARM_TEST_SUPPORT_H
+#endif  // TLSSMON_TEST_RELIABLE_ALARM_TEST_SUPPORT_H

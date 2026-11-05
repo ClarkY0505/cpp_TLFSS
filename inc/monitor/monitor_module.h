@@ -90,11 +90,12 @@ struct MonitorModuleInfo final {
    * @param description 监控记录的可读描述。
    * @param errors 按 EID 顺序排列的错误元数据表。
    */
-  MonitorModuleInfo(std::uint32_t mid, std::string name,
-                    std::string description,
+  MonitorModuleInfo(std::uint32_t mid, std::string name, std::string description,
                     std::vector<MonitorErrorInfo> errors = {})
-      : _mid(mid), _name(std::move(name)), _description(std::move(description)),
-        _errors(std::move(errors)) {}
+      : _mid(mid)
+      , _name(std::move(name))
+      , _description(std::move(description))
+      , _errors(std::move(errors)) {}
 };
 
 /**
@@ -111,19 +112,17 @@ struct MonitorModuleInfo final {
  * @param character 待验证的字符。
  * @return 字符属于允许的安全 ASCII 集合时返回 true。
  */
-constexpr bool
-is_valid_module_name_character(unsigned char character) noexcept {
-  const bool lowercase = character >= static_cast<unsigned char>('a') &&
-                         character <= static_cast<unsigned char>('z');
+constexpr bool is_valid_module_name_character(unsigned char character) noexcept {
+  const bool lowercase =
+      character >= static_cast<unsigned char>('a') && character <= static_cast<unsigned char>('z');
 
-  const bool uppercase = character >= static_cast<unsigned char>('A') &&
-                         character <= static_cast<unsigned char>('Z');
+  const bool uppercase =
+      character >= static_cast<unsigned char>('A') && character <= static_cast<unsigned char>('Z');
 
-  const bool digit = character >= static_cast<unsigned char>('0') &&
-                     character <= static_cast<unsigned char>('9');
+  const bool digit =
+      character >= static_cast<unsigned char>('0') && character <= static_cast<unsigned char>('9');
 
-  return lowercase || uppercase || digit ||
-         character == static_cast<unsigned char>('-') ||
+  return lowercase || uppercase || digit || character == static_cast<unsigned char>('-') ||
          character == static_cast<unsigned char>('_') ||
          character == static_cast<unsigned char>('.');
 }
@@ -173,10 +172,9 @@ inline bool is_valid_module_name(std::string_view name) noexcept {
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator==(const MonitorModuleInfo &lhs,
-                       const MonitorModuleInfo &rhs) {
-  return lhs._mid == rhs._mid && lhs._name == rhs._name &&
-         lhs._description == rhs._description && lhs._errors == rhs._errors;
+inline bool operator==(const MonitorModuleInfo& lhs, const MonitorModuleInfo& rhs) {
+  return lhs._mid == rhs._mid && lhs._name == rhs._name && lhs._description == rhs._description &&
+         lhs._errors == rhs._errors;
 }
 
 /**
@@ -185,11 +183,10 @@ inline bool operator==(const MonitorModuleInfo &lhs,
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator!=(const MonitorModuleInfo &lhs,
-                       const MonitorModuleInfo &rhs) {
+inline bool operator!=(const MonitorModuleInfo& lhs, const MonitorModuleInfo& rhs) {
   return !(lhs == rhs);
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // TLSSMON_MONITOR_MODULE_H
+#endif  // TLSSMON_MONITOR_MODULE_H

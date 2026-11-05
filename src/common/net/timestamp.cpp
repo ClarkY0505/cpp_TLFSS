@@ -7,7 +7,8 @@
 
 namespace TLSS::TIME {
 
-Timestamp::Timestamp() : _micro_seconds_since_epoch(0) {}
+Timestamp::Timestamp()
+    : _micro_seconds_since_epoch(0) {}
 
 Timestamp::Timestamp(int64_t micro_seconds_since_epoch)
     : _micro_seconds_since_epoch(micro_seconds_since_epoch) {}
@@ -25,8 +26,7 @@ std::string Timestamp::to_string() const {
   return buffer;
 }
 
-}  // namespace TLSSTIME
-
+}  // namespace TLSS::TIME
 
 /* #include <iostream> */
 /* int main(){ */

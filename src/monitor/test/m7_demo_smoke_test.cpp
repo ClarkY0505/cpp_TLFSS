@@ -1,17 +1,17 @@
 #include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
 #include <iostream>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
@@ -19,7 +19,7 @@ using namespace std::chrono_literals;
 constexpr std::uint16_t DEMO_PORT = 9000U;
 
 class ChildProcess final {
-public:
+ public:
   ~ChildProcess() {
     terminate();
     if (_output_fd >= 0) {
@@ -27,7 +27,7 @@ public:
     }
   }
 
-  bool start(const char *executable) {
+  bool start(const char* executable) {
     int output[2]{-1, -1};
     if (::pipe(output) != 0) {
       return false;
@@ -40,12 +40,11 @@ public:
     }
     if (child == 0) {
       (void)::close(output[0]);
-      if (::dup2(output[1], STDOUT_FILENO) < 0 ||
-          ::dup2(output[1], STDERR_FILENO) < 0) {
+      if (::dup2(output[1], STDOUT_FILENO) < 0 || ::dup2(output[1], STDERR_FILENO) < 0) {
         _exit(126);
       }
       (void)::close(output[1]);
-      ::execl(executable, executable, static_cast<char *>(nullptr));
+      ::execl(executable, executable, static_cast<char*>(nullptr));
       _exit(127);
     }
     (void)::close(output[1]);
@@ -54,7 +53,7 @@ public:
     return true;
   }
 
-  bool wait_for_exit(std::chrono::milliseconds timeout, int &exit_code) {
+  bool wait_for_exit(std::chrono::milliseconds timeout, int& exit_code) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
       int status = 0;
@@ -88,7 +87,7 @@ public:
     }
   }
 
-private:
+ private:
   void terminate() noexcept {
     if (_pid <= 0) {
       return;
@@ -115,8 +114,7 @@ int connect_to_demo() {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(DEMO_PORT);
-    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address),
-                  sizeof(address)) == 0) {
+    if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
       return fd;
     }
     (void)::close(fd);
@@ -128,8 +126,7 @@ int connect_to_demo() {
 bool send_all(int fd, std::string_view text) {
   std::size_t offset = 0U;
   while (offset < text.size()) {
-    const ssize_t count =
-        ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
+    const ssize_t count = ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
     if (count > 0) {
       offset += static_cast<std::size_t>(count);
       continue;
@@ -142,8 +139,7 @@ bool send_all(int fd, std::string_view text) {
   return true;
 }
 
-std::string receive_cli_output(int fd,
-                               std::string_view terminator = " entries\n") {
+std::string receive_cli_output(int fd, std::string_view terminator = " entries\n") {
   std::string response;
   const auto deadline = std::chrono::steady_clock::now() + 2s;
   while (response.find(terminator) == std::string::npos &&
@@ -172,13 +168,13 @@ std::string receive_cli_output(int fd,
   return response;
 }
 
-bool contains(const std::string &text, std::string_view expected) {
+bool contains(const std::string& text, std::string_view expected) {
   return text.find(expected) != std::string::npos;
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   if (argc != 2) {
     std::cerr << "usage: m7_demo_smoke_test <demo-executable>\n";
     return 2;
@@ -197,8 +193,7 @@ int main(int argc, char *argv[]) {
   }
 
   /* 新连接先进入全局视图，使用服务名 storage 作为提示符。 */
-  const std::string initial_prompt =
-      receive_cli_output(client, "[storage]> ");
+  const std::string initial_prompt = receive_cli_output(client, "[storage]> ");
 
   /* modules 必须列出 Demo 注册的两个模块，并保留全局提示符。 */
   const bool modules_sent = send_all(client, "modules\n");
@@ -217,8 +212,7 @@ int main(int argc, char *argv[]) {
       break;
     }
     all_dump = receive_cli_output(client, "[storage]> ");
-    both_modules_ready = contains(all_dump, "* mid=256 ") &&
-                         contains(all_dump, "* mid=512 ");
+    both_modules_ready = contains(all_dump, "* mid=256 ") && contains(all_dump, "* mid=512 ");
     if (both_modules_ready) {
       break;
     }
@@ -258,26 +252,20 @@ int main(int argc, char *argv[]) {
   const bool cli_valid =
       initial_prompt == "[storage]> " && modules_sent &&
       contains(modules_response, "* module-a mid=256\n") &&
-      contains(modules_response, "* module-b mid=512\n") &&
-      both_modules_ready && help_sent &&
+      contains(modules_response, "* module-b mid=512\n") && both_modules_ready && help_sent &&
       contains(help_response, "* db_dump    dump monitor records\n") &&
       contains(help_response, "* help       list available commands\n") &&
       contains(help_response, "* modules    list registered modules\n") &&
       contains(help_response, "* stop       stop monitor engine\n") &&
-      contains(help_response, "* use        select active module\n") &&
-      use_a_sent &&
-      contains(use_a_response,
-               "* using module: module-a\n[module-a]> ") &&
-      dump_a_sent && contains(module_a_dump, "* mid=256 ") &&
-      !contains(module_a_dump, "mid=512 ") &&
+      contains(help_response, "* use        select active module\n") && use_a_sent &&
+      contains(use_a_response, "* using module: module-a\n[module-a]> ") && dump_a_sent &&
+      contains(module_a_dump, "* mid=256 ") && !contains(module_a_dump, "mid=512 ") &&
       contains(module_a_dump, "* 1 entry\n") && use_b_sent &&
-      contains(use_b_response,
-               "* using module: module-b\n[module-b]> ") &&
-      dump_b_sent && contains(module_b_dump, "* mid=512 ") &&
-      !contains(module_b_dump, "mid=256 ") &&
+      contains(use_b_response, "* using module: module-b\n[module-b]> ") && dump_b_sent &&
+      contains(module_b_dump, "* mid=512 ") && !contains(module_b_dump, "mid=256 ") &&
       contains(module_b_dump, "* 1 entry\n") && use_all_sent &&
-      contains(use_all_response, "* using module: all\n[storage]> ") &&
-      stop_sent && contains(stop_response, "* stopping\n");
+      contains(use_all_response, "* using module: all\n[storage]> ") && stop_sent &&
+      contains(stop_response, "* stopping\n");
 
   if (!cli_valid) {
     std::cerr << "M7 CLI response was incomplete:\n"
@@ -301,17 +289,16 @@ int main(int argc, char *argv[]) {
   }
 
   const std::string output = demo.read_output();
-  const std::string_view required[] = {
-      "[demo] CLI listening on 127.0.0.1:9000",
-      "[demo] modules: module-a, module-b",
-      "[module-a] value=",
-      "[module-b] start",
-      "[module-b] value=",
-      "[demo] stop requested from CLI",
-      "[demo] Engine stopped successfully",
-      "callbacks=module-a-heartbeat count=",
-      "callbacks=slow count=",
-      "callbacks=cli-listener count="};
+  const std::string_view required[] = {"[demo] CLI listening on 127.0.0.1:9000",
+                                       "[demo] modules: module-a, module-b",
+                                       "[module-a] value=",
+                                       "[module-b] start",
+                                       "[module-b] value=",
+                                       "[demo] stop requested from CLI",
+                                       "[demo] Engine stopped successfully",
+                                       "callbacks=module-a-heartbeat count=",
+                                       "callbacks=slow count=",
+                                       "callbacks=cli-listener count="};
 
   if (exit_code != 0) {
     std::cerr << "M7 demo exited with code " << exit_code << "\n" << output;

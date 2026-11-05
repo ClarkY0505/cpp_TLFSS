@@ -42,30 +42,20 @@ namespace {
  * 2. 固定 Engine::set_publisher() 参数和返回类型；
  * 3. 固定 shared_ptr 是可复制的，能够被 C++17 std::function 保存。
  */
-using ExpectedEnginePublisher =
-    std::function<void(MonData::StoredRecord)>;
+using ExpectedEnginePublisher = std::function<void(MonData::StoredRecord)>;
 
-static_assert(
-    std::is_same_v<
-        Engine::MonitorPublisher,
-        ExpectedEnginePublisher>,
-    "Engine Publisher seam must accept StoredRecord by value");
+static_assert(std::is_same_v<Engine::MonitorPublisher, ExpectedEnginePublisher>,
+              "Engine Publisher seam must accept StoredRecord by value");
 
-using ExpectedSetPublisher =
-    bool (Engine::*)(Engine::MonitorPublisher);
+using ExpectedSetPublisher = bool (Engine::*)(Engine::MonitorPublisher);
 
-static_assert(
-    std::is_same_v<
-        decltype(&Engine::set_publisher),
-        ExpectedSetPublisher>,
-    "Engine::set_publisher signature changed");
+static_assert(std::is_same_v<decltype(&Engine::set_publisher), ExpectedSetPublisher>,
+              "Engine::set_publisher signature changed");
 
-using SharedUdpPublisher =
-    std::shared_ptr<Wire::UdpPublisher>;
+using SharedUdpPublisher = std::shared_ptr<Wire::UdpPublisher>;
 
-static_assert(
-    std::is_copy_constructible_v<SharedUdpPublisher>,
-    "shared UDP Publisher handle must be copyable");
+static_assert(std::is_copy_constructible_v<SharedUdpPublisher>,
+              "shared UDP Publisher handle must be copyable");
 
 /*
  * 本地 UDP 接收器。
@@ -74,129 +64,103 @@ static_assert(
  * 相互影响。receive() 最多等待一秒，防止失败案例永久阻塞。
  */
 class LoopbackUdpReceiver final {
-public:
-    LoopbackUdpReceiver() {
-        _socket = ::socket(AF_INET, SOCK_DGRAM, 0);
-        assert(_socket >= 0);
+ public:
+  LoopbackUdpReceiver() {
+    _socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+    assert(_socket >= 0);
 
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(0U);
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(0U);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-        const int bind_result =
-            ::bind(
-                _socket,
-                reinterpret_cast<const sockaddr*>(&address),
-                static_cast<socklen_t>(sizeof(address)));
-        assert(bind_result == 0);
+    const int bind_result = ::bind(_socket, reinterpret_cast<const sockaddr*>(&address),
+                                   static_cast<socklen_t>(sizeof(address)));
+    assert(bind_result == 0);
 
-        socklen_t address_size =
-            static_cast<socklen_t>(sizeof(address));
-        const int name_result =
-            ::getsockname(
-                _socket,
-                reinterpret_cast<sockaddr*>(&address),
-                &address_size);
-        assert(name_result == 0);
-        assert(address_size == sizeof(address));
+    socklen_t address_size = static_cast<socklen_t>(sizeof(address));
+    const int name_result =
+        ::getsockname(_socket, reinterpret_cast<sockaddr*>(&address), &address_size);
+    assert(name_result == 0);
+    assert(address_size == sizeof(address));
 
-        _port = ntohs(address.sin_port);
-        assert(_port != 0U);
+    _port = ntohs(address.sin_port);
+    assert(_port != 0U);
+  }
+
+  ~LoopbackUdpReceiver() {
+    if (_socket >= 0) {
+      const int close_result = ::close(_socket);
+      assert(close_result == 0);
+      _socket = -1;
+    }
+  }
+
+  LoopbackUdpReceiver(const LoopbackUdpReceiver&) = delete;
+  LoopbackUdpReceiver& operator=(const LoopbackUdpReceiver&) = delete;
+  LoopbackUdpReceiver(LoopbackUdpReceiver&&) = delete;
+  LoopbackUdpReceiver& operator=(LoopbackUdpReceiver&&) = delete;
+
+  [[nodiscard]] std::uint16_t port() const noexcept {
+    return _port;
+  }
+
+  [[nodiscard]] bool has_datagram(int timeout_ms) const {
+    pollfd descriptor{};
+    descriptor.fd = _socket;
+    descriptor.events = POLLIN;
+
+    const int poll_result = ::poll(&descriptor, 1U, timeout_ms);
+    assert(poll_result >= 0);
+
+    if (poll_result == 0) {
+      return false;
     }
 
-    ~LoopbackUdpReceiver() {
-        if (_socket >= 0) {
-            const int close_result = ::close(_socket);
-            assert(close_result == 0);
-            _socket = -1;
-        }
-    }
+    assert((descriptor.revents & POLLIN) != 0);
+    return true;
+  }
 
-    LoopbackUdpReceiver(const LoopbackUdpReceiver&) = delete;
-    LoopbackUdpReceiver& operator=(const LoopbackUdpReceiver&) = delete;
-    LoopbackUdpReceiver(LoopbackUdpReceiver&&) = delete;
-    LoopbackUdpReceiver& operator=(LoopbackUdpReceiver&&) = delete;
+  [[nodiscard]] std::vector<std::uint8_t> receive() const {
+    const bool readable = has_datagram(1'000);
+    assert(readable);
 
-    [[nodiscard]] std::uint16_t port() const noexcept {
-        return _port;
-    }
+    std::array<std::uint8_t, Wire::V2_MAX_DATAGRAM_SIZE + 1U> buffer{};
 
-    [[nodiscard]] bool has_datagram(int timeout_ms) const {
-        pollfd descriptor{};
-        descriptor.fd = _socket;
-        descriptor.events = POLLIN;
+    const ssize_t received = ::recvfrom(_socket, buffer.data(), buffer.size(), 0, nullptr, nullptr);
+    assert(received >= 0);
 
-        const int poll_result =
-            ::poll(&descriptor, 1U, timeout_ms);
-        assert(poll_result >= 0);
+    return std::vector<std::uint8_t>(buffer.begin(), buffer.begin() + received);
+  }
 
-        if (poll_result == 0) {
-            return false;
-        }
-
-        assert((descriptor.revents & POLLIN) != 0);
-        return true;
-    }
-
-    [[nodiscard]] std::vector<std::uint8_t> receive() const {
-        const bool readable = has_datagram(1'000);
-        assert(readable);
-
-        std::array<
-            std::uint8_t,
-            Wire::V2_MAX_DATAGRAM_SIZE + 1U> buffer{};
-
-        const ssize_t received =
-            ::recvfrom(
-                _socket,
-                buffer.data(),
-                buffer.size(),
-                0,
-                nullptr,
-                nullptr);
-        assert(received >= 0);
-
-        return std::vector<std::uint8_t>(
-            buffer.begin(),
-            buffer.begin() + received);
-    }
-
-private:
-    int _socket{-1};
-    std::uint16_t _port{0};
+ private:
+  int _socket{-1};
+  std::uint16_t _port{0};
 };
 
 /*
  * 向本机指定端口发送一个原始数据报，只用于独立验证测试接收器。
  */
-void send_raw_loopback_datagram(
-    std::uint16_t port,
-    const std::vector<std::uint8_t>& bytes) {
-    assert(port != 0U);
-    assert(!bytes.empty());
+void send_raw_loopback_datagram(std::uint16_t port, const std::vector<std::uint8_t>& bytes) {
+  assert(port != 0U);
+  assert(!bytes.empty());
 
-    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    assert(socket_fd >= 0);
+  const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  assert(socket_fd >= 0);
 
-    sockaddr_in destination{};
-    destination.sin_family = AF_INET;
-    destination.sin_port = htons(port);
-    destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  sockaddr_in destination{};
+  destination.sin_family = AF_INET;
+  destination.sin_port = htons(port);
+  destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    const ssize_t sent =
-        ::sendto(
-            socket_fd,
-            bytes.data(),
-            bytes.size(),
-            0,
-            reinterpret_cast<const sockaddr*>(&destination),
-            static_cast<socklen_t>(sizeof(destination)));
-    assert(sent >= 0);
-    assert(static_cast<std::size_t>(sent) == bytes.size());
+  const ssize_t sent = ::sendto(socket_fd, bytes.data(), bytes.size(), 0,
+                                reinterpret_cast<const sockaddr*>(&destination),
+                                static_cast<socklen_t>(sizeof(destination)));
+  assert(sent >= 0);
+  assert(static_cast<std::size_t>(sent) == bytes.size());
 
-    const int close_result = ::close(socket_fd);
-    assert(close_result == 0);
+  const int close_result = ::close(socket_fd);
+  assert(close_result == 0);
 }
 
 /*
@@ -204,8 +168,8 @@ void send_raw_loopback_datagram(
  * 不一致状态。
  */
 struct SendProbeSnapshot final {
-    std::size_t _calls{0};
-    std::optional<Wire::UdpPublishResult> _last_result;
+  std::size_t _calls{0};
+  std::optional<Wire::UdpPublishResult> _last_result;
 };
 
 /*
@@ -215,30 +179,30 @@ struct SendProbeSnapshot final {
  * UdpPublisher::send() 成功、编码失败或系统发送失败的具体结果。
  */
 class SendProbe final {
-public:
-    SendProbe() = default;
-    ~SendProbe() = default;
+ public:
+  SendProbe() = default;
+  ~SendProbe() = default;
 
-    SendProbe(const SendProbe&) = delete;
-    SendProbe& operator=(const SendProbe&) = delete;
-    SendProbe(SendProbe&&) = delete;
-    SendProbe& operator=(SendProbe&&) = delete;
+  SendProbe(const SendProbe&) = delete;
+  SendProbe& operator=(const SendProbe&) = delete;
+  SendProbe(SendProbe&&) = delete;
+  SendProbe& operator=(SendProbe&&) = delete;
 
-    void record(Wire::UdpPublishResult result) {
-        std::lock_guard<std::mutex> lock(_mutex);
-        ++_calls;
-        _last_result = std::move(result);
-    }
+  void record(Wire::UdpPublishResult result) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    ++_calls;
+    _last_result = std::move(result);
+  }
 
-    [[nodiscard]] SendProbeSnapshot snapshot() const {
-        std::lock_guard<std::mutex> lock(_mutex);
-        return SendProbeSnapshot{_calls, _last_result};
-    }
+  [[nodiscard]] SendProbeSnapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return SendProbeSnapshot{_calls, _last_result};
+  }
 
-private:
-    mutable std::mutex _mutex;
-    std::size_t _calls{0};
-    std::optional<Wire::UdpPublishResult> _last_result;
+ private:
+  mutable std::mutex _mutex;
+  std::size_t _calls{0};
+  std::optional<Wire::UdpPublishResult> _last_result;
 };
 
 using SharedSendProbe = std::shared_ptr<SendProbe>;
@@ -255,58 +219,45 @@ using SharedSendProbe = std::shared_ptr<SendProbe>;
  * probe 为空时只发送；非空时额外保存发送结果。注册失败或 UDP Publisher
  * 初始化失败时返回空 shared_ptr。
  */
-SharedUdpPublisher install_udp_publisher(
-    Engine& engine,
-    Wire::UdpPublisherConfig config,
-    SharedSendProbe probe = {}) {
-    SharedUdpPublisher publisher =
-        std::make_shared<Wire::UdpPublisher>(
-            std::move(config));
+SharedUdpPublisher install_udp_publisher(Engine& engine, Wire::UdpPublisherConfig config,
+                                         SharedSendProbe probe = {}) {
+  SharedUdpPublisher publisher = std::make_shared<Wire::UdpPublisher>(std::move(config));
 
-    if (!publisher->ready()) {
-        return {};
+  if (!publisher->ready()) {
+    return {};
+  }
+
+  Engine::MonitorPublisher callback = [publisher, probe](MonData::StoredRecord record) {
+    Wire::UdpPublishResult result = publisher->send(record);
+
+    if (probe) {
+      probe->record(std::move(result));
     }
+  };
 
-    Engine::MonitorPublisher callback =
-        [publisher, probe](MonData::StoredRecord record) {
-            Wire::UdpPublishResult result =
-                publisher->send(record);
+  const bool registered = engine.set_publisher(std::move(callback));
 
-            if (probe) {
-                probe->record(std::move(result));
-            }
-        };
+  if (!registered) {
+    return {};
+  }
 
-    const bool registered =
-        engine.set_publisher(std::move(callback));
-
-    if (!registered) {
-        return {};
-    }
-
-    return publisher;
+  return publisher;
 }
 
-const MonData::NumericValue& numeric_value(
-    const MonData::StoredRecord& record) {
-    return std::get<MonData::NumericValue>(
-        record._data._value);
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  return std::get<MonData::NumericValue>(record._data._value);
 }
 
-const std::string& string_value(
-    const MonData::StoredRecord& record) {
-    return std::get<std::string>(record._data._value);
+const std::string& string_value(const MonData::StoredRecord& record) {
+  return std::get<std::string>(record._data._value);
 }
 
-const MonData::NumericValue& decoded_numeric_value(
-    const Wire::DecodedRecord& record) {
-    return std::get<MonData::NumericValue>(
-        record._data._value);
+const MonData::NumericValue& decoded_numeric_value(const Wire::DecodedRecord& record) {
+  return std::get<MonData::NumericValue>(record._data._value);
 }
 
-const std::string& decoded_string_value(
-    const Wire::DecodedRecord& record) {
-    return std::get<std::string>(record._data._value);
+const std::string& decoded_string_value(const Wire::DecodedRecord& record) {
+  return std::get<std::string>(record._data._value);
 }
 
 /*
@@ -323,32 +274,25 @@ const std::string& decoded_string_value(
  * 4. Engine 析构后 weak_ptr 过期。
  */
 void test_engine_callback_owns_udp_publisher_lifetime() {
-    std::weak_ptr<Wire::UdpPublisher> weak_publisher;
+  std::weak_ptr<Wire::UdpPublisher> weak_publisher;
 
-    {
-        Engine engine(MonConfig{
-            "m6-stage9-lifetime",
-            9000U,
-            1U});
-        const ENGINESTATE init_result = engine.init();
-        assert(init_result == ENGINESTATE::SUCCESSFUL);
+  {
+    Engine engine(MonConfig{"m6-stage9-lifetime", 9000U, 1U});
+    const ENGINESTATE init_result = engine.init();
+    assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-        SharedUdpPublisher publisher =
-            install_udp_publisher(
-                engine,
-                Wire::UdpPublisherConfig{
-                    {"127.0.0.1", 9100U},
-                    Wire::WireVersion::V1});
-        assert(publisher != nullptr);
+    SharedUdpPublisher publisher = install_udp_publisher(
+        engine, Wire::UdpPublisherConfig{{"127.0.0.1", 9100U}, Wire::WireVersion::V1});
+    assert(publisher != nullptr);
 
-        weak_publisher = publisher;
-        assert(publisher.use_count() >= 2L);
+    weak_publisher = publisher;
+    assert(publisher.use_count() >= 2L);
 
-        publisher.reset();
-        assert(!weak_publisher.expired());
-    }
+    publisher.reset();
+    assert(!weak_publisher.expired());
+  }
 
-    assert(weak_publisher.expired());
+  assert(weak_publisher.expired());
 }
 
 /*
@@ -365,19 +309,15 @@ void test_engine_callback_owns_udp_publisher_lifetime() {
  * 4. 确认不存在第二个数据报。
  */
 void test_loopback_receiver_reads_one_complete_datagram() {
-    LoopbackUdpReceiver receiver;
-    assert(!receiver.has_datagram(20));
+  LoopbackUdpReceiver receiver;
+  assert(!receiver.has_datagram(20));
 
-    const std::vector<std::uint8_t> expected{
-        0x02U,
-        0xaaU,
-        0x00U,
-        0xffU};
-    send_raw_loopback_datagram(receiver.port(), expected);
+  const std::vector<std::uint8_t> expected{0x02U, 0xaaU, 0x00U, 0xffU};
+  send_raw_loopback_datagram(receiver.port(), expected);
 
-    const std::vector<std::uint8_t> received = receiver.receive();
-    assert(received == expected);
-    assert(!receiver.has_datagram(50));
+  const std::vector<std::uint8_t> received = receiver.receive();
+  assert(received == expected);
+  assert(!receiver.has_datagram(50));
 }
 
 /*
@@ -388,37 +328,29 @@ void test_loopback_receiver_reads_one_complete_datagram() {
  * 结果被失败结果替换。
  */
 void test_send_probe_records_latest_result() {
-    SendProbe probe;
+  SendProbe probe;
 
-    const SendProbeSnapshot initial = probe.snapshot();
-    assert(initial._calls == 0U);
-    assert(!initial._last_result.has_value());
+  const SendProbeSnapshot initial = probe.snapshot();
+  assert(initial._calls == 0U);
+  assert(!initial._last_result.has_value());
 
-    probe.record(Wire::UdpPublishResult{
-        Wire::UdpPublishStatus::SUCCESS,
-        Wire::WireStatus::SUCCESS,
-        Wire::V1_NUMERIC_DATAGRAM_SIZE,
-        0});
+  probe.record(Wire::UdpPublishResult{Wire::UdpPublishStatus::SUCCESS, Wire::WireStatus::SUCCESS,
+                                      Wire::V1_NUMERIC_DATAGRAM_SIZE, 0});
 
-    const SendProbeSnapshot after_success = probe.snapshot();
-    assert(after_success._calls == 1U);
-    assert(after_success._last_result.has_value());
-    assert(after_success._last_result->success());
-    assert(after_success._last_result->_bytes_sent ==
-           Wire::V1_NUMERIC_DATAGRAM_SIZE);
+  const SendProbeSnapshot after_success = probe.snapshot();
+  assert(after_success._calls == 1U);
+  assert(after_success._last_result.has_value());
+  assert(after_success._last_result->success());
+  assert(after_success._last_result->_bytes_sent == Wire::V1_NUMERIC_DATAGRAM_SIZE);
 
-    probe.record(Wire::UdpPublishResult{
-        Wire::UdpPublishStatus::SEND_ERROR,
-        Wire::WireStatus::SUCCESS,
-        0U,
-        13});
+  probe.record(Wire::UdpPublishResult{Wire::UdpPublishStatus::SEND_ERROR, Wire::WireStatus::SUCCESS,
+                                      0U, 13});
 
-    const SendProbeSnapshot after_failure = probe.snapshot();
-    assert(after_failure._calls == 2U);
-    assert(after_failure._last_result.has_value());
-    assert(after_failure._last_result->_status ==
-           Wire::UdpPublishStatus::SEND_ERROR);
-    assert(after_failure._last_result->_system_error == 13);
+  const SendProbeSnapshot after_failure = probe.snapshot();
+  assert(after_failure._calls == 2U);
+  assert(after_failure._last_result.has_value());
+  assert(after_failure._last_result->_status == Wire::UdpPublishStatus::SEND_ERROR);
+  assert(after_failure._last_result->_system_error == 13);
 }
 
 /*
@@ -435,59 +367,52 @@ void test_send_probe_records_latest_result() {
  * 4. 查询 Store，确认保存最新值和 description。
  */
 void test_v1_numeric_dedup_only_sends_changes() {
-    LoopbackUdpReceiver receiver;
-    Engine engine(MonConfig{"m6-stage9-v1-dedup", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  LoopbackUdpReceiver receiver;
+  Engine engine(MonConfig{"m6-stage9-v1-dedup", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    const SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"127.0.0.1", receiver.port()},
-                Wire::WireVersion::V1},
-            probe);
-    assert(publisher != nullptr);
+  auto probe = std::make_shared<SendProbe>();
+  const SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"127.0.0.1", receiver.port()}, Wire::WireVersion::V1},
+      probe);
+  assert(publisher != nullptr);
 
-    const MonData::MonitorKey key{1U, 2U, 3U, 4U};
+  const MonData::MonitorKey key{1U, 2U, 3U, 4U};
 
-    const MonData::UpdateResult inserted =
-        engine.report_count(key, 10U, "inserted");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  const MonData::UpdateResult inserted = engine.report_count(key, 10U, "inserted");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-    const std::vector<std::uint8_t> inserted_datagram = receiver.receive();
-    const Wire::DecodeResult inserted_decoded =
-        Wire::decode(inserted_datagram.data(), inserted_datagram.size());
-    assert(inserted_decoded._status == Wire::WireStatus::SUCCESS);
-    assert(inserted_decoded._record.has_value());
-    assert(inserted_decoded._record->_version == Wire::WireVersion::V1);
-    assert(decoded_numeric_value(*inserted_decoded._record)._value == 10U);
+  const std::vector<std::uint8_t> inserted_datagram = receiver.receive();
+  const Wire::DecodeResult inserted_decoded =
+      Wire::decode(inserted_datagram.data(), inserted_datagram.size());
+  assert(inserted_decoded._status == Wire::WireStatus::SUCCESS);
+  assert(inserted_decoded._record.has_value());
+  assert(inserted_decoded._record->_version == Wire::WireVersion::V1);
+  assert(decoded_numeric_value(*inserted_decoded._record)._value == 10U);
 
-    const MonData::UpdateResult unchanged =
-        engine.report_count(key, 10U, "metadata-only-change");
-    assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
-    assert(probe->snapshot()._calls == 1U);
-    assert(!receiver.has_datagram(100));
+  const MonData::UpdateResult unchanged = engine.report_count(key, 10U, "metadata-only-change");
+  assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
+  assert(probe->snapshot()._calls == 1U);
+  assert(!receiver.has_datagram(100));
 
-    const MonData::UpdateResult updated =
-        engine.report_count(key, 20U, "updated");
-    assert(updated._status == MonData::UpdateStatus::UPDATED);
+  const MonData::UpdateResult updated = engine.report_count(key, 20U, "updated");
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
 
-    const std::vector<std::uint8_t> updated_datagram = receiver.receive();
-    const Wire::DecodeResult updated_decoded =
-        Wire::decode(updated_datagram.data(), updated_datagram.size());
-    assert(updated_decoded._status == Wire::WireStatus::SUCCESS);
-    assert(updated_decoded._record.has_value());
-    assert(updated_decoded._record->_version == Wire::WireVersion::V1);
-    assert(decoded_numeric_value(*updated_decoded._record)._value == 20U);
-    assert(probe->snapshot()._calls == 2U);
-    assert(!receiver.has_datagram(50));
+  const std::vector<std::uint8_t> updated_datagram = receiver.receive();
+  const Wire::DecodeResult updated_decoded =
+      Wire::decode(updated_datagram.data(), updated_datagram.size());
+  assert(updated_decoded._status == Wire::WireStatus::SUCCESS);
+  assert(updated_decoded._record.has_value());
+  assert(updated_decoded._record->_version == Wire::WireVersion::V1);
+  assert(decoded_numeric_value(*updated_decoded._record)._value == 20U);
+  assert(probe->snapshot()._calls == 2U);
+  assert(!receiver.has_datagram(50));
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 20U);
-    assert(stored->_data._description == "updated");
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 20U);
+  assert(stored->_data._description == "updated");
 }
 
 /*
@@ -503,52 +428,44 @@ void test_v1_numeric_dedup_only_sends_changes() {
  * 3. 改为 "running"，断言 UPDATED 并解码完整 V2 元数据。
  */
 void test_v2_string_dedup_only_sends_changes() {
-    LoopbackUdpReceiver receiver;
-    Engine engine(MonConfig{"m6-stage9-v2-dedup", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  LoopbackUdpReceiver receiver;
+  Engine engine(MonConfig{"m6-stage9-v2-dedup", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    const SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"127.0.0.1", receiver.port()},
-                Wire::WireVersion::V2},
-            probe);
-    assert(publisher != nullptr);
+  auto probe = std::make_shared<SendProbe>();
+  const SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"127.0.0.1", receiver.port()}, Wire::WireVersion::V2},
+      probe);
+  assert(publisher != nullptr);
 
-    const MonData::MonitorKey key{5U, 6U, 7U, 8U};
+  const MonData::MonitorKey key{5U, 6U, 7U, 8U};
 
-    const MonData::UpdateResult inserted =
-        engine.report_string(key, "ready", "inserted");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    const std::vector<std::uint8_t> inserted_datagram = receiver.receive();
-    assert(inserted_datagram.front() ==
-           static_cast<std::uint8_t>(Wire::WireVersion::V2));
+  const MonData::UpdateResult inserted = engine.report_string(key, "ready", "inserted");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  const std::vector<std::uint8_t> inserted_datagram = receiver.receive();
+  assert(inserted_datagram.front() == static_cast<std::uint8_t>(Wire::WireVersion::V2));
 
-    const MonData::UpdateResult unchanged =
-        engine.report_string(key, "ready", "metadata-only-change");
-    assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
-    assert(probe->snapshot()._calls == 1U);
-    assert(!receiver.has_datagram(100));
+  const MonData::UpdateResult unchanged =
+      engine.report_string(key, "ready", "metadata-only-change");
+  assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
+  assert(probe->snapshot()._calls == 1U);
+  assert(!receiver.has_datagram(100));
 
-    const MonData::UpdateResult updated =
-        engine.report_string(key, "running", "updated");
-    assert(updated._status == MonData::UpdateStatus::UPDATED);
+  const MonData::UpdateResult updated = engine.report_string(key, "running", "updated");
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
 
-    const std::vector<std::uint8_t> updated_datagram = receiver.receive();
-    const Wire::DecodeResult decoded =
-        Wire::decode(updated_datagram.data(), updated_datagram.size());
-    assert(decoded._status == Wire::WireStatus::SUCCESS);
-    assert(decoded._record.has_value());
-    assert(decoded._record->_version == Wire::WireVersion::V2);
-    assert(decoded._record->_data._key == key);
-    assert(decoded._record->_data._description == "updated");
-    assert(decoded_string_value(*decoded._record) == "running");
-    assert(decoded._record->_changed_at.has_value());
-    assert(probe->snapshot()._calls == 2U);
-    assert(!receiver.has_datagram(50));
+  const std::vector<std::uint8_t> updated_datagram = receiver.receive();
+  const Wire::DecodeResult decoded = Wire::decode(updated_datagram.data(), updated_datagram.size());
+  assert(decoded._status == Wire::WireStatus::SUCCESS);
+  assert(decoded._record.has_value());
+  assert(decoded._record->_version == Wire::WireVersion::V2);
+  assert(decoded._record->_data._key == key);
+  assert(decoded._record->_data._description == "updated");
+  assert(decoded_string_value(*decoded._record) == "running");
+  assert(decoded._record->_changed_at.has_value());
+  assert(probe->snapshot()._calls == 2U);
+  assert(!receiver.has_datagram(50));
 }
 
 /*
@@ -566,42 +483,35 @@ void test_v2_string_dedup_only_sends_changes() {
  * 5. Store 仍保存完整 64 字节字符串。
  */
 void test_v1_long_string_is_stored_but_not_sent() {
-    LoopbackUdpReceiver receiver;
-    Engine engine(MonConfig{"m6-stage9-v1-long", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  LoopbackUdpReceiver receiver;
+  Engine engine(MonConfig{"m6-stage9-v1-long", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    const SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"127.0.0.1", receiver.port()},
-                Wire::WireVersion::V1},
-            probe);
-    assert(publisher != nullptr);
+  auto probe = std::make_shared<SendProbe>();
+  const SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"127.0.0.1", receiver.port()}, Wire::WireVersion::V1},
+      probe);
+  assert(publisher != nullptr);
 
-    const MonData::MonitorKey key{9U, 10U, 11U, 12U};
-    const std::string long_value(64U, 'X');
+  const MonData::MonitorKey key{9U, 10U, 11U, 12U};
+  const std::string long_value(64U, 'X');
 
-    const MonData::UpdateResult inserted =
-        engine.report_string(key, long_value, "v1-too-long");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  const MonData::UpdateResult inserted = engine.report_string(key, long_value, "v1-too-long");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-    const SendProbeSnapshot snapshot = probe->snapshot();
-    assert(snapshot._calls == 1U);
-    assert(snapshot._last_result.has_value());
-    assert(snapshot._last_result->_status ==
-           Wire::UdpPublishStatus::ENCODE_ERROR);
-    assert(snapshot._last_result->_wire_status ==
-           Wire::WireStatus::STRING_TOO_LONG);
-    assert(snapshot._last_result->_bytes_sent == 0U);
-    assert(!receiver.has_datagram(100));
+  const SendProbeSnapshot snapshot = probe->snapshot();
+  assert(snapshot._calls == 1U);
+  assert(snapshot._last_result.has_value());
+  assert(snapshot._last_result->_status == Wire::UdpPublishStatus::ENCODE_ERROR);
+  assert(snapshot._last_result->_wire_status == Wire::WireStatus::STRING_TOO_LONG);
+  assert(snapshot._last_result->_bytes_sent == 0U);
+  assert(!receiver.has_datagram(100));
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(string_value(*stored) == long_value);
-    assert(string_value(*stored).size() == 64U);
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(string_value(*stored) == long_value);
+  assert(string_value(*stored).size() == 64U);
 }
 
 /*
@@ -616,43 +526,37 @@ void test_v1_long_string_is_stored_but_not_sent() {
  * 3. 解码实际 UDP 数据报并比较完整字符串、description 和时间戳。
  */
 void test_same_long_string_is_sent_by_v2() {
-    LoopbackUdpReceiver receiver;
-    Engine engine(MonConfig{"m6-stage9-v2-long", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  LoopbackUdpReceiver receiver;
+  Engine engine(MonConfig{"m6-stage9-v2-long", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    const SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"127.0.0.1", receiver.port()},
-                Wire::WireVersion::V2},
-            probe);
-    assert(publisher != nullptr);
+  auto probe = std::make_shared<SendProbe>();
+  const SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"127.0.0.1", receiver.port()}, Wire::WireVersion::V2},
+      probe);
+  assert(publisher != nullptr);
 
-    const MonData::MonitorKey key{13U, 14U, 15U, 16U};
-    const std::string long_value(64U, 'X');
+  const MonData::MonitorKey key{13U, 14U, 15U, 16U};
+  const std::string long_value(64U, 'X');
 
-    const MonData::UpdateResult inserted =
-        engine.report_string(key, long_value, "v2-long");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  const MonData::UpdateResult inserted = engine.report_string(key, long_value, "v2-long");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-    const SendProbeSnapshot snapshot = probe->snapshot();
-    assert(snapshot._calls == 1U);
-    assert(snapshot._last_result.has_value());
-    assert(snapshot._last_result->success());
+  const SendProbeSnapshot snapshot = probe->snapshot();
+  assert(snapshot._calls == 1U);
+  assert(snapshot._last_result.has_value());
+  assert(snapshot._last_result->success());
 
-    const std::vector<std::uint8_t> datagram = receiver.receive();
-    const Wire::DecodeResult decoded =
-        Wire::decode(datagram.data(), datagram.size());
-    assert(decoded._status == Wire::WireStatus::SUCCESS);
-    assert(decoded._record.has_value());
-    assert(decoded._record->_version == Wire::WireVersion::V2);
-    assert(decoded._record->_data._description == "v2-long");
-    assert(decoded_string_value(*decoded._record) == long_value);
-    assert(decoded._record->_changed_at.has_value());
-    assert(!receiver.has_datagram(50));
+  const std::vector<std::uint8_t> datagram = receiver.receive();
+  const Wire::DecodeResult decoded = Wire::decode(datagram.data(), datagram.size());
+  assert(decoded._status == Wire::WireStatus::SUCCESS);
+  assert(decoded._record.has_value());
+  assert(decoded._record->_version == Wire::WireVersion::V2);
+  assert(decoded._record->_data._description == "v2-long");
+  assert(decoded_string_value(*decoded._record) == long_value);
+  assert(decoded._record->_changed_at.has_value());
+  assert(!receiver.has_datagram(50));
 }
 
 /*
@@ -669,39 +573,32 @@ void test_same_long_string_is_sent_by_v2() {
  * 4. Engine 仍返回 INSERTED，Store 仍能查到完整记录。
  */
 void test_network_send_failure_does_not_rollback_store() {
-    Engine engine(MonConfig{"m6-stage9-send-failure", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  Engine engine(MonConfig{"m6-stage9-send-failure", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    const SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"255.255.255.255", 9100U},
-                Wire::WireVersion::V2},
-            probe);
-    assert(publisher != nullptr);
-    assert(publisher->ready());
+  auto probe = std::make_shared<SendProbe>();
+  const SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"255.255.255.255", 9100U}, Wire::WireVersion::V2}, probe);
+  assert(publisher != nullptr);
+  assert(publisher->ready());
 
-    const MonData::MonitorKey key{17U, 18U, 19U, 20U};
-    const MonData::UpdateResult inserted =
-        engine.report_count(key, 100U, "network-failure");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    assert(inserted._record.has_value());
+  const MonData::MonitorKey key{17U, 18U, 19U, 20U};
+  const MonData::UpdateResult inserted = engine.report_count(key, 100U, "network-failure");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  assert(inserted._record.has_value());
 
-    const SendProbeSnapshot snapshot = probe->snapshot();
-    assert(snapshot._calls == 1U);
-    assert(snapshot._last_result.has_value());
-    assert(snapshot._last_result->_status ==
-           Wire::UdpPublishStatus::SEND_ERROR);
-    assert(snapshot._last_result->_bytes_sent == 0U);
-    assert(snapshot._last_result->_system_error != 0);
+  const SendProbeSnapshot snapshot = probe->snapshot();
+  assert(snapshot._calls == 1U);
+  assert(snapshot._last_result.has_value());
+  assert(snapshot._last_result->_status == Wire::UdpPublishStatus::SEND_ERROR);
+  assert(snapshot._last_result->_bytes_sent == 0U);
+  assert(snapshot._last_result->_system_error != 0);
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 100U);
-    assert(stored->_data._description == "network-failure");
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 100U);
+  assert(stored->_data._description == "network-failure");
 }
 
 /*
@@ -719,71 +616,65 @@ void test_network_send_failure_does_not_rollback_store() {
  * 5. 查询 Store，确认保存注销后的新值。
  */
 void test_unregister_stops_future_udp_delivery() {
-    LoopbackUdpReceiver receiver;
-    Engine engine(MonConfig{"m6-stage9-unregister", 9000U, 1U});
-    const ENGINESTATE init_result = engine.init();
-    assert(init_result == ENGINESTATE::SUCCESSFUL);
+  LoopbackUdpReceiver receiver;
+  Engine engine(MonConfig{"m6-stage9-unregister", 9000U, 1U});
+  const ENGINESTATE init_result = engine.init();
+  assert(init_result == ENGINESTATE::SUCCESSFUL);
 
-    auto probe = std::make_shared<SendProbe>();
-    SharedUdpPublisher publisher =
-        install_udp_publisher(
-            engine,
-            Wire::UdpPublisherConfig{
-                {"127.0.0.1", receiver.port()},
-                Wire::WireVersion::V2},
-            probe);
-    assert(publisher != nullptr);
+  auto probe = std::make_shared<SendProbe>();
+  SharedUdpPublisher publisher = install_udp_publisher(
+      engine, Wire::UdpPublisherConfig{{"127.0.0.1", receiver.port()}, Wire::WireVersion::V2},
+      probe);
+  assert(publisher != nullptr);
 
-    std::weak_ptr<Wire::UdpPublisher> weak_publisher = publisher;
-    const MonData::MonitorKey key{21U, 22U, 23U, 24U};
+  std::weak_ptr<Wire::UdpPublisher> weak_publisher = publisher;
+  const MonData::MonitorKey key{21U, 22U, 23U, 24U};
 
-    const MonData::UpdateResult inserted =
-        engine.report_count(key, 1U, "before-unregister");
-    assert(inserted._status == MonData::UpdateStatus::INSERTED);
-    (void)receiver.receive();
-    assert(probe->snapshot()._calls == 1U);
+  const MonData::UpdateResult inserted = engine.report_count(key, 1U, "before-unregister");
+  assert(inserted._status == MonData::UpdateStatus::INSERTED);
+  (void)receiver.receive();
+  assert(probe->snapshot()._calls == 1U);
 
-    publisher.reset();
-    assert(!weak_publisher.expired());
+  publisher.reset();
+  assert(!weak_publisher.expired());
 
-    const bool unregistered = engine.set_publisher({});
-    assert(unregistered);
-    assert(weak_publisher.expired());
+  const bool unregistered = engine.set_publisher({});
+  assert(unregistered);
+  assert(weak_publisher.expired());
 
-    const MonData::UpdateResult updated =
-        engine.report_count(key, 2U, "after-unregister");
-    assert(updated._status == MonData::UpdateStatus::UPDATED);
-    assert(probe->snapshot()._calls == 1U);
-    assert(!receiver.has_datagram(100));
+  const MonData::UpdateResult updated = engine.report_count(key, 2U, "after-unregister");
+  assert(updated._status == MonData::UpdateStatus::UPDATED);
+  assert(probe->snapshot()._calls == 1U);
+  assert(!receiver.has_datagram(100));
 
-    const auto stored = engine.find_data(key);
-    assert(stored.has_value());
-    assert(numeric_value(*stored)._value == 2U);
-    assert(stored->_data._description == "after-unregister");
+  const auto stored = engine.find_data(key);
+  assert(stored.has_value());
+  assert(numeric_value(*stored)._value == 2U);
+  assert(stored->_data._description == "after-unregister");
 }
 
-} // namespace
+}  // namespace
 
 int main() {
-    test_engine_callback_owns_udp_publisher_lifetime();
-    test_loopback_receiver_reads_one_complete_datagram();
-    test_send_probe_records_latest_result();
-    test_v1_numeric_dedup_only_sends_changes();
-    test_v2_string_dedup_only_sends_changes();
-    test_v1_long_string_is_stored_but_not_sent();
-    test_same_long_string_is_sent_by_v2();
-    test_network_send_failure_does_not_rollback_store();
-    test_unregister_stops_future_udp_delivery();
+  test_engine_callback_owns_udp_publisher_lifetime();
+  test_loopback_receiver_reads_one_complete_datagram();
+  test_send_probe_records_latest_result();
+  test_v1_numeric_dedup_only_sends_changes();
+  test_v2_string_dedup_only_sends_changes();
+  test_v1_long_string_is_stored_but_not_sent();
+  test_same_long_string_is_sent_by_v2();
+  test_network_send_failure_does_not_rollback_store();
+  test_unregister_stops_future_udp_delivery();
 
-    std::cout << "M6_STAGE9_SEAM_CONTRACT=PASS\n";
-    std::cout << "M6_STAGE9_SHARED_LIFETIME=PASS\n";
-    std::cout << "M6_STAGE9_LOOPBACK_RECEIVER=PASS\n";
-    std::cout << "M6_STAGE9_SEND_PROBE=PASS\n";
-    std::cout << "M6_ENGINE_UDP_V1_DEDUP=PASS\n";
-    std::cout << "M6_ENGINE_UDP_V2_DEDUP=PASS\n";
-    std::cout << "M6_ENGINE_UDP_V1_LONG_STRING=PASS\n";
-    std::cout << "M6_ENGINE_UDP_V2_LONG_STRING=PASS\n";
-    std::cout << "M6_ENGINE_UDP_FAILURE_STORE_PRESERVED=PASS\n";
-    std::cout << "M6_ENGINE_UDP_UNREGISTER=PASS\n";
-    return 0;
+  std::cout << "M6_STAGE9_SEAM_CONTRACT=PASS\n";
+  std::cout << "M6_STAGE9_SHARED_LIFETIME=PASS\n";
+  std::cout << "M6_STAGE9_LOOPBACK_RECEIVER=PASS\n";
+  std::cout << "M6_STAGE9_SEND_PROBE=PASS\n";
+  std::cout << "M6_ENGINE_UDP_V1_DEDUP=PASS\n";
+  std::cout << "M6_ENGINE_UDP_V2_DEDUP=PASS\n";
+  std::cout << "M6_ENGINE_UDP_V1_LONG_STRING=PASS\n";
+  std::cout << "M6_ENGINE_UDP_V2_LONG_STRING=PASS\n";
+  std::cout << "M6_ENGINE_UDP_FAILURE_STORE_PRESERVED=PASS\n";
+  std::cout << "M6_ENGINE_UDP_UNREGISTER=PASS\n";
+  return 0;
 }

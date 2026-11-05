@@ -18,16 +18,16 @@ struct DbQueryResult {
 };
 
 struct DbExecuteResult {
-    bool success = false;
-    unsigned int error_code = 0;
-    std::uint64_t affected_rows = 0;
-    std::uint64_t insert_id = 0;
+  bool success = false;
+  unsigned int error_code = 0;
+  std::uint64_t affected_rows = 0;
+  std::uint64_t insert_id = 0;
 };
 
 enum class DbCommitStatus {
-    k_committed,
-    k_not_active,
-    k_outcome_unknown,
+  k_committed,
+  k_not_active,
+  k_outcome_unknown,
 };
 
 class DbTransaction;
@@ -58,8 +58,7 @@ class DbConnection {
   bool update_prepared(const std::string& sql, const std::vector<DbValue>& params = {});
 
   // 在关闭 statement 前保存错误码、自增 ID 和影响行数。
-  DbExecuteResult execute_prepared(const std::string& sql,
-                                  const std::vector<DbValue>& params = {});
+  DbExecuteResult execute_prepared(const std::string& sql, const std::vector<DbValue>& params = {});
 
   // 由持有连接的线程调用；不进行网络 IO，也不保证远端仍然存活。
   bool is_reusable() const noexcept {
@@ -93,22 +92,24 @@ class DbConnection {
 // 必须比引用的连接更早析构，且与连接在同一线程使用。
 // 事务内只使用事务表的 DML，不执行隐式提交的 DDL，也不混用原始事务 SQL。
 class DbTransaction {
-public:
-    explicit DbTransaction(DbConnection& connection) noexcept;
-    ~DbTransaction() noexcept;
+ public:
+  explicit DbTransaction(DbConnection& connection) noexcept;
+  ~DbTransaction() noexcept;
 
-    DbTransaction(const DbTransaction&) = delete;
-    DbTransaction& operator=(const DbTransaction&) = delete;
-    DbTransaction(DbTransaction&&) = delete;
-    DbTransaction& operator=(DbTransaction&&) = delete;
+  DbTransaction(const DbTransaction&) = delete;
+  DbTransaction& operator=(const DbTransaction&) = delete;
+  DbTransaction(DbTransaction&&) = delete;
+  DbTransaction& operator=(DbTransaction&&) = delete;
 
-    bool active() const noexcept { return active_; }
-    DbCommitStatus commit() noexcept;
-    bool rollback() noexcept;
+  bool active() const noexcept {
+    return active_;
+  }
+  DbCommitStatus commit() noexcept;
+  bool rollback() noexcept;
 
-private:
-    DbConnection& connection_;
-    bool active_ = false;
+ private:
+  DbConnection& connection_;
+  bool active_ = false;
 };
 }  // namespace TLSS::BASE
 

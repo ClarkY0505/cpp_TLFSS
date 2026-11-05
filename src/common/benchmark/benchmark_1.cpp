@@ -8,8 +8,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -21,8 +21,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
-#include "common/memory/internal/copy_executor.h"
 #include "common/memory/internal/copy_capability_policy.h"
+#include "common/memory/internal/copy_executor.h"
 #include "common/memory/internal/copy_partition.h"
 #include "common/memory/internal/copy_policy.h"
 #include "common/memory/internal/cpu_affinity.h"
@@ -49,10 +49,8 @@ class ShutdownOrderProbe {
       return;
     }
 
-    const bool started =
-        TLSS::MEMORY::INTERNAL::memory_runtime_destruction_started_for_test();
-    std::fprintf(stderr, "shutdown probe: runtime destruction started=%d\n",
-                 started ? 1 : 0);
+    const bool started = TLSS::MEMORY::INTERNAL::memory_runtime_destruction_started_for_test();
+    std::fprintf(stderr, "shutdown probe: runtime destruction started=%d\n", started ? 1 : 0);
     if (started) {
       std::abort();
     }
@@ -217,8 +215,7 @@ __attribute__((noinline)) void* tlss_auto_streaming_memcpy(void* dst, const void
                               TLSS::MEMORY::CopyHint::Streaming);
 }
 
-__attribute__((noinline)) void* tlss_direct_nt_memcpy(void* dst, const void* src,
-                                                      std::size_t n) {
+__attribute__((noinline)) void* tlss_direct_nt_memcpy(void* dst, const void* src, std::size_t n) {
   return TLSS::MEMORY::memcpy(dst, src, n, TLSS::MEMORY::CopyBackend::NonTemporal,
                               TLSS::MEMORY::CopyHint::Default);
 }
@@ -3388,7 +3385,9 @@ void run_thread_creation_benchmark(std::size_t thread_count) {
     workers.reserve(thread_count);
 
     for (std::size_t thread_index = 0; thread_index < thread_count; ++thread_index) {
-      workers.emplace_back([]() { asm volatile("" ::: "memory"); });
+      workers.emplace_back([]() {
+        asm volatile("" ::: "memory");
+      });
     }
 
     for (auto& worker : workers) {
@@ -3417,7 +3416,8 @@ void run_thread_creation_benchmark(std::size_t thread_count) {
 
 class PersistentWorker {
  public:
-  PersistentWorker() : worker_(&PersistentWorker::worker_loop, this) {}
+  PersistentWorker()
+      : worker_(&PersistentWorker::worker_loop, this) {}
 
   ~PersistentWorker() {
     {
@@ -3451,7 +3451,9 @@ class PersistentWorker {
   void wait() {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    done_condition_.wait(lock, [this]() { return task_done_; });
+    done_condition_.wait(lock, [this]() {
+      return task_done_;
+    });
   }
 
  private:
@@ -3459,7 +3461,9 @@ class PersistentWorker {
     while (true) {
       std::unique_lock<std::mutex> lock(mutex_);
 
-      condition_.wait(lock, [this]() { return task_pending_ || stopping_; });
+      condition_.wait(lock, [this]() {
+        return task_pending_ || stopping_;
+      });
 
       if (stopping_) {
         return;
@@ -3531,7 +3535,8 @@ void run_persistent_worker_benchmark() {
 
 class AtomicSpinWorker {
  public:
-  AtomicSpinWorker() : worker_(&AtomicSpinWorker::worker_loop, this) {}
+  AtomicSpinWorker()
+      : worker_(&AtomicSpinWorker::worker_loop, this) {}
 
   ~AtomicSpinWorker() {
     stopping_.store(true, std::memory_order_release);
@@ -3649,8 +3654,11 @@ void run_atomic_spin_worker_benchmark() {
 
 class HybridWorker {
  public:
-  HybridWorker() : worker_(&HybridWorker::worker_loop, this) {}
-  explicit HybridWorker(int cpu_id) : cpu_id_(cpu_id), worker_(&HybridWorker::worker_loop, this) {}
+  HybridWorker()
+      : worker_(&HybridWorker::worker_loop, this) {}
+  explicit HybridWorker(int cpu_id)
+      : cpu_id_(cpu_id)
+      , worker_(&HybridWorker::worker_loop, this) {}
 
   ~HybridWorker() {
     {
@@ -3932,7 +3940,8 @@ struct alignas(64) CopyTask {
 class MultiWorkerPool {
  public:
   MultiWorkerPool(std::size_t worker_count, const int* cpu_ids)
-      : worker_count_(worker_count), tasks_(worker_count_) {
+      : worker_count_(worker_count)
+      , tasks_(worker_count_) {
     workers_.reserve(worker_count_);
     tasks_.resize(worker_count_);
     for (std::size_t worker_index = 0; worker_index < worker_count_; ++worker_index) {
@@ -5621,8 +5630,8 @@ void run_copy_capability_policy_test() {
   hardware_without_ymm_state.osxsave = true;
   hardware_without_ymm_state.avx_usable = false;
   hardware_without_ymm_state.avx2_usable = false;
-  expect_plan({CopyStrategy::ParallelNt, 8}, hardware_without_ymm_state,
-              CopyStrategy::LibcMemcpy, 1);
+  expect_plan({CopyStrategy::ParallelNt, 8}, hardware_without_ymm_state, CopyStrategy::LibcMemcpy,
+              1);
 
   CpuCapabilities avx2{};
   avx2.avx_hardware = true;
@@ -5678,8 +5687,7 @@ void run_auto_capability_integration_test() {
     src[index] = static_cast<std::uint8_t>((index * 131U + 17U) & 0xffU);
   }
 
-  const CopyPlan fallback =
-      select_safe_auto_copy_plan(k_copy_size, CopyHint::Streaming, no_avx2);
+  const CopyPlan fallback = select_safe_auto_copy_plan(k_copy_size, CopyHint::Streaming, no_avx2);
   std::memset(dst, 0xA5, k_copy_size);
   if (execute_copy_plan(fallback, nullptr, dst, src, k_copy_size) != dst ||
       std::memcmp(dst, src, k_copy_size) != 0) {
@@ -5764,12 +5772,11 @@ void run_backend_plan_contract_test() {
   };
 
   const CpuCapabilities no_avx2{};
-  expect_plan(256 * 1024, CopyHint::Streaming, CopyBackend::Auto, no_avx2,
-              CopyStrategy::LibcMemcpy, 1);
+  expect_plan(256 * 1024, CopyHint::Streaming, CopyBackend::Auto, no_avx2, CopyStrategy::LibcMemcpy,
+              1);
   expect_unsupported(4096, CopyHint::Default, CopyBackend::Avx2, no_avx2);
   expect_unsupported(256 * 1024, CopyHint::Streaming, CopyBackend::NonTemporal, no_avx2);
-  expect_plan(4096, CopyHint::Default, CopyBackend::RepMovsb, no_avx2,
-              CopyStrategy::RepMovsb, 1);
+  expect_plan(4096, CopyHint::Default, CopyBackend::RepMovsb, no_avx2, CopyStrategy::RepMovsb, 1);
 
   CpuCapabilities os_disabled{};
   os_disabled.avx_hardware = true;
@@ -5785,14 +5792,12 @@ void run_backend_plan_contract_test() {
   avx2.avx_usable = true;
   avx2.avx2_usable = true;
   avx2.erms = true;
-  expect_plan(256 * 1024, CopyHint::Streaming, CopyBackend::Auto, avx2,
-              CopyStrategy::ParallelNt, 8);
-  expect_plan(4096, CopyHint::Default, CopyBackend::Avx2, avx2,
-              CopyStrategy::Avx2Cached, 1);
+  expect_plan(256 * 1024, CopyHint::Streaming, CopyBackend::Auto, avx2, CopyStrategy::ParallelNt,
+              8);
+  expect_plan(4096, CopyHint::Default, CopyBackend::Avx2, avx2, CopyStrategy::Avx2Cached, 1);
   expect_plan(256 * 1024, CopyHint::Streaming, CopyBackend::NonTemporal, avx2,
               CopyStrategy::DirectNt, 1);
-  expect_plan(4096, CopyHint::Default, CopyBackend::RepMovsb, avx2,
-              CopyStrategy::RepMovsb, 1);
+  expect_plan(4096, CopyHint::Default, CopyBackend::RepMovsb, avx2, CopyStrategy::RepMovsb, 1);
   expect_unsupported(4096, CopyHint::Default, static_cast<CopyBackend>(255), avx2);
 
   std::cout << "Backend plan contract test: PASS\n";
@@ -6253,8 +6258,7 @@ void run_restricted_runtime_performance_benchmark(int caller_cpu, std::size_t si
   constexpr std::size_t k_alignment = 4096;
 
   if (size_kib == 0 || size_kib > k_working_set / 1024 || caller_cpu < 0 ||
-      caller_cpu >= CPU_SETSIZE ||
-      (desired_worker_count != 4 && desired_worker_count != 8)) {
+      caller_cpu >= CPU_SETSIZE || (desired_worker_count != 4 && desired_worker_count != 8)) {
     throw std::invalid_argument("invalid caller CPU or copy size");
   }
   const std::size_t copy_size = size_kib * 1024ULL;
@@ -6308,8 +6312,7 @@ void run_restricted_runtime_performance_benchmark(int caller_cpu, std::size_t si
   for (std::size_t iteration = 0; iteration < iteration_count; ++iteration) {
     const std::size_t offset = iteration * copy_size;
     if (runtime.execute_parallel_copy(desired_worker_count, runtime_dst + offset, src + offset,
-                                      copy_size) !=
-        runtime_dst + offset) {
+                                      copy_size) != runtime_dst + offset) {
       throw std::runtime_error("runtime copy returned the wrong destination");
     }
   }
@@ -6331,13 +6334,12 @@ void run_restricted_runtime_performance_benchmark(int caller_cpu, std::size_t si
     throw std::runtime_error("direct NT result mismatch");
   }
 
-  const double runtime_seconds =
-      std::chrono::duration<double>(runtime_end - runtime_begin).count();
+  const double runtime_seconds = std::chrono::duration<double>(runtime_end - runtime_begin).count();
   const double direct_seconds = std::chrono::duration<double>(direct_end - direct_begin).count();
   constexpr double k_total_gib = 2.0;
   std::cout << "caller_cpu=" << caller_cpu << " desired_workers=" << desired_worker_count
-            << " available_workers=" << available_workers
-            << " size=" << size_kib << " KiB runtime=" << k_total_gib / runtime_seconds
+            << " available_workers=" << available_workers << " size=" << size_kib
+            << " KiB runtime=" << k_total_gib / runtime_seconds
             << " GiB/s direct_nt=" << k_total_gib / direct_seconds << " GiB/s\n";
 
   if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &original_cpu_set) != 0) {
@@ -6439,9 +6441,8 @@ void run_runtime_plan_lookup_overhead_benchmark() {
   const auto end = std::chrono::steady_clock::now();
 
   const double elapsed_ns = std::chrono::duration<double, std::nano>(end - begin).count();
-  std::cout << "runtime plan lookup: ns/call="
-            << elapsed_ns / static_cast<double>(k_iterations) << " result_sum=" << result_sum
-            << '\n';
+  std::cout << "runtime plan lookup: ns/call=" << elapsed_ns / static_cast<double>(k_iterations)
+            << " result_sum=" << result_sum << '\n';
 
   if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &original_cpu_set) != 0) {
     throw std::runtime_error("failed to restore caller affinity");
@@ -6493,9 +6494,8 @@ void run_runtime_fast_path_overhead_benchmark() {
   const auto end = std::chrono::steady_clock::now();
 
   const double elapsed_ns = std::chrono::duration<double, std::nano>(end - begin).count();
-  std::cout << "runtime fast path: ns/call="
-            << elapsed_ns / static_cast<double>(k_iterations) << " result_sum=" << result_sum
-            << '\n';
+  std::cout << "runtime fast path: ns/call=" << elapsed_ns / static_cast<double>(k_iterations)
+            << " result_sum=" << result_sum << '\n';
 
   if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &original_cpu_set) != 0) {
     throw std::runtime_error("failed to restore caller affinity");
@@ -7316,8 +7316,7 @@ void run_lazy_runtime_test() {
   }
 
   const std::size_t before = memory_runtime_construction_count_for_test();
-  void* result = TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::RepMovsb,
-                                      CopyHint::Default);
+  void* result = TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::RepMovsb, CopyHint::Default);
   const std::size_t after = memory_runtime_construction_count_for_test();
   if (result != dst || std::memcmp(dst, src, k_size) != 0) {
     throw std::runtime_error("lazy runtime copy result mismatch");
@@ -7355,16 +7354,16 @@ void run_lazy_runtime_parallel_test() {
     throw std::runtime_error("runtime was constructed before the first parallel copy");
   }
 
-  void* first_result = TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::Auto,
-                                             CopyHint::Streaming);
+  void* first_result =
+      TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::Auto, CopyHint::Streaming);
   const std::size_t after_first = memory_runtime_construction_count_for_test();
   if (first_result != dst || std::memcmp(dst, src, k_size) != 0) {
     throw std::runtime_error("first parallel copy mismatch");
   }
 
   std::memset(dst, 0, k_size);
-  void* second_result = TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::Auto,
-                                              CopyHint::Streaming);
+  void* second_result =
+      TLSS::MEMORY::memcpy(dst, src, k_size, CopyBackend::Auto, CopyHint::Streaming);
   const std::size_t after_second = memory_runtime_construction_count_for_test();
   if (second_result != dst || std::memcmp(dst, src, k_size) != 0) {
     throw std::runtime_error("second parallel copy mismatch");
@@ -7399,10 +7398,10 @@ void run_concurrent_first_use_test() {
     throw std::runtime_error("concurrent first-use test requires a ParallelNt plan");
   }
 
-  std::vector<std::vector<std::uint8_t>> sources(
-      k_thread_count, std::vector<std::uint8_t>(k_copy_size));
-  std::vector<std::vector<std::uint8_t>> destinations(
-      k_thread_count, std::vector<std::uint8_t>(k_copy_size));
+  std::vector<std::vector<std::uint8_t>> sources(k_thread_count,
+                                                 std::vector<std::uint8_t>(k_copy_size));
+  std::vector<std::vector<std::uint8_t>> destinations(k_thread_count,
+                                                      std::vector<std::uint8_t>(k_copy_size));
   for (std::size_t thread_index = 0; thread_index < k_thread_count; ++thread_index) {
     for (std::size_t index = 0; index < k_copy_size; ++index) {
       sources[thread_index][index] =
@@ -7433,7 +7432,7 @@ void run_concurrent_first_use_test() {
           auto& dst = destinations[thread_index];
           const auto& src = sources[thread_index];
           void* result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_copy_size,
-                                               CopyBackend::Auto, CopyHint::Streaming);
+                                              CopyBackend::Auto, CopyHint::Streaming);
           if (result != dst.data() || std::memcmp(dst.data(), src.data(), k_copy_size) != 0) {
             failure_count.fetch_add(1, std::memory_order_relaxed);
           }
@@ -7492,10 +7491,10 @@ void run_concurrent_construction_failure_test() {
     throw std::runtime_error("concurrent failure test requires a ParallelNt plan");
   }
 
-  std::vector<std::vector<std::uint8_t>> sources(
-      k_thread_count, std::vector<std::uint8_t>(k_copy_size));
-  std::vector<std::vector<std::uint8_t>> destinations(
-      k_thread_count, std::vector<std::uint8_t>(k_copy_size));
+  std::vector<std::vector<std::uint8_t>> sources(k_thread_count,
+                                                 std::vector<std::uint8_t>(k_copy_size));
+  std::vector<std::vector<std::uint8_t>> destinations(k_thread_count,
+                                                      std::vector<std::uint8_t>(k_copy_size));
   for (std::size_t thread_index = 0; thread_index < k_thread_count; ++thread_index) {
     for (std::size_t index = 0; index < k_copy_size; ++index) {
       sources[thread_index][index] =
@@ -7528,7 +7527,7 @@ void run_concurrent_construction_failure_test() {
           auto& dst = destinations[thread_index];
           const auto& src = sources[thread_index];
           void* result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_copy_size,
-                                               CopyBackend::Auto, CopyHint::Streaming);
+                                              CopyBackend::Auto, CopyHint::Streaming);
           if (result != dst.data() || std::memcmp(dst.data(), src.data(), k_copy_size) != 0) {
             failure_count.fetch_add(1, std::memory_order_relaxed);
           }
@@ -7556,8 +7555,7 @@ void run_concurrent_construction_failure_test() {
   }
   set_memory_runtime_construction_failure_for_test(false);
 
-  const std::size_t attempts_after_failure =
-      memory_runtime_construction_attempt_count_for_test();
+  const std::size_t attempts_after_failure = memory_runtime_construction_attempt_count_for_test();
   const std::size_t successes_after_failure = memory_runtime_construction_count_for_test();
   const std::size_t failures = failure_count.load(std::memory_order_relaxed);
   if (failures != 0) {
@@ -7571,11 +7569,9 @@ void run_concurrent_construction_failure_test() {
   }
 
   std::vector<std::uint8_t> recovery_dst(k_copy_size);
-  void* recovery_result = TLSS::MEMORY::memcpy(recovery_dst.data(), sources[0].data(),
-                                               k_copy_size, CopyBackend::Auto,
-                                               CopyHint::Streaming);
-  const std::size_t attempts_after_recovery =
-      memory_runtime_construction_attempt_count_for_test();
+  void* recovery_result = TLSS::MEMORY::memcpy(recovery_dst.data(), sources[0].data(), k_copy_size,
+                                               CopyBackend::Auto, CopyHint::Streaming);
+  const std::size_t attempts_after_recovery = memory_runtime_construction_attempt_count_for_test();
   const std::size_t successes_after_recovery = memory_runtime_construction_count_for_test();
   if (recovery_result != recovery_dst.data() ||
       std::memcmp(recovery_dst.data(), sources[0].data(), k_copy_size) != 0) {
@@ -7626,8 +7622,8 @@ void run_runtime_construction_failure_test() {
   set_memory_runtime_construction_failure_for_test(true);
   bool threw = false;
   try {
-    void* result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size,
-                                        CopyBackend::Auto, CopyHint::Streaming);
+    void* result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size, CopyBackend::Auto,
+                                        CopyHint::Streaming);
     if (result != dst.data()) {
       throw std::runtime_error("fallback returned the wrong destination");
     }
@@ -7635,8 +7631,7 @@ void run_runtime_construction_failure_test() {
     threw = true;
   }
   const std::size_t after_failure = memory_runtime_construction_count_for_test();
-  const std::size_t attempts_after_failure =
-      memory_runtime_construction_attempt_count_for_test();
+  const std::size_t attempts_after_failure = memory_runtime_construction_attempt_count_for_test();
   set_memory_runtime_construction_failure_for_test(false);
 
   if (threw) {
@@ -7653,11 +7648,10 @@ void run_runtime_construction_failure_test() {
   }
 
   std::memset(dst.data(), 0, k_size);
-  void* recovery_result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size,
-                                               CopyBackend::Auto, CopyHint::Streaming);
+  void* recovery_result =
+      TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size, CopyBackend::Auto, CopyHint::Streaming);
   const std::size_t after_recovery = memory_runtime_construction_count_for_test();
-  const std::size_t attempts_after_recovery =
-      memory_runtime_construction_attempt_count_for_test();
+  const std::size_t attempts_after_recovery = memory_runtime_construction_attempt_count_for_test();
   if (recovery_result != dst.data() || std::memcmp(dst.data(), src.data(), k_size) != 0) {
     throw std::runtime_error("runtime recovery copy mismatch");
   }
@@ -7673,8 +7667,7 @@ void run_runtime_construction_failure_test() {
             << " after_failure=" << attempts_after_failure
             << " after_recovery=" << attempts_after_recovery << '\n';
   std::cout << "runtime construction successes: before=" << before
-            << " after_failure=" << after_failure
-            << " after_recovery=" << after_recovery << '\n';
+            << " after_failure=" << after_failure << " after_recovery=" << after_recovery << '\n';
   std::cout << "Runtime construction failure test: PASS\n";
 }
 
@@ -7731,8 +7724,8 @@ void run_static_destruction_order_test() {
     throw std::runtime_error("static destruction order test requires first ParallelNt use");
   }
 
-  void* result = TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size,
-                                      CopyBackend::Auto, CopyHint::Streaming);
+  void* result =
+      TLSS::MEMORY::memcpy(dst.data(), src.data(), k_size, CopyBackend::Auto, CopyHint::Streaming);
   if (result != dst.data() || std::memcmp(dst.data(), src.data(), k_size) != 0) {
     throw std::runtime_error("shutdown order copy mismatch");
   }
@@ -7775,8 +7768,7 @@ void run_runtime_worker_plan_test() {
 
   const auto expect_plan = [&runtime](int caller_cpu, std::size_t desired_worker_count,
                                       const std::vector<std::size_t>& expected) {
-    const auto* actual =
-        runtime.active_worker_indices_for_test(caller_cpu, desired_worker_count);
+    const auto* actual = runtime.active_worker_indices_for_test(caller_cpu, desired_worker_count);
     if (actual == nullptr || *actual != expected) {
       throw std::runtime_error("runtime worker plan mismatch for caller CPU " +
                                std::to_string(caller_cpu));
@@ -7799,8 +7791,7 @@ void run_runtime_worker_plan_test() {
       const WorkerSelection selection = select_worker_set(candidates, desired_worker_count);
       const ActiveWorkerSelection expected =
           select_active_workers(runtime.master_worker_cpu_ids(), selection);
-      const auto* actual =
-          runtime.active_worker_indices_for_test(cpu.cpu_id, desired_worker_count);
+      const auto* actual = runtime.active_worker_indices_for_test(cpu.cpu_id, desired_worker_count);
       if (actual == nullptr || *actual != expected.worker_indices) {
         throw std::runtime_error("runtime worker plan mismatch for caller CPU " +
                                  std::to_string(cpu.cpu_id));
@@ -8069,8 +8060,7 @@ int main(int argc, char* argv[]) {
 #endif
 
 #ifdef TLSS_MEMORY_TESTING
-  if ((argc == 4 || argc == 5) &&
-      std::string_view(argv[1]) == "restricted-runtime-perf") {
+  if ((argc == 4 || argc == 5) && std::string_view(argv[1]) == "restricted-runtime-perf") {
     const std::size_t desired_worker_count = argc == 5 ? std::stoull(argv[4]) : 8;
     run_restricted_runtime_performance_benchmark(std::stoi(argv[2]), std::stoull(argv[3]),
                                                  desired_worker_count);

@@ -13,10 +13,9 @@ namespace TLSSMON {
  * @param force 传递给 Engine 的强制更新标志。
  * @return Engine 的写入结果。
  */
-MonData::UpdateResult ingest_decoded_record(Engine &engine,
-                                            Wire::DecodedRecord record,
+MonData::UpdateResult ingest_decoded_record(Engine& engine, Wire::DecodedRecord record,
                                             bool force = false);
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __MONITOR_COLLECTOR_H__
+#endif  // __MONITOR_COLLECTOR_H__

@@ -8,21 +8,20 @@ namespace TLSSMON {
 namespace {
 
 constexpr bool is_valid_prompt_character(unsigned char character) noexcept {
-  const bool lowercase = character >= static_cast<unsigned char>('a') &&
-                         character <= static_cast<unsigned char>('z');
+  const bool lowercase =
+      character >= static_cast<unsigned char>('a') && character <= static_cast<unsigned char>('z');
 
-  const bool uppercase = character >= static_cast<unsigned char>('A') &&
-                         character <= static_cast<unsigned char>('Z');
+  const bool uppercase =
+      character >= static_cast<unsigned char>('A') && character <= static_cast<unsigned char>('Z');
 
-  const bool digit = character >= static_cast<unsigned char>('0') &&
-                     character <= static_cast<unsigned char>('9');
+  const bool digit =
+      character >= static_cast<unsigned char>('0') && character <= static_cast<unsigned char>('9');
 
-  return lowercase || uppercase || digit ||
-         character == static_cast<unsigned char>('-') ||
+  return lowercase || uppercase || digit || character == static_cast<unsigned char>('-') ||
          character == static_cast<unsigned char>('_') ||
          character == static_cast<unsigned char>('.');
 }
-} // namespace
+}  // namespace
 
 bool is_valid_cli_prompt_name(std::string_view name) noexcept {
   if (name.empty() || name.size() > CLI_PROMPT_NAME_MAX) {
@@ -40,13 +39,11 @@ bool is_valid_cli_prompt_name(std::string_view name) noexcept {
   return true;
 }
 
-std::string make_cli_prompt(std::string_view default_name,
-                            const CliSessionContext &context) {
+std::string make_cli_prompt(std::string_view default_name, const CliSessionContext& context) {
   // 当前连接的模块选择只影响自己的提示符，不修改服务端全局名称。
-  const std::string_view prompt_name =
-      context.has_selected_module()
-          ? std::string_view{context._selected_module_name}
-          : default_name;
+  const std::string_view prompt_name = context.has_selected_module()
+                                           ? std::string_view{context._selected_module_name}
+                                           : default_name;
   if (!is_valid_cli_prompt_name(prompt_name)) {
     return {};
   }
@@ -63,4 +60,4 @@ std::string make_cli_prompt(std::string_view default_name,
   return output;
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

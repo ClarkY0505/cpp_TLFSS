@@ -12,15 +12,15 @@ class Socket : NoCopy {
   ~Socket();
 
   int fd() const {
-      return _sockfd;
+    return _sockfd;
   }
 
-  void bind_address(const InetAddress &local_addr);
+  void bind_address(const InetAddress& local_addr);
   void listen();
-  int accept(InetAddress *peer_addr);
+  int accept(InetAddress* peer_addr);
 
   void shutdown_write();
-  
+
   void set_tcp_no_delay(bool on);
   void set_reuse_addr(bool on);
   void set_reuse_port(bool on);

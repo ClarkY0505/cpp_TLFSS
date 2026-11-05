@@ -1,15 +1,15 @@
-#include "monitor_wire.h"
 #include "udp_receiver.h"
+#include "monitor_wire.h"
 
 #include <arpa/inet.h>
-#include <cerrno>
 #include <fcntl.h>
-#include <iterator>
 #include <netinet/in.h>
-#include <optional>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <cerrno>
+#include <iterator>
+#include <optional>
 
 #include <array>
 #include <cstddef>
@@ -28,7 +28,8 @@ struct UdpReceiver::Impl final {
 };
 
 UdpReceiver::UdpReceiver(UdpReceiverConfig config)
-    : _config(std::move(config)), _impl(std::make_unique<Impl>()) {
+    : _config(std::move(config))
+    , _impl(std::make_unique<Impl>()) {
   if (_config._bind_address.empty()) {
     _impl->_setup_status = UdpReceiveStatus::INVALID_ENDPOINT;
     return;
@@ -38,8 +39,7 @@ UdpReceiver::UdpReceiver(UdpReceiverConfig config)
   address.sin_family = AF_INET;
   address.sin_port = htons(_config._bind_port);
 
-  const int address_result =
-      ::inet_pton(AF_INET, _config._bind_address.c_str(), &address.sin_addr);
+  const int address_result = ::inet_pton(AF_INET, _config._bind_address.c_str(), &address.sin_addr);
   if (address_result != 1) {
     _impl->_setup_status = UdpReceiveStatus::INVALID_ENDPOINT;
 
@@ -66,8 +66,7 @@ UdpReceiver::UdpReceiver(UdpReceiverConfig config)
    **/
   const int status_flags = ::fcntl(socket_fd, F_GETFL, 0);
 
-  if (status_flags < 0 ||
-      ::fcntl(socket_fd, F_SETFL, status_flags | O_NONBLOCK) < 0) {
+  if (status_flags < 0 || ::fcntl(socket_fd, F_SETFL, status_flags | O_NONBLOCK) < 0) {
     const int setup_error = errno;
     ::close(socket_fd);
     _impl->_setup_status = UdpReceiveStatus::SOCKET_ERROR;
@@ -79,8 +78,7 @@ UdpReceiver::UdpReceiver(UdpReceiverConfig config)
    */
   const int descriptor_flags = ::fcntl(socket_fd, F_GETFD, 0);
 
-  if (descriptor_flags < 0 ||
-      ::fcntl(socket_fd, F_SETFD, descriptor_flags | FD_CLOEXEC) < 0) {
+  if (descriptor_flags < 0 || ::fcntl(socket_fd, F_SETFD, descriptor_flags | FD_CLOEXEC) < 0) {
     const int setup_error = errno;
     (void)::close(socket_fd);
 
@@ -89,9 +87,8 @@ UdpReceiver::UdpReceiver(UdpReceiverConfig config)
     return;
   }
 
-  const int bind_result =
-      ::bind(socket_fd, reinterpret_cast<const sockaddr *>(&address),
-             static_cast<socklen_t>(sizeof(address)));
+  const int bind_result = ::bind(socket_fd, reinterpret_cast<const sockaddr*>(&address),
+                                 static_cast<socklen_t>(sizeof(address)));
   if (bind_result < 0) {
     const int setup_error = errno;
     ::close(socket_fd);
@@ -104,8 +101,8 @@ UdpReceiver::UdpReceiver(UdpReceiverConfig config)
    * 如果配置端口是 0，通过 getsockname() 查询系统分配的端口。
    */
   socklen_t address_size = static_cast<socklen_t>(sizeof(address));
-  const int name_result = ::getsockname(
-      socket_fd, reinterpret_cast<sockaddr *>(&address), &address_size);
+  const int name_result =
+      ::getsockname(socket_fd, reinterpret_cast<sockaddr*>(&address), &address_size);
 
   if (name_result < 0) {
     const int setup_error = errno;
@@ -127,8 +124,7 @@ UdpReceiver::~UdpReceiver() {
 }
 
 bool UdpReceiver::ready() const noexcept {
-  return _impl && _impl->_socket >= 0 &&
-         _impl->_setup_status == UdpReceiveStatus::SUCCESS;
+  return _impl && _impl->_socket >= 0 && _impl->_setup_status == UdpReceiveStatus::SUCCESS;
 }
 
 UdpReceiveStatus UdpReceiver::setup_status() const noexcept {
@@ -157,8 +153,8 @@ std::uint16_t UdpReceiver::bound_port() const noexcept {
 UdpReceiveResult UdpReceiver::receive_one() const {
   // 每次只读取一个数据报；调用方可循环至 WOULD_BLOCK 清空 socket。
   if (!ready()) {
-    return UdpReceiveResult{_impl->_setup_status, WireStatus::SUCCESS,
-                            std::nullopt, 0U, _impl->_setup_error};
+    return UdpReceiveResult{_impl->_setup_status, WireStatus::SUCCESS, std::nullopt, 0U,
+                            _impl->_setup_error};
   }
   /*
    * 1201 字节缓冲区用于发现超出 V2 1200 字节上限的数据报。
@@ -167,27 +163,24 @@ UdpReceiveResult UdpReceiver::receive_one() const {
    * 足以判定它违反协议限制。
    */
   std::array<std::uint8_t, V2_MAX_DATAGRAM_SIZE + 1U> buffer{};
-  const ssize_t received = ::recvfrom(_impl->_socket, buffer.data(),
-                                      buffer.size(), 0, nullptr, nullptr);
+  const ssize_t received =
+      ::recvfrom(_impl->_socket, buffer.data(), buffer.size(), 0, nullptr, nullptr);
   if (received < 0) {
     const int receive_error = errno;
 
     if (receive_error == EAGAIN || receive_error == EWOULDBLOCK) {
-      return UdpReceiveResult{UdpReceiveStatus::WOULD_BLOCK,
-                              WireStatus::SUCCESS, std::nullopt, 0U,
+      return UdpReceiveResult{UdpReceiveStatus::WOULD_BLOCK, WireStatus::SUCCESS, std::nullopt, 0U,
                               receive_error};
     }
 
-    return UdpReceiveResult{UdpReceiveStatus::RECEIVE_ERROR,
-                            WireStatus::SUCCESS, std::nullopt, 0U,
+    return UdpReceiveResult{UdpReceiveStatus::RECEIVE_ERROR, WireStatus::SUCCESS, std::nullopt, 0U,
                             receive_error};
   }
 
   const std::size_t received_size = static_cast<std::size_t>(received);
   if (received_size > V2_MAX_DATAGRAM_SIZE) {
-    return UdpReceiveResult{UdpReceiveStatus::DATAGRAM_TOO_LARGE,
-                            WireStatus::DATAGRAM_TOO_LARGE, std::nullopt,
-                            received_size, 0};
+    return UdpReceiveResult{UdpReceiveStatus::DATAGRAM_TOO_LARGE, WireStatus::DATAGRAM_TOO_LARGE,
+                            std::nullopt, received_size, 0};
   }
 
   /*
@@ -201,13 +194,13 @@ UdpReceiveResult UdpReceiver::receive_one() const {
    */
   DecodeResult decoded = decode(buffer.data(), received_size);
   if (decoded._status != WireStatus::SUCCESS) {
-    return UdpReceiveResult{UdpReceiveStatus::DECODE_ERROR, decoded._status,
-                            std::nullopt, received_size, 0};
+    return UdpReceiveResult{UdpReceiveStatus::DECODE_ERROR, decoded._status, std::nullopt,
+                            received_size, 0};
   }
 
   return UdpReceiveResult{UdpReceiveStatus::SUCCESS, WireStatus::SUCCESS,
                           std::move(decoded._record), received_size, 0};
 }
 
-} // namespace Wire
-} // namespace TLSSMON
+}  // namespace Wire
+}  // namespace TLSSMON

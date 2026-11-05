@@ -1,6 +1,6 @@
+#include "memory_runtime.h"
 #include "cpu_affinity.h"
 #include "direct_nt_copy.h"
-#include "memory_runtime.h"
 #include "parallel_copy_pool.h"
 #include "parallel_nt_copy.h"
 #include "worker_selection.h"

@@ -1,6 +1,6 @@
+#include "monitor_reporter.h"
 #include "monitor_data.h"
 #include "monitor_module_registry.h"
-#include "monitor_reporter.h"
 #include "monitor_store.h"
 
 #include <cstdint>
@@ -9,26 +9,24 @@
 #include <optional>
 #include <utility>
 namespace TLSSMON {
-MonitorReporter::MonitorReporter(MonitorStore &store)
-    : _store(store), _modules(nullptr) {}
-MonitorReporter::MonitorReporter(MonitorStore &store,
-                                 const MonitorModuleRegistry &modules)
-    : _store(store), _modules(&modules) {}
+MonitorReporter::MonitorReporter(MonitorStore& store)
+    : _store(store)
+    , _modules(nullptr) {}
+MonitorReporter::MonitorReporter(MonitorStore& store, const MonitorModuleRegistry& modules)
+    : _store(store)
+    , _modules(&modules) {}
 
 void MonitorReporter::set_publisher(Publisher publisher) {
   std::lock_guard<std::mutex> lock(_publisher_mutex);
   _publisher = std::move(publisher);
 }
 
-MonData::UpdateResult
-MonitorReporter::update(MonData::MonitorData data, bool force,
-                        MonData::MonitorTimestamp timestamp) {
-  MonData::UpdateResult result =
-      _store.update(std::move(data), force, timestamp);
+MonData::UpdateResult MonitorReporter::update(MonData::MonitorData data, bool force,
+                                              MonData::MonitorTimestamp timestamp) {
+  MonData::UpdateResult result = _store.update(std::move(data), force, timestamp);
 
-  const bool should_publish =
-      result._status == MonData::UpdateStatus::INSERTED ||
-      result._status == MonData::UpdateStatus::UPDATED;
+  const bool should_publish = result._status == MonData::UpdateStatus::INSERTED ||
+                              result._status == MonData::UpdateStatus::UPDATED;
 
   if (!should_publish || !result._record.has_value()) {
     return result;
@@ -58,20 +56,18 @@ MonitorReporter::update(MonData::MonitorData data, bool force,
   return result;
 }
 
-MonData::UpdateResult
-MonitorReporter::report_count(MonData::MonitorKey key, std::uint32_t value,
-                              std::string description,
-                              MonData::MonitorTimestamp timestamp) {
+MonData::UpdateResult MonitorReporter::report_count(MonData::MonitorKey key, std::uint32_t value,
+                                                    std::string description,
+                                                    MonData::MonitorTimestamp timestamp) {
   enrich(key, description);
   MonData::MonitorData data{std::move(key), std::move(description),
                             MonData::NumericValue{value, 0U}};
   return update(std::move(data), false, timestamp);
 }
 
-MonData::UpdateResult
-MonitorReporter::report_error(MonData::MonitorKey key, std::uint32_t value,
-                              std::string description,
-                              MonData::MonitorTimestamp timestamp) {
+MonData::UpdateResult MonitorReporter::report_error(MonData::MonitorKey key, std::uint32_t value,
+                                                    std::string description,
+                                                    MonData::MonitorTimestamp timestamp) {
   enrich(key, description);
   MonData::MonitorData data{std::move(key), std::move(description),
                             MonData::NumericValue{value, 2U}};
@@ -113,8 +109,7 @@ MonitorReporter::report_error(MonData::MonitorKey key, std::uint32_t value,
   MonitorStore::PrepareUpdate prepare;
 
   try {
-    prepare =
-        [&alarm_publisher](const MonData::StoredRecord &candidate) -> bool {
+    prepare = [&alarm_publisher](const MonData::StoredRecord& candidate) -> bool {
       /*
        * AlarmPublisher 参数是 StoredRecord 按值传递，
        * 这里会生成 candidate 的副本。
@@ -140,24 +135,20 @@ MonitorReporter::report_error(MonData::MonitorKey key, std::uint32_t value,
   return _store.update_prepared(std::move(data), true, timestamp, prepare);
 }
 
-MonData::UpdateResult
-MonitorReporter::report_string(MonData::MonitorKey key, std::string value,
-                               std::string description,
-                               MonData::MonitorTimestamp timestamp) {
+MonData::UpdateResult MonitorReporter::report_string(MonData::MonitorKey key, std::string value,
+                                                     std::string description,
+                                                     MonData::MonitorTimestamp timestamp) {
   enrich(key, description);
-  MonData::MonitorData data{std::move(key), std::move(description),
-                            std::move(value)};
+  MonData::MonitorData data{std::move(key), std::move(description), std::move(value)};
   return update(std::move(data), false, timestamp);
 }
 
 void MonitorReporter::set_alarm_publisher(AlarmPublisher publisher) {
-
   std::lock_guard<std::mutex> lock(_publisher_mutex);
   _alarm_publisher = std::move(publisher);
 }
 
-void MonitorReporter::enrich(MonData::MonitorKey &key,
-                             std::string &description) const {
+void MonitorReporter::enrich(MonData::MonitorKey& key, std::string& description) const {
   /*
    * 兼容之前版本的一些测试方案，
    * 可能在个别情况会使用到单独创建Reporter,
@@ -167,8 +158,7 @@ void MonitorReporter::enrich(MonData::MonitorKey &key,
     return;
   }
 
-  const std::optional<MonitorErrorInfo> error =
-      _modules->find_error(key._mid, key._eid);
+  const std::optional<MonitorErrorInfo> error = _modules->find_error(key._mid, key._eid);
 
   if (!error.has_value()) {
     return;
@@ -180,4 +170,4 @@ void MonitorReporter::enrich(MonData::MonitorKey &key,
   }
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

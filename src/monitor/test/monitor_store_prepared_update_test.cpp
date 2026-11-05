@@ -25,20 +25,17 @@ MonData::MonitorTimestamp at_seconds(std::int64_t seconds) {
   return MonData::MonitorTimestamp{std::chrono::seconds{seconds}};
 }
 
-MonData::MonitorData numeric_data(std::uint32_t value,
-                                  std::uint32_t state,
+MonData::MonitorData numeric_data(std::uint32_t value, std::uint32_t state,
                                   std::string description = "numeric") {
   return MonData::MonitorData{TEST_KEY, std::move(description),
                               MonData::NumericValue{value, state}};
 }
 
-MonData::MonitorData string_data(std::string value,
-                                 std::string description = "string") {
-  return MonData::MonitorData{TEST_KEY, std::move(description),
-                              std::move(value)};
+MonData::MonitorData string_data(std::string value, std::string description = "string") {
+  return MonData::MonitorData{TEST_KEY, std::move(description), std::move(value)};
 }
 
-MonData::NumericValue numeric_value(const MonData::StoredRecord &record) {
+MonData::NumericValue numeric_value(const MonData::StoredRecord& record) {
   return std::get<MonData::NumericValue>(record._data._value);
 }
 
@@ -46,12 +43,11 @@ MonData::NumericValue numeric_value(const MonData::StoredRecord &record) {
 void test_failed_insert_rolls_back_and_can_retry() {
   MonitorStore store;
   std::size_t prepare_calls = 0U;
-  const auto failed = store.update_prepared(
-      numeric_data(7U, 2U), true, at_seconds(1),
-      [&](const MonData::StoredRecord &) {
-        ++prepare_calls;
-        return false;
-      });
+  const auto failed = store.update_prepared(numeric_data(7U, 2U), true, at_seconds(1),
+                                            [&](const MonData::StoredRecord&) {
+                                              ++prepare_calls;
+                                              return false;
+                                            });
   assert(failed._status == MonData::UpdateStatus::DURABILITY_FAILED);
   assert(!failed.changed());
   assert(!failed._record.has_value());
@@ -59,12 +55,11 @@ void test_failed_insert_rolls_back_and_can_retry() {
   assert(store.size() == 0U);
   assert(!store.find(TEST_KEY).has_value());
 
-  const auto retried = store.update_prepared(
-      numeric_data(7U, 2U), true, at_seconds(2),
-      [&](const MonData::StoredRecord &) {
-        ++prepare_calls;
-        return true;
-      });
+  const auto retried = store.update_prepared(numeric_data(7U, 2U), true, at_seconds(2),
+                                             [&](const MonData::StoredRecord&) {
+                                               ++prepare_calls;
+                                               return true;
+                                             });
   assert(retried._status == MonData::UpdateStatus::INSERTED);
   assert(retried.changed());
   assert(prepare_calls == 2U);
@@ -75,13 +70,13 @@ void test_failed_insert_rolls_back_and_can_retry() {
 /* 已有记录更新落盘失败时，旧值、元数据和时间戳必须全部保留。 */
 void test_failed_update_preserves_old_record() {
   MonitorStore store;
-  const auto inserted =
-      store.update(numeric_data(10U, 0U, "old"), true, at_seconds(10));
+  const auto inserted = store.update(numeric_data(10U, 0U, "old"), true, at_seconds(10));
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
-  const auto failed = store.update_prepared(
-      numeric_data(20U, 2U, "new"), true, at_seconds(20),
-      [](const MonData::StoredRecord &) { return false; });
+  const auto failed = store.update_prepared(numeric_data(20U, 2U, "new"), true, at_seconds(20),
+                                            [](const MonData::StoredRecord&) {
+                                              return false;
+                                            });
   assert(failed._status == MonData::UpdateStatus::DURABILITY_FAILED);
   assert(!failed._record.has_value());
 
@@ -94,15 +89,13 @@ void test_failed_update_preserves_old_record() {
 /* prepare 成功后，候选记录整体替换旧记录。 */
 void test_successful_update_commits_candidate() {
   MonitorStore store;
-  assert(store.update(numeric_data(10U, 0U, "old"), true, at_seconds(1))
-             .changed());
+  assert(store.update(numeric_data(10U, 0U, "old"), true, at_seconds(1)).changed());
   MonData::StoredRecord observed{};
-  const auto updated = store.update_prepared(
-      numeric_data(20U, 2U, "new"), true, at_seconds(2),
-      [&](const MonData::StoredRecord &candidate) {
-        observed = candidate;
-        return true;
-      });
+  const auto updated = store.update_prepared(numeric_data(20U, 2U, "new"), true, at_seconds(2),
+                                             [&](const MonData::StoredRecord& candidate) {
+                                               observed = candidate;
+                                               return true;
+                                             });
   assert(updated._status == MonData::UpdateStatus::UPDATED);
   assert(updated._record.has_value());
   assert(numeric_value(observed) == (MonData::NumericValue{20U, 2U}));
@@ -120,12 +113,11 @@ void test_unchanged_numeric_does_not_prepare_or_overwrite_metadata() {
   MonitorStore store;
   store.update(numeric_data(10U, 0U, "old"), true, at_seconds(1));
   std::size_t calls = 0U;
-  const auto unchanged = store.update_prepared(
-      numeric_data(10U, 2U, "new"), true, at_seconds(2),
-      [&](const MonData::StoredRecord &) {
-        ++calls;
-        return true;
-      });
+  const auto unchanged = store.update_prepared(numeric_data(10U, 2U, "new"), true, at_seconds(2),
+                                               [&](const MonData::StoredRecord&) {
+                                                 ++calls;
+                                                 return true;
+                                               });
   assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
   assert(calls == 0U);
   const MonData::StoredRecord stored = *store.find(TEST_KEY);
@@ -138,12 +130,11 @@ void test_unchanged_numeric_does_not_prepare_or_overwrite_metadata() {
 void test_initial_zero_does_not_prepare() {
   MonitorStore store;
   std::size_t calls = 0U;
-  const auto result = store.update_prepared(
-      numeric_data(0U, 0U), false, at_seconds(1),
-      [&](const MonData::StoredRecord &) {
-        ++calls;
-        return true;
-      });
+  const auto result = store.update_prepared(numeric_data(0U, 0U), false, at_seconds(1),
+                                            [&](const MonData::StoredRecord&) {
+                                              ++calls;
+                                              return true;
+                                            });
   assert(result._status == MonData::UpdateStatus::IGNORED_INITIAL_ZERO);
   assert(calls == 0U);
   assert(store.size() == 0U);
@@ -153,30 +144,27 @@ void test_initial_zero_does_not_prepare() {
 void test_string_prepare_and_dedup() {
   MonitorStore store;
   std::size_t calls = 0U;
-  const auto inserted = store.update_prepared(
-      string_data(""), false, at_seconds(1),
-      [&](const MonData::StoredRecord &) {
-        ++calls;
-        return true;
-      });
+  const auto inserted = store.update_prepared(string_data(""), false, at_seconds(1),
+                                              [&](const MonData::StoredRecord&) {
+                                                ++calls;
+                                                return true;
+                                              });
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
   assert(calls == 1U);
 
-  const auto unchanged = store.update_prepared(
-      string_data("", "changed metadata"), false, at_seconds(2),
-      [&](const MonData::StoredRecord &) {
-        ++calls;
-        return true;
-      });
+  const auto unchanged = store.update_prepared(string_data("", "changed metadata"), false,
+                                               at_seconds(2), [&](const MonData::StoredRecord&) {
+                                                 ++calls;
+                                                 return true;
+                                               });
   assert(unchanged._status == MonData::UpdateStatus::UNCHANGED);
   assert(calls == 1U);
 
-  const auto updated = store.update_prepared(
-      string_data("next"), false, at_seconds(3),
-      [&](const MonData::StoredRecord &) {
-        ++calls;
-        return true;
-      });
+  const auto updated = store.update_prepared(string_data("next"), false, at_seconds(3),
+                                             [&](const MonData::StoredRecord&) {
+                                               ++calls;
+                                               return true;
+                                             });
   assert(updated._status == MonData::UpdateStatus::UPDATED);
   assert(calls == 2U);
 }
@@ -185,14 +173,12 @@ void test_string_prepare_and_dedup() {
 void test_empty_and_throwing_prepare_fail_without_commit() {
   MonitorStore store;
   const MonitorStore::PrepareUpdate empty;
-  const auto empty_result = store.update_prepared(
-      numeric_data(1U, 2U), true, at_seconds(1), empty);
+  const auto empty_result = store.update_prepared(numeric_data(1U, 2U), true, at_seconds(1), empty);
   assert(empty_result._status == MonData::UpdateStatus::DURABILITY_FAILED);
   assert(store.size() == 0U);
 
   const auto throwing_result = store.update_prepared(
-      numeric_data(1U, 2U), true, at_seconds(2),
-      [](const MonData::StoredRecord &) -> bool {
+      numeric_data(1U, 2U), true, at_seconds(2), [](const MonData::StoredRecord&) -> bool {
         throw std::runtime_error("durability failure");
       });
   assert(throwing_result._status == MonData::UpdateStatus::DURABILITY_FAILED);
@@ -203,17 +189,17 @@ void test_empty_and_throwing_prepare_fail_without_commit() {
 void test_prepare_receives_exact_candidate() {
   MonitorStore store;
   const MonData::MonitorTimestamp timestamp = at_seconds(123);
-  const auto result = store.update_prepared(
-      numeric_data(99U, 2U, "disk full"), true, timestamp,
-      [&](const MonData::StoredRecord &candidate) {
-        assert(candidate._data._key == TEST_KEY);
-        assert(candidate._data._description == "disk full");
-        assert(numeric_value(candidate) == (MonData::NumericValue{99U, 2U}));
-        assert(candidate._changed_at == timestamp);
-        MonData::StoredRecord copy = candidate;
-        copy._data._description = "local copy";
-        return true;
-      });
+  const auto result =
+      store.update_prepared(numeric_data(99U, 2U, "disk full"), true, timestamp,
+                            [&](const MonData::StoredRecord& candidate) {
+                              assert(candidate._data._key == TEST_KEY);
+                              assert(candidate._data._description == "disk full");
+                              assert(numeric_value(candidate) == (MonData::NumericValue{99U, 2U}));
+                              assert(candidate._changed_at == timestamp);
+                              MonData::StoredRecord copy = candidate;
+                              copy._data._description = "local copy";
+                              return true;
+                            });
   assert(result._status == MonData::UpdateStatus::INSERTED);
   assert(store.find(TEST_KEY)->_data._description == "disk full");
 }
@@ -245,8 +231,7 @@ void test_concurrent_same_key_prepares_once() {
         std::this_thread::yield();
       }
       const auto result = store.update_prepared(
-          numeric_data(55U, 2U), true, at_seconds(5),
-          [&](const MonData::StoredRecord &) {
+          numeric_data(55U, 2U), true, at_seconds(5), [&](const MonData::StoredRecord&) {
             prepare_calls.fetch_add(1U, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
             return true;
@@ -256,19 +241,18 @@ void test_concurrent_same_key_prepares_once() {
   }
 
   start.store(true, std::memory_order_release);
-  for (std::thread &worker : workers) {
+  for (std::thread& worker : workers) {
     worker.join();
   }
 
   assert(prepare_calls.load(std::memory_order_relaxed) == 1U);
-  assert(std::count(statuses.begin(), statuses.end(),
-                    MonData::UpdateStatus::INSERTED) == 1);
-  assert(std::count(statuses.begin(), statuses.end(),
-                    MonData::UpdateStatus::UNCHANGED) == thread_count - 1U);
+  assert(std::count(statuses.begin(), statuses.end(), MonData::UpdateStatus::INSERTED) == 1);
+  assert(std::count(statuses.begin(), statuses.end(), MonData::UpdateStatus::UNCHANGED) ==
+         thread_count - 1U);
   assert(store.size() == 1U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_failed_insert_rolls_back_and_can_retry();

@@ -28,12 +28,12 @@ using namespace std::chrono_literals;
 
 constexpr std::uint32_t MODULE_ID = 0x100U;
 
-bool contains(const std::string &text, const std::string &expected) {
+bool contains(const std::string& text, const std::string& expected) {
   return text.find(expected) != std::string::npos;
 }
 
 class TestPipe final {
-public:
+ public:
   TestPipe() {
     int descriptors[2]{-1, -1};
     assert(::pipe(descriptors) == 0);
@@ -46,31 +46,32 @@ public:
     assert(::close(_write_fd) == 0);
   }
 
-  TestPipe(const TestPipe &) = delete;
-  TestPipe &operator=(const TestPipe &) = delete;
+  TestPipe(const TestPipe&) = delete;
+  TestPipe& operator=(const TestPipe&) = delete;
 
-  int read_fd() const noexcept { return _read_fd; }
+  int read_fd() const noexcept {
+    return _read_fd;
+  }
 
   void signal() const {
     const char byte = '*';
-    assert(::write(_write_fd, &byte, sizeof(byte)) ==
-           static_cast<ssize_t>(sizeof(byte)));
+    assert(::write(_write_fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)));
   }
 
   void drain_one() const {
     char byte{};
-    assert(::read(_read_fd, &byte, sizeof(byte)) ==
-           static_cast<ssize_t>(sizeof(byte)));
+    assert(::read(_read_fd, &byte, sizeof(byte)) == static_cast<ssize_t>(sizeof(byte)));
   }
 
-private:
+ private:
   int _read_fd{-1};
   int _write_fd{-1};
 };
 
 class Rendezvous final {
-public:
-  explicit Rendezvous(std::size_t target) : _target(target) {
+ public:
+  explicit Rendezvous(std::size_t target)
+      : _target(target) {
     assert(_target > 0U);
   }
 
@@ -79,19 +80,19 @@ public:
     ++_arrived;
     _condition.notify_all();
 
-    return _condition.wait_for(lock, timeout,
-                               [&] { return _arrived >= _target; });
+    return _condition.wait_for(lock, timeout, [&] {
+      return _arrived >= _target;
+    });
   }
 
-private:
+ private:
   const std::size_t _target;
   std::mutex _mutex;
   std::condition_variable _condition;
   std::size_t _arrived{0U};
 };
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (std::chrono::steady_clock::now() < deadline) {
@@ -104,16 +105,15 @@ bool wait_for_phase(Engine &engine, EnginePhase expected,
   return engine.get_phase() == expected;
 }
 
-void initialize_engine(Engine &engine) {
+void initialize_engine(Engine& engine) {
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
-  assert(engine.register_module(
-             {MODULE_ID,
-              "module-a",
-              "metadata service",
-              {{MonitorLevel::INFO, "heartbeat"},
-               {MonitorLevel::WARN, "metadata timeout"},
-               {MonitorLevel::SOFT_STOP, "worker state"},
-               {MonitorLevel::EMERGENCY_STOP, "reentrant error"}}}) ==
+  assert(engine.register_module({MODULE_ID,
+                                 "module-a",
+                                 "metadata service",
+                                 {{MonitorLevel::INFO, "heartbeat"},
+                                  {MonitorLevel::WARN, "metadata timeout"},
+                                  {MonitorLevel::SOFT_STOP, "worker state"},
+                                  {MonitorLevel::EMERGENCY_STOP, "reentrant error"}}}) ==
          ModuleRegisterStatus::SUCCESS);
 }
 
@@ -151,7 +151,7 @@ void test_concurrent_find_error_returns_stable_copies() {
   }
 
   start.store(true, std::memory_order_release);
-  for (std::thread &reader : readers) {
+  for (std::thread& reader : readers) {
     reader.join();
   }
 
@@ -174,18 +174,15 @@ void test_publisher_can_query_metadata_and_reenter_reporter() {
 
   assert(engine.set_publisher([&](MonData::StoredRecord record) {
     const auto module = engine.find_module_by_id(record._data._key._mid);
-    const auto error = engine.find_error(record._data._key._mid,
-                                         record._data._key._eid);
+    const auto error = engine.find_error(record._data._key._mid, record._data._key._eid);
     assert(module.has_value());
     assert(error.has_value());
-    assert(record._data._key._level ==
-           static_cast<std::uint32_t>(error->_level));
+    assert(record._data._key._level == static_cast<std::uint32_t>(error->_level));
     assert(record._data._description == error->_description);
     published.fetch_add(1U, std::memory_order_relaxed);
 
     if (record._data._key._eid == 0U) {
-      const auto nested =
-          engine.report_error({MODULE_ID, 99U, 9U, 3U}, 0U);
+      const auto nested = engine.report_error({MODULE_ID, 99U, 9U, 3U}, 0U);
       assert(nested._status == MonData::UpdateStatus::INSERTED);
       reentered.fetch_add(1U, std::memory_order_relaxed);
     }
@@ -216,8 +213,7 @@ void test_timer_and_aio_concurrently_report_all_value_types() {
   std::atomic<std::size_t> published{0U};
 
   assert(engine.set_publisher([&](MonData::StoredRecord record) {
-    const auto error = engine.find_error(record._data._key._mid,
-                                         record._data._key._eid);
+    const auto error = engine.find_error(record._data._key._mid, record._data._key._eid);
     assert(error.has_value());
     assert(record._data._description == error->_description);
     published.fetch_add(1U, std::memory_order_relaxed);
@@ -233,58 +229,56 @@ void test_timer_and_aio_concurrently_report_all_value_types() {
     }
   };
 
-  const auto timer = engine.set_timer(
-      MonCallback{
-          "m8-concurrent-timer",
-          [&]() -> int {
-            if (timer_claimed.exchange(true, std::memory_order_acq_rel)) {
-              return 0;
-            }
+  const auto timer =
+      engine.set_timer(MonCallback{"m8-concurrent-timer",
+                                   [&]() -> int {
+                                     if (timer_claimed.exchange(true, std::memory_order_acq_rel)) {
+                                       return 0;
+                                     }
 
-            if (rendezvous.arrive_and_wait_for(2s)) {
-              rendezvous_success.fetch_add(1U, std::memory_order_relaxed);
-            }
-            finish(engine.report_count({MODULE_ID, 99U, 10U, 0U}, 1U));
-            return 0;
-          },
-          true},
-      TimerFlags::RECURRING | TimerFlags::WORKER, 10ms);
+                                     if (rendezvous.arrive_and_wait_for(2s)) {
+                                       rendezvous_success.fetch_add(1U, std::memory_order_relaxed);
+                                     }
+                                     finish(engine.report_count({MODULE_ID, 99U, 10U, 0U}, 1U));
+                                     return 0;
+                                   },
+                                   true},
+                       TimerFlags::RECURRING | TimerFlags::WORKER, 10ms);
   assert(timer.has_value());
 
   for (std::size_t index = 0U; index < inputs.size(); ++index) {
     const auto aio = engine.add_aio(
         inputs[index].read_fd(),
-        MonCallback{
-            "m8-concurrent-aio",
-            [&, index]() -> int {
-              if (aio_claimed[index].exchange(true,
-                                               std::memory_order_acq_rel)) {
-                return 0;
-              }
+        MonCallback{"m8-concurrent-aio",
+                    [&, index]() -> int {
+                      if (aio_claimed[index].exchange(true, std::memory_order_acq_rel)) {
+                        return 0;
+                      }
 
-              inputs[index].drain_one();
-              if (rendezvous.arrive_and_wait_for(2s)) {
-                rendezvous_success.fetch_add(1U, std::memory_order_relaxed);
-              }
+                      inputs[index].drain_one();
+                      if (rendezvous.arrive_and_wait_for(2s)) {
+                        rendezvous_success.fetch_add(1U, std::memory_order_relaxed);
+                      }
 
-              if (index == 0U) {
-                finish(engine.report_error({MODULE_ID, 99U, 11U, 1U}, 0U));
-              } else {
-                finish(engine.report_string({MODULE_ID, 99U, 12U, 2U},
-                                            "aio-running"));
-              }
-              return 0;
-            },
-            true});
+                      if (index == 0U) {
+                        finish(engine.report_error({MODULE_ID, 99U, 11U, 1U}, 0U));
+                      } else {
+                        finish(engine.report_string({MODULE_ID, 99U, 12U, 2U}, "aio-running"));
+                      }
+                      return 0;
+                    },
+                    true});
     assert(aio.has_value());
   }
 
   std::promise<ENGINESTATE> result_promise;
   std::future<ENGINESTATE> result = result_promise.get_future();
-  std::thread runner([&] { result_promise.set_value(engine.run()); });
+  std::thread runner([&] {
+    result_promise.set_value(engine.run());
+  });
 
   assert(wait_for_phase(engine, EnginePhase::RUNNING, 2s));
-  for (const TestPipe &input : inputs) {
+  for (const TestPipe& input : inputs) {
     input.signal();
   }
 
@@ -303,12 +297,9 @@ void test_timer_and_aio_concurrently_report_all_value_types() {
 
   const auto records = engine.query_data();
   assert(records.size() == 3U);
-  assert(records[0]._data._key._level ==
-         static_cast<std::uint32_t>(MonitorLevel::INFO));
-  assert(records[1]._data._key._level ==
-         static_cast<std::uint32_t>(MonitorLevel::WARN));
-  assert(records[2]._data._key._level ==
-         static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP));
+  assert(records[0]._data._key._level == static_cast<std::uint32_t>(MonitorLevel::INFO));
+  assert(records[1]._data._key._level == static_cast<std::uint32_t>(MonitorLevel::WARN));
+  assert(records[2]._data._key._level == static_cast<std::uint32_t>(MonitorLevel::SOFT_STOP));
   assert(std::get<std::string>(records[2]._data._value) == "aio-running");
 }
 
@@ -330,8 +321,7 @@ void test_cli_db_dump_and_report_are_concurrent_safe() {
     }
 
     for (std::uint32_t value = 1U; value <= updates; ++value) {
-      const auto result =
-          engine.report_count({MODULE_ID, 99U, 20U, 0U}, value);
+      const auto result = engine.report_count({MODULE_ID, 99U, 20U, 0U}, value);
       if (!result.changed()) {
         failures.fetch_add(1U, std::memory_order_relaxed);
       }
@@ -346,10 +336,9 @@ void test_cli_db_dump_and_report_are_concurrent_safe() {
     for (std::uint32_t index = 0U; index < updates; ++index) {
       const CliDispatchResult result = cli.dispatch("db_dump");
       if (result._status != CliDispatchStatus::SUCCESS ||
-          (result._output != "0 entry\n" &&
-           (!contains(result._output, "lvl=info") ||
-            !contains(result._output, "desc=\"heartbeat\"") ||
-            !contains(result._output, "1 entry\n")))) {
+          (result._output != "0 entry\n" && (!contains(result._output, "lvl=info") ||
+                                             !contains(result._output, "desc=\"heartbeat\"") ||
+                                             !contains(result._output, "1 entry\n")))) {
         failures.fetch_add(1U, std::memory_order_relaxed);
       }
     }
@@ -362,11 +351,10 @@ void test_cli_db_dump_and_report_are_concurrent_safe() {
   assert(failures.load(std::memory_order_relaxed) == 0U);
   const auto records = engine.query_data();
   assert(records.size() == 1U);
-  assert(std::get<MonData::NumericValue>(records[0]._data._value)._value ==
-         updates);
+  assert(std::get<MonData::NumericValue>(records[0]._data._value)._value == updates);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_concurrent_find_error_returns_stable_copies();

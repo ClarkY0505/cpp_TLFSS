@@ -44,14 +44,14 @@ struct PolicyFeedResult final {
  * 5. 策略不直接调用 Engine，也不拥有 Engine。
  */
 class MonitorPolicy {
-public:
+ public:
   virtual ~MonitorPolicy();
 
-  MonitorPolicy(const MonitorPolicy &) = delete;
-  MonitorPolicy &operator=(const MonitorPolicy &) = delete;
+  MonitorPolicy(const MonitorPolicy&) = delete;
+  MonitorPolicy& operator=(const MonitorPolicy&) = delete;
 
-  MonitorPolicy(MonitorPolicy &&) = delete;
-  MonitorPolicy &operator=(MonitorPolicy &&) = delete;
+  MonitorPolicy(MonitorPolicy&&) = delete;
+  MonitorPolicy& operator=(MonitorPolicy&&) = delete;
 
   /**
    * @brief 输入一个原始采样值。
@@ -60,8 +60,7 @@ public:
    * @param now 调用方注入的逻辑时间；SMOOTH_TRIM 忽略该参数。
    * @return 是否产生值得处理的新输出，以及策略当前输出值。
    */
-  virtual PolicyFeedResult feed(std::uint32_t value,
-                                PolicyTime now) noexcept = 0;
+  virtual PolicyFeedResult feed(std::uint32_t value, PolicyTime now) noexcept = 0;
 
   /**
    * @brief 查询策略当前输出。
@@ -78,7 +77,7 @@ public:
    */
   virtual std::uint32_t value() const noexcept = 0;
 
-protected:
+ protected:
   MonitorPolicy() = default;
 };
 /**
@@ -95,8 +94,8 @@ protected:
  * @param duration 连续满足条件所需的逻辑时间。
  * @return 策略对象；duration 为负时返回 nullptr。
  */
-[[nodiscard]] std::unique_ptr<MonitorPolicy>
-make_cont_for_policy(std::uint32_t threshold, PolicyTime duration);
+[[nodiscard]] std::unique_ptr<MonitorPolicy> make_cont_for_policy(std::uint32_t threshold,
+                                                                  PolicyTime duration);
 
 /**
  * @brief 创建 TIMES_PER_PERIOD 策略。
@@ -117,9 +116,9 @@ make_cont_for_policy(std::uint32_t threshold, PolicyTime duration);
  * @param period 滚动窗口长度。
  * @return 策略对象；count 为零或 period 为负时返回 nullptr。
  */
-[[nodiscard]] std::unique_ptr<MonitorPolicy>
-make_times_per_period_policy(std::uint32_t threshold, std::size_t count,
-                             PolicyTime period);
+[[nodiscard]] std::unique_ptr<MonitorPolicy> make_times_per_period_policy(std::uint32_t threshold,
+                                                                          std::size_t count,
+                                                                          PolicyTime period);
 
 /**
  * @brief 创建 SMOOTH_TRIM 策略。
@@ -140,8 +139,8 @@ make_times_per_period_policy(std::uint32_t threshold, std::size_t count,
  * @param trim_threshold 允许的最大偏差。
  * @return 策略对象；window 为零时返回 nullptr。
  */
-[[nodiscard]] std::unique_ptr<MonitorPolicy>
-make_smooth_trim_policy(std::size_t window, std::uint32_t trim_threshold);
+[[nodiscard]] std::unique_ptr<MonitorPolicy> make_smooth_trim_policy(std::size_t window,
+                                                                     std::uint32_t trim_threshold);
 
-} // namespace TLSSMON
-#endif // __MONITOR_POLICY_H__
+}  // namespace TLSSMON
+#endif  // __MONITOR_POLICY_H__

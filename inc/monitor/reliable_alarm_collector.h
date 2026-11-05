@@ -55,7 +55,7 @@ enum class ReliableAlarmCollectorSetupStatus : std::uint8_t {
  * @note Collector 持有 Engine 的非拥有引用。
  */
 class ReliableAlarmCollector final {
-public:
+ public:
   /**
    * @brief Engine 不归 Collector 所有。
    *
@@ -66,17 +66,17 @@ public:
    * @param engine 用于注册事件或读写监控数据的 Engine；由调用方持有。
    * @param config 绑定地址与端口、inbox 路径、客户端上限和空闲超时。
    */
-  ReliableAlarmCollector(Engine &engine, ReliableAlarmCollectorConfig config);
+  ReliableAlarmCollector(Engine& engine, ReliableAlarmCollectorConfig config);
 
   ~ReliableAlarmCollector();
 
-  ReliableAlarmCollector(const ReliableAlarmCollector &) = delete;
+  ReliableAlarmCollector(const ReliableAlarmCollector&) = delete;
 
-  ReliableAlarmCollector &operator=(const ReliableAlarmCollector &) = delete;
+  ReliableAlarmCollector& operator=(const ReliableAlarmCollector&) = delete;
 
-  ReliableAlarmCollector(ReliableAlarmCollector &&) = delete;
+  ReliableAlarmCollector(ReliableAlarmCollector&&) = delete;
 
-  ReliableAlarmCollector &operator=(ReliableAlarmCollector &&) = delete;
+  ReliableAlarmCollector& operator=(ReliableAlarmCollector&&) = delete;
 
   /**
    * @brief 表示恢复已经完成，并且监听线程正在工作。
@@ -111,7 +111,7 @@ public:
    * @return 构造时保存的配置引用。
    */
   [[nodiscard]]
-  const ReliableAlarmCollectorConfig &config() const noexcept;
+  const ReliableAlarmCollectorConfig& config() const noexcept;
 
   /**
    * @brief 幂等停止：
@@ -130,13 +130,13 @@ public:
   [[nodiscard]]
   ReliableAlarmCollectorStatus status() const;
 
-private:
+ private:
   struct Impl;
 
-  Engine &_engine;
+  Engine& _engine;
   const ReliableAlarmCollectorConfig _config;
   std::unique_ptr<Impl> _impl;
 };
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __RELIABLE_ALARM_COLLECTOR_H__
+#endif  // __RELIABLE_ALARM_COLLECTOR_H__

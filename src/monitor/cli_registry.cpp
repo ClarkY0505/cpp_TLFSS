@@ -43,16 +43,15 @@ CliDispatchResult empty_input_result() {
   return {CliDispatchStatus::EMPTY_INPUT, {}};
 }
 
-CliDispatchResult unknow_command_result(const std::string &command) {
-  return {CliDispatchStatus::UNKNOWN_COMMAND,
-          "unknown command: " + command + '\n'};
+CliDispatchResult unknow_command_result(const std::string& command) {
+  return {CliDispatchStatus::UNKNOWN_COMMAND, "unknown command: " + command + '\n'};
 }
 
 CliDispatchResult handler_error_result() {
   return {CliDispatchStatus::HANDLER_ERROR, "error: command failed\n"};
 }
 
-bool tokenize(std::string_view line, std::vector<std::string> &tokens) {
+bool tokenize(std::string_view line, std::vector<std::string>& tokens) {
   std::size_t position = 0U;
   while (position < line.size()) {
     while (position < line.size() && is_cli_space(line[position])) {
@@ -80,10 +79,9 @@ bool tokenize(std::string_view line, std::vector<std::string> &tokens) {
 
   return true;
 }
-} // namespace
+}  // namespace
 
-CliRegisterStatus CliRegistry::register_command(std::string name,
-                                                std::string help,
+CliRegisterStatus CliRegistry::register_command(std::string name, std::string help,
                                                 CliHandler handler) {
   if (!is_valid_command_name(name)) {
     return CliRegisterStatus::INVALID_NAME;
@@ -94,17 +92,15 @@ CliRegisterStatus CliRegistry::register_command(std::string name,
   }
 
   // 旧式 Handler 不读取会话状态，统一适配到带 Context 的分派路径。
-  CliSessionHandler adapted =
-      [handler = std::move(handler)](CliSessionContext &,
-                                     const CliArguments &arguments) {
-        return handler(arguments);
-      };
+  CliSessionHandler adapted = [handler = std::move(handler)](CliSessionContext&,
+                                                             const CliArguments& arguments) {
+    return handler(arguments);
+  };
 
   return register_command(std::move(name), std::move(help), std::move(adapted));
 }
 
-CliRegisterStatus CliRegistry::register_command(std::string name,
-                                                std::string help,
+CliRegisterStatus CliRegistry::register_command(std::string name, std::string help,
                                                 CliSessionHandler handler) {
   if (!is_valid_command_name(name)) {
     return CliRegisterStatus::INVALID_NAME;
@@ -115,8 +111,8 @@ CliRegisterStatus CliRegistry::register_command(std::string name,
   }
 
   std::lock_guard<std::mutex> lock{_mutex};
-  const auto insertion = _commands.emplace(
-      std::move(name), Command{std::move(help), std::move(handler)});
+  const auto insertion =
+      _commands.emplace(std::move(name), Command{std::move(help), std::move(handler)});
 
   if (!insertion.second) {
     return CliRegisterStatus::DUPLICATE_COMMAND;
@@ -179,11 +175,11 @@ std::vector<CliCommandInfo> CliRegistry::commands() const {
   std::vector<CliCommandInfo> snapshot;
   snapshot.reserve(_commands.size());
 
-  for (const auto &entry : _commands) {
+  for (const auto& entry : _commands) {
     snapshot.push_back(CliCommandInfo{entry.first, entry.second._help});
   }
 
   return snapshot;
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

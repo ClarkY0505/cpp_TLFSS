@@ -60,7 +60,7 @@ enum class ReliableAlarmPublisherSetupStatus : std::uint8_t {
  * @brief 将告警写入 outbox，并在后台向 Collector 重试发送直到确认。
  */
 class ReliableAlarmPublisher final {
-public:
+ public:
   /**
    * @brief 初始化 outbox 和后台发送线程。
    * @param config Collector 地址与端口、来源 ID、outbox 路径、容量及重试超时。
@@ -69,13 +69,13 @@ public:
 
   ~ReliableAlarmPublisher();
 
-  ReliableAlarmPublisher(const ReliableAlarmPublisher &) = delete;
+  ReliableAlarmPublisher(const ReliableAlarmPublisher&) = delete;
 
-  ReliableAlarmPublisher &operator=(const ReliableAlarmPublisher &) = delete;
+  ReliableAlarmPublisher& operator=(const ReliableAlarmPublisher&) = delete;
 
-  ReliableAlarmPublisher(ReliableAlarmPublisher &&) = delete;
+  ReliableAlarmPublisher(ReliableAlarmPublisher&&) = delete;
 
-  ReliableAlarmPublisher &operator=(ReliableAlarmPublisher &&) = delete;
+  ReliableAlarmPublisher& operator=(ReliableAlarmPublisher&&) = delete;
 
   /**
    * @brief ready() 只表示 Publisher 可以接受新告警。
@@ -104,7 +104,7 @@ public:
    * @return 构造时保存的配置引用。
    */
   [[nodiscard]]
-  const ReliableAlarmPublisherConfig &config() const noexcept;
+  const ReliableAlarmPublisherConfig& config() const noexcept;
 
   /**
    * @brief 只执行：
@@ -125,13 +125,13 @@ public:
   [[nodiscard]]
   ReliableAlarmPublisherStatus status() const;
 
-private:
+ private:
   struct Impl;
 
   const ReliableAlarmPublisherConfig _config;
   std::unique_ptr<Impl> _impl;
 };
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __RELIABLE_ALARM_PUBLISHER_H__
+#endif  // __RELIABLE_ALARM_PUBLISHER_H__

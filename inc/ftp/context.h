@@ -45,7 +45,6 @@ struct ConnectionSession {
   std::shared_ptr<TransferTask> transfer;
 };
 
-
 }  // namespace TLSS::FileStorage
 
 #endif  // __INC_FTP_CONTEXT_H__

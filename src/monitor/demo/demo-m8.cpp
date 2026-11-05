@@ -24,29 +24,26 @@ constexpr std::uint32_t MODULE_A_ID = 0x100U;
 constexpr auto HEARTBEAT_INTERVAL = 1s;
 constexpr TLSSMON::MonData::MonitorKey HEARTBEAT_KEY{MODULE_A_ID, 99U, 1U, 0U};
 constexpr TLSSMON::MonData::MonitorKey ERROR_KEY{MODULE_A_ID, 0U, 1U, 1U};
-bool register_demo_module(TLSSMON::Engine &engine) {
-  const TLSSMON::ModuleRegisterStatus status = engine.register_module(
-      {MODULE_A_ID,
-       "module-a",
-       "metadata service",
-       {{TLSSMON::MonitorLevel::INFO, "heartbeat"},
-        {TLSSMON::MonitorLevel::WARN, "metadata timeout"},
-        {TLSSMON::MonitorLevel::EMERGENCY_STOP, "metadata unavailable"}}});
+bool register_demo_module(TLSSMON::Engine& engine) {
+  const TLSSMON::ModuleRegisterStatus status =
+      engine.register_module({MODULE_A_ID,
+                              "module-a",
+                              "metadata service",
+                              {{TLSSMON::MonitorLevel::INFO, "heartbeat"},
+                               {TLSSMON::MonitorLevel::WARN, "metadata timeout"},
+                               {TLSSMON::MonitorLevel::EMERGENCY_STOP, "metadata unavailable"}}});
   if (status != TLSSMON::ModuleRegisterStatus::SUCCESS) {
-    std::cerr << "[demo] failed to register module-a: status="
-              << static_cast<int>(status) << '\n';
+    std::cerr << "[demo] failed to register module-a: status=" << static_cast<int>(status) << '\n';
 
     return false;
   }
 
   return true;
 }
-std::shared_ptr<TLSSMON::Wire::UdpPublisher>
-install_udp_publisher(TLSSMON::Engine &engine) {
-  auto publisher = std::make_shared<TLSSMON::Wire::UdpPublisher>(
-      TLSSMON::Wire::UdpPublisherConfig{
-          TLSSMON::Wire::UdpEndpoint{"127.0.0.1", UDP_DESTINATION_PORT},
-          TLSSMON::Wire::WireVersion::V2});
+std::shared_ptr<TLSSMON::Wire::UdpPublisher> install_udp_publisher(TLSSMON::Engine& engine) {
+  auto publisher = std::make_shared<TLSSMON::Wire::UdpPublisher>(TLSSMON::Wire::UdpPublisherConfig{
+      TLSSMON::Wire::UdpEndpoint{"127.0.0.1", UDP_DESTINATION_PORT},
+      TLSSMON::Wire::WireVersion::V2});
 
   if (!publisher->ready()) {
     std::cerr << "[demo] failed to initialize UDP publisher\n";
@@ -54,16 +51,14 @@ install_udp_publisher(TLSSMON::Engine &engine) {
     return {};
   }
 
-  const bool installed =
-      engine.set_publisher([publisher](TLSSMON::MonData::StoredRecord record) {
-        const TLSSMON::Wire::UdpPublishResult result = publisher->send(record);
+  const bool installed = engine.set_publisher([publisher](TLSSMON::MonData::StoredRecord record) {
+    const TLSSMON::Wire::UdpPublishResult result = publisher->send(record);
 
-        if (!result.success()) {
-          std::cerr << "[udp] send failed: status="
-                    << static_cast<int>(result._status)
-                    << " system_error=" << result._system_error << '\n';
-        }
-      });
+    if (!result.success()) {
+      std::cerr << "[udp] send failed: status=" << static_cast<int>(result._status)
+                << " system_error=" << result._system_error << '\n';
+    }
+  });
 
   if (!installed) {
     std::cerr << "[demo] Engine rejected UDP publisher\n";
@@ -74,34 +69,33 @@ install_udp_publisher(TLSSMON::Engine &engine) {
   return publisher;
 }
 
-bool register_heartbeat_timer(TLSSMON::Engine &engine,
-                              std::atomic<std::uint32_t> &heartbeat_count) {
+bool register_heartbeat_timer(TLSSMON::Engine& engine,
+                              std::atomic<std::uint32_t>& heartbeat_count) {
   const std::optional<TLSSMON::TimerHandle> handle = engine.set_timer(
-      TLSSMON::MonCallback{
-          "m8-heartbeat",
-          [&engine, &heartbeat_count]() -> int {
-            const std::uint32_t value =
-                heartbeat_count.fetch_add(1U, std::memory_order_relaxed) + 1U;
+      TLSSMON::MonCallback{"m8-heartbeat",
+                           [&engine, &heartbeat_count]() -> int {
+                             const std::uint32_t value =
+                                 heartbeat_count.fetch_add(1U, std::memory_order_relaxed) + 1U;
 
-            /*
-             * 不传 description。
-             *
-             * Reporter 应从 Engine Registry 补全：
-             *
-             * level = INFO
-             * description = "heartbeat"
-             */
-            const TLSSMON::MonData::UpdateResult result =
-                engine.report_count(HEARTBEAT_KEY, value);
+                             /*
+                              * 不传 description。
+                              *
+                              * Reporter 应从 Engine Registry 补全：
+                              *
+                              * level = INFO
+                              * description = "heartbeat"
+                              */
+                             const TLSSMON::MonData::UpdateResult result =
+                                 engine.report_count(HEARTBEAT_KEY, value);
 
-            std::cout << "[module-a] heartbeat=" << value
-                      << " update_status=" << static_cast<int>(result._status)
-                      << '\n'
-                      << std::flush;
+                             std::cout << "[module-a] heartbeat=" << value
+                                       << " update_status=" << static_cast<int>(result._status)
+                                       << '\n'
+                                       << std::flush;
 
-            return 0;
-          },
-          false},
+                             return 0;
+                           },
+                           false},
       TLSSMON::TimerFlags::RECURRING, HEARTBEAT_INTERVAL);
 
   if (!handle.has_value()) {
@@ -113,11 +107,9 @@ bool register_heartbeat_timer(TLSSMON::Engine &engine,
   return true;
 }
 
-bool register_stop_command(TLSSMON::CliRegistry &registry,
-                           TLSSMON::Engine &engine) {
+bool register_stop_command(TLSSMON::CliRegistry& registry, TLSSMON::Engine& engine) {
   const TLSSMON::CliRegisterStatus status = registry.register_command(
-      "stop", "stop monitor engine",
-      [&engine](const TLSSMON::CliArguments &) -> std::string {
+      "stop", "stop monitor engine", [&engine](const TLSSMON::CliArguments&) -> std::string {
         std::cout << "[demo] stop requested from CLI\n" << std::flush;
 
         engine.stop();
@@ -133,10 +125,8 @@ bool register_stop_command(TLSSMON::CliRegistry &registry,
   return true;
 }
 
-bool register_demo_commands(TLSSMON::CliRegistry &registry,
-                            TLSSMON::Engine &engine) {
-  if (TLSSMON::register_help_command(registry) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+bool register_demo_commands(TLSSMON::CliRegistry& registry, TLSSMON::Engine& engine) {
+  if (TLSSMON::register_help_command(registry) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
@@ -145,25 +135,22 @@ bool register_demo_commands(TLSSMON::CliRegistry &registry,
    *
    * 不能再创建或传入外部 MonitorModuleRegistry。
    */
-  if (TLSSMON::register_modules_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_modules_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_use_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_use_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_db_dump_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_db_dump_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
   return register_stop_command(registry, engine);
 }
 
-} // namespace
+}  // namespace
 int main() {
   TLSSMON::Engine engine{TLSSMON::MonConfig{"monitor-m8-demo", CLI_PORT, 1U}};
 
@@ -188,10 +175,9 @@ int main() {
     return 1;
   }
 
-  TLSSMON::CliServer cli{engine, registry,
-                         TLSSMON::CliServerConfig{engine.cli_port(),
-                                                  TLSSMON::CLI_MAX_CLIENTS,
-                                                  "storage"}};
+  TLSSMON::CliServer cli{
+      engine, registry,
+      TLSSMON::CliServerConfig{engine.cli_port(), TLSSMON::CLI_MAX_CLIENTS, "storage"}};
 
   if (!cli.start()) {
     std::cerr << "[demo] failed to start CLI server\n";
@@ -202,8 +188,7 @@ int main() {
   /*
    * 安装 V2 Publisher。
    */
-  const std::shared_ptr<TLSSMON::Wire::UdpPublisher> udp_publisher =
-      install_udp_publisher(engine);
+  const std::shared_ptr<TLSSMON::Wire::UdpPublisher> udp_publisher = install_udp_publisher(engine);
 
   if (!udp_publisher) {
     cli.close();
@@ -216,8 +201,7 @@ int main() {
    * report_error() 使用 force=true，因此必须插入；
    * Registry 把 level 规范化为 WARN，并补全 description。
    */
-  const TLSSMON::MonData::UpdateResult initial_error =
-      engine.report_error(ERROR_KEY, 0U);
+  const TLSSMON::MonData::UpdateResult initial_error = engine.report_error(ERROR_KEY, 0U);
 
   if (initial_error._status != TLSSMON::MonData::UpdateStatus::INSERTED) {
     std::cerr << "[demo] failed to report initial error: status="
@@ -240,8 +224,7 @@ int main() {
             << "[demo] commands: "
                "help, modules, use, db_dump, stop\n"
             << "[demo] module: module-a\n"
-            << "[demo] UDP V2 destination: 127.0.0.1:" << UDP_DESTINATION_PORT
-            << '\n'
+            << "[demo] UDP V2 destination: 127.0.0.1:" << UDP_DESTINATION_PORT << '\n'
             << std::flush;
 
   const TLSSMON::ENGINESTATE run_result = engine.run();
@@ -249,8 +232,7 @@ int main() {
   cli.close();
 
   if (run_result != TLSSMON::ENGINESTATE::SUCCESSFUL) {
-    std::cerr << "[demo] Engine stopped with error: "
-              << static_cast<int>(run_result) << '\n';
+    std::cerr << "[demo] Engine stopped with error: " << static_cast<int>(run_result) << '\n';
 
     return 1;
   }

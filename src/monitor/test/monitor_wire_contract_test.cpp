@@ -23,83 +23,64 @@ namespace {
  * 这些 static_assert 不运行任何编码逻辑；它们用于阻止后续实现随意
  * 改动版本号、值类型、结果结构或函数签名。
  */
-static_assert(std::is_enum_v<Wire::WireVersion>,
-              "WireVersion must be an enum");
-static_assert(
-    std::is_same_v<std::underlying_type_t<Wire::WireVersion>, std::uint8_t>,
-    "WireVersion must use uint8_t");
-static_assert(static_cast<std::uint8_t>(Wire::WireVersion::V1) == 1,
-              "V1 wire version must be 1");
-static_assert(static_cast<std::uint8_t>(Wire::WireVersion::V2) == 2,
-              "V2 wire version must be 2");
+static_assert(std::is_enum_v<Wire::WireVersion>, "WireVersion must be an enum");
+static_assert(std::is_same_v<std::underlying_type_t<Wire::WireVersion>, std::uint8_t>,
+              "WireVersion must use uint8_t");
+static_assert(static_cast<std::uint8_t>(Wire::WireVersion::V1) == 1, "V1 wire version must be 1");
+static_assert(static_cast<std::uint8_t>(Wire::WireVersion::V2) == 2, "V2 wire version must be 2");
 
-static_assert(std::is_enum_v<Wire::WireValueType>,
-              "WireValueType must be an enum");
-static_assert(
-    std::is_same_v<std::underlying_type_t<Wire::WireValueType>, std::uint8_t>,
-    "WireValueType must use uint8_t");
+static_assert(std::is_enum_v<Wire::WireValueType>, "WireValueType must be an enum");
+static_assert(std::is_same_v<std::underlying_type_t<Wire::WireValueType>, std::uint8_t>,
+              "WireValueType must use uint8_t");
 static_assert(static_cast<std::uint8_t>(Wire::WireValueType::NUMERIC) == 0,
               "numeric wire type must be 0");
 static_assert(static_cast<std::uint8_t>(Wire::WireValueType::STRING) == 1,
               "string wire type must be 1");
 
-constexpr Wire::WireStatus ALL_WIRE_STATUSES[]{
-    Wire::WireStatus::SUCCESS,
-    Wire::WireStatus::EMPTY_INPUT,
-    Wire::WireStatus::WRONG_VERSION,
-    Wire::WireStatus::INVALID_TYPE,
-    Wire::WireStatus::INVALID_FLAGS,
-    Wire::WireStatus::SHORT_HEADER,
-    Wire::WireStatus::INVALID_HEADER_LENGTH,
-    Wire::WireStatus::INVALID_TOTAL_LENGTH,
-    Wire::WireStatus::INVALID_FIELD_LENGTH,
-    Wire::WireStatus::INVALID_TIMESTAMP,
-    Wire::WireStatus::STRING_TOO_LONG,
-    Wire::WireStatus::DATAGRAM_TOO_LARGE};
+constexpr Wire::WireStatus ALL_WIRE_STATUSES[]{Wire::WireStatus::SUCCESS,
+                                               Wire::WireStatus::EMPTY_INPUT,
+                                               Wire::WireStatus::WRONG_VERSION,
+                                               Wire::WireStatus::INVALID_TYPE,
+                                               Wire::WireStatus::INVALID_FLAGS,
+                                               Wire::WireStatus::SHORT_HEADER,
+                                               Wire::WireStatus::INVALID_HEADER_LENGTH,
+                                               Wire::WireStatus::INVALID_TOTAL_LENGTH,
+                                               Wire::WireStatus::INVALID_FIELD_LENGTH,
+                                               Wire::WireStatus::INVALID_TIMESTAMP,
+                                               Wire::WireStatus::STRING_TOO_LONG,
+                                               Wire::WireStatus::DATAGRAM_TOO_LARGE};
 
-static_assert(std::size(ALL_WIRE_STATUSES) == 12,
-              "WireStatus contract changed");
+static_assert(std::size(ALL_WIRE_STATUSES) == 12, "WireStatus contract changed");
 
 static_assert(
-    std::is_same_v<decltype(std::declval<Wire::DecodedRecord &>()._version),
-                   Wire::WireVersion>,
+    std::is_same_v<decltype(std::declval<Wire::DecodedRecord&>()._version), Wire::WireVersion>,
     "DecodedRecord::_version type changed");
 static_assert(
-    std::is_same_v<decltype(std::declval<Wire::DecodedRecord &>()._data),
-                   MonData::MonitorData>,
+    std::is_same_v<decltype(std::declval<Wire::DecodedRecord&>()._data), MonData::MonitorData>,
     "DecodedRecord::_data type changed");
-static_assert(
-    std::is_same_v<decltype(std::declval<Wire::DecodedRecord &>()._changed_at),
-                   std::optional<MonData::MonitorTimestamp>>,
-    "DecodedRecord::_changed_at type changed");
+static_assert(std::is_same_v<decltype(std::declval<Wire::DecodedRecord&>()._changed_at),
+                             std::optional<MonData::MonitorTimestamp>>,
+              "DecodedRecord::_changed_at type changed");
 
 static_assert(
-    std::is_same_v<decltype(std::declval<Wire::EncodeResult &>()._status),
-                   Wire::WireStatus>,
+    std::is_same_v<decltype(std::declval<Wire::EncodeResult&>()._status), Wire::WireStatus>,
     "EncodeResult::_status type changed");
 static_assert(
-    std::is_same_v<decltype(std::declval<Wire::EncodeResult &>()._bytes),
-                   std::vector<std::uint8_t>>,
+    std::is_same_v<decltype(std::declval<Wire::EncodeResult&>()._bytes), std::vector<std::uint8_t>>,
     "EncodeResult::_bytes type changed");
 static_assert(
-    std::is_same_v<decltype(std::declval<Wire::DecodeResult &>()._status),
-                   Wire::WireStatus>,
+    std::is_same_v<decltype(std::declval<Wire::DecodeResult&>()._status), Wire::WireStatus>,
     "DecodeResult::_status type changed");
-static_assert(
-    std::is_same_v<decltype(std::declval<Wire::DecodeResult &>()._record),
-                   std::optional<Wire::DecodedRecord>>,
-    "DecodeResult::_record type changed");
+static_assert(std::is_same_v<decltype(std::declval<Wire::DecodeResult&>()._record),
+                             std::optional<Wire::DecodedRecord>>,
+              "DecodeResult::_record type changed");
 
-using ExpectedEncodeV1 = Wire::EncodeResult (*)(const MonData::StoredRecord &);
-using ExpectedEncodeV2 = Wire::EncodeResult (*)(const MonData::StoredRecord &);
-using ExpectedDecodeV1 = Wire::DecodeResult (*)(const std::uint8_t *,
-                                                std::size_t);
-using ExpectedDecodeV2 = Wire::DecodeResult (*)(const std::uint8_t *,
-                                                std::size_t);
-using ExpectedEncode = Wire::EncodeResult (*)(const MonData::StoredRecord &,
-                                              Wire::WireVersion);
-using ExpectedDecode = Wire::DecodeResult (*)(const std::uint8_t *,
-                                              std::size_t);
+using ExpectedEncodeV1 = Wire::EncodeResult (*)(const MonData::StoredRecord&);
+using ExpectedEncodeV2 = Wire::EncodeResult (*)(const MonData::StoredRecord&);
+using ExpectedDecodeV1 = Wire::DecodeResult (*)(const std::uint8_t*, std::size_t);
+using ExpectedDecodeV2 = Wire::DecodeResult (*)(const std::uint8_t*, std::size_t);
+using ExpectedEncode = Wire::EncodeResult (*)(const MonData::StoredRecord&, Wire::WireVersion);
+using ExpectedDecode = Wire::DecodeResult (*)(const std::uint8_t*, std::size_t);
 
 static_assert(std::is_same_v<decltype(&Wire::encode_v1), ExpectedEncodeV1>,
               "encode_v1 signature changed");
@@ -109,10 +90,8 @@ static_assert(std::is_same_v<decltype(&Wire::decode_v1), ExpectedDecodeV1>,
               "decode_v1 signature changed");
 static_assert(std::is_same_v<decltype(&Wire::decode_v2), ExpectedDecodeV2>,
               "decode_v2 signature changed");
-static_assert(std::is_same_v<decltype(&Wire::encode), ExpectedEncode>,
-              "encode signature changed");
-static_assert(std::is_same_v<decltype(&Wire::decode), ExpectedDecode>,
-              "decode signature changed");
+static_assert(std::is_same_v<decltype(&Wire::encode), ExpectedEncode>, "encode signature changed");
+static_assert(std::is_same_v<decltype(&Wire::decode), ExpectedDecode>, "decode signature changed");
 
 static_assert(std::is_move_constructible_v<Wire::EncodeResult>,
               "EncodeResult must be move constructible");
@@ -123,50 +102,37 @@ static_assert(std::is_move_constructible_v<Wire::DecodeResult>,
  * V1：18 字节头部；数值报文固定 26 字节；字符串报文最多 82 字节。
  * V2：固定头部 40 字节；完整 UDP 数据报最多 1200 字节。
  */
-static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V1_HEADER_SIZE)>,
-                             std::size_t>,
+static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V1_HEADER_SIZE)>, std::size_t>,
               "V1_HEADER_SIZE must use std::size_t");
 static_assert(
-    std::is_same_v<std::remove_cv_t<decltype(Wire::V1_NUMERIC_DATAGRAM_SIZE)>,
-                   std::size_t>,
+    std::is_same_v<std::remove_cv_t<decltype(Wire::V1_NUMERIC_DATAGRAM_SIZE)>, std::size_t>,
     "V1_NUMERIC_DATAGRAM_SIZE must use std::size_t");
-static_assert(
-    std::is_same_v<std::remove_cv_t<decltype(Wire::V1_MAX_DATAGRAM_SIZE)>,
-                   std::size_t>,
-    "V1_MAX_DATAGRAM_SIZE must use std::size_t");
-static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V2_HEADER_SIZE)>,
-                             std::size_t>,
+static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V1_MAX_DATAGRAM_SIZE)>, std::size_t>,
+              "V1_MAX_DATAGRAM_SIZE must use std::size_t");
+static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V2_HEADER_SIZE)>, std::size_t>,
               "V2_HEADER_SIZE must use std::size_t");
-static_assert(
-    std::is_same_v<std::remove_cv_t<decltype(Wire::V2_MAX_DATAGRAM_SIZE)>,
-                   std::size_t>,
-    "V2_MAX_DATAGRAM_SIZE must use std::size_t");
+static_assert(std::is_same_v<std::remove_cv_t<decltype(Wire::V2_MAX_DATAGRAM_SIZE)>, std::size_t>,
+              "V2_MAX_DATAGRAM_SIZE must use std::size_t");
 
-static_assert(Wire::V1_HEADER_SIZE == 18,
-              "V1 header must be exactly 18 bytes");
-static_assert(Wire::V1_NUMERIC_DATAGRAM_SIZE == 26,
-              "V1 numeric datagram must be exactly 26 bytes");
+static_assert(Wire::V1_HEADER_SIZE == 18, "V1 header must be exactly 18 bytes");
+static_assert(Wire::V1_NUMERIC_DATAGRAM_SIZE == 26, "V1 numeric datagram must be exactly 26 bytes");
 static_assert(Wire::V1_NUMERIC_DATAGRAM_SIZE == Wire::V1_HEADER_SIZE + 8,
               "V1 numeric payload must contain value and state");
-static_assert(Wire::V1_MAX_DATAGRAM_SIZE == 82,
-              "V1 maximum datagram must be exactly 82 bytes");
+static_assert(Wire::V1_MAX_DATAGRAM_SIZE == 82, "V1 maximum datagram must be exactly 82 bytes");
 static_assert(Wire::V1_MAX_DATAGRAM_SIZE == Wire::V1_HEADER_SIZE + 63 + 1,
               "V1 string payload must allow 63 bytes plus NUL");
 static_assert(Wire::V1_NUMERIC_DATAGRAM_SIZE < Wire::V1_MAX_DATAGRAM_SIZE,
               "V1 numeric size and maximum size are different concepts");
 
-static_assert(Wire::V2_HEADER_SIZE == 40,
-              "V2 header must be exactly 40 bytes");
-static_assert(Wire::V2_MAX_DATAGRAM_SIZE == 1200,
-              "V2 maximum datagram must be exactly 1200 bytes");
+static_assert(Wire::V2_HEADER_SIZE == 40, "V2 header must be exactly 40 bytes");
+static_assert(Wire::V2_MAX_DATAGRAM_SIZE == 1200, "V2 maximum datagram must be exactly 1200 bytes");
 static_assert(Wire::V2_HEADER_SIZE < Wire::V2_MAX_DATAGRAM_SIZE,
               "V2 header must fit in a V2 datagram");
 static_assert(Wire::V2_MAX_DATAGRAM_SIZE - Wire::V2_HEADER_SIZE == 1160,
               "V2 description and value must share 1160 payload bytes");
-static_assert(
-    Wire::V2_MAX_DATAGRAM_SIZE <=
-        static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()),
-    "V2 total length must fit in uint16_t");
+static_assert(Wire::V2_MAX_DATAGRAM_SIZE <=
+                  static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()),
+              "V2 total length must fit in uint16_t");
 static_assert(Wire::V1_MAX_DATAGRAM_SIZE <= Wire::V2_MAX_DATAGRAM_SIZE,
               "a V2-sized receive buffer must also hold V1 datagrams");
 
@@ -182,15 +148,14 @@ inline constexpr std::uint32_t GOLDEN_FID = 0x55667788U;
 inline constexpr std::uint32_t GOLDEN_EID = 3U;
 inline constexpr std::uint32_t GOLDEN_NUMERIC_VALUE = 12345U;
 inline constexpr std::uint32_t GOLDEN_NUMERIC_STATE = 2U;
-inline constexpr const char *GOLDEN_DESCRIPTION = "not-sent-by-v1";
+inline constexpr const char* GOLDEN_DESCRIPTION = "not-sent-by-v1";
 const MonData::MonitorTimestamp GOLDEN_TIMESTAMP{};
 
 MonData::StoredRecord make_numeric_golden_record() {
   return MonData::StoredRecord{
-      MonData::MonitorData{
-          MonData::MonitorKey{GOLDEN_MID, GOLDEN_LEVEL, GOLDEN_FID, GOLDEN_EID},
-          GOLDEN_DESCRIPTION,
-          MonData::NumericValue{GOLDEN_NUMERIC_VALUE, GOLDEN_NUMERIC_STATE}},
+      MonData::MonitorData{MonData::MonitorKey{GOLDEN_MID, GOLDEN_LEVEL, GOLDEN_FID, GOLDEN_EID},
+                           GOLDEN_DESCRIPTION,
+                           MonData::NumericValue{GOLDEN_NUMERIC_VALUE, GOLDEN_NUMERIC_STATE}},
       GOLDEN_TIMESTAMP};
 }
 
@@ -208,8 +173,7 @@ void test_numeric_golden_fixture() {
   assert(record._data._description == GOLDEN_DESCRIPTION);
   assert(record._changed_at == GOLDEN_TIMESTAMP);
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record._data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record._data._value);
   assert(numeric != nullptr);
   assert(numeric->_value == GOLDEN_NUMERIC_VALUE);
   assert(numeric->_state == GOLDEN_NUMERIC_STATE);
@@ -221,17 +185,15 @@ void test_numeric_golden_fixture() {
  * 以及 V1 不编码 description 和 timestamp。
  */
 void test_v1_numeric_matches_legacy_bytes() {
-  const std::vector<std::uint8_t> expected{
-      0x01, 0x00,                         // version, numeric type
-      0x11, 0x22, 0x33, 0x44,             // mid
-      0x55, 0x66, 0x77, 0x88,             // fid (legacy hid)
-      0x00, 0x00, 0x00, 0x03,             // eid
-      0x00, 0x00, 0x00, 0x04,             // level
-      0x00, 0x00, 0x30, 0x39,             // value = 12345
-      0x00, 0x00, 0x00, 0x02};            // state = fresh
+  const std::vector<std::uint8_t> expected{0x01, 0x00,               // version, numeric type
+                                           0x11, 0x22, 0x33, 0x44,   // mid
+                                           0x55, 0x66, 0x77, 0x88,   // fid (legacy hid)
+                                           0x00, 0x00, 0x00, 0x03,   // eid
+                                           0x00, 0x00, 0x00, 0x04,   // level
+                                           0x00, 0x00, 0x30, 0x39,   // value = 12345
+                                           0x00, 0x00, 0x00, 0x02};  // state = fresh
 
-  const Wire::EncodeResult result =
-      Wire::encode_v1(make_numeric_golden_record());
+  const Wire::EncodeResult result = Wire::encode_v1(make_numeric_golden_record());
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._bytes.size() == Wire::V1_NUMERIC_DATAGRAM_SIZE);
@@ -247,20 +209,15 @@ inline constexpr std::uint32_t STRING_MID = 1U;
 inline constexpr std::uint32_t STRING_LEVEL = 5U;
 inline constexpr std::uint32_t STRING_FID = 2U;
 inline constexpr std::uint32_t STRING_EID = 3U;
-inline constexpr const char *STRING_VALUE = "hello world";
-inline constexpr const char *STRING_DESCRIPTION =
-    "v1-description-not-on-wire";
+inline constexpr const char* STRING_VALUE = "hello world";
+inline constexpr const char* STRING_DESCRIPTION = "v1-description-not-on-wire";
 
-const MonData::MonitorTimestamp STRING_TIMESTAMP{
-    std::chrono::seconds{123456789}};
+const MonData::MonitorTimestamp STRING_TIMESTAMP{std::chrono::seconds{123456789}};
 
-MonData::StoredRecord make_string_golden_record(
-    std::string value = STRING_VALUE) {
+MonData::StoredRecord make_string_golden_record(std::string value = STRING_VALUE) {
   return MonData::StoredRecord{
-      MonData::MonitorData{
-          MonData::MonitorKey{STRING_MID, STRING_LEVEL, STRING_FID, STRING_EID},
-          STRING_DESCRIPTION,
-          std::move(value)},
+      MonData::MonitorData{MonData::MonitorKey{STRING_MID, STRING_LEVEL, STRING_FID, STRING_EID},
+                           STRING_DESCRIPTION, std::move(value)},
       STRING_TIMESTAMP};
 }
 
@@ -278,7 +235,7 @@ void test_string_golden_fixture() {
   assert(record._data._description == STRING_DESCRIPTION);
   assert(record._changed_at == STRING_TIMESTAMP);
 
-  const auto *value = std::get_if<std::string>(&record._data._value);
+  const auto* value = std::get_if<std::string>(&record._data._value);
   assert(value != nullptr);
   assert(*value == STRING_VALUE);
 }
@@ -288,19 +245,17 @@ void test_string_golden_fixture() {
  * 顺序、字符串内容以及结尾 NUL 均与旧协议一致。
  */
 void test_v1_string_matches_legacy_bytes() {
-  const std::vector<std::uint8_t> expected{
-      0x01, 0x01,                         // version, string type
-      0x00, 0x00, 0x00, 0x01,             // mid
-      0x00, 0x00, 0x00, 0x02,             // fid (legacy hid)
-      0x00, 0x00, 0x00, 0x03,             // eid
-      0x00, 0x00, 0x00, 0x05,             // level
-      0x68, 0x65, 0x6c, 0x6c, 0x6f,       // "hello"
-      0x20,                               // space
-      0x77, 0x6f, 0x72, 0x6c, 0x64,       // "world"
-      0x00};                              // trailing NUL
+  const std::vector<std::uint8_t> expected{0x01, 0x01,                    // version, string type
+                                           0x00, 0x00, 0x00, 0x01,        // mid
+                                           0x00, 0x00, 0x00, 0x02,        // fid (legacy hid)
+                                           0x00, 0x00, 0x00, 0x03,        // eid
+                                           0x00, 0x00, 0x00, 0x05,        // level
+                                           0x68, 0x65, 0x6c, 0x6c, 0x6f,  // "hello"
+                                           0x20,                          // space
+                                           0x77, 0x6f, 0x72, 0x6c, 0x64,  // "world"
+                                           0x00};                         // trailing NUL
 
-  const Wire::EncodeResult result =
-      Wire::encode_v1(make_string_golden_record());
+  const Wire::EncodeResult result = Wire::encode_v1(make_string_golden_record());
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._bytes.size() == Wire::V1_HEADER_SIZE + 11U + 1U);
@@ -329,16 +284,13 @@ void test_v1_string_ignores_metadata() {
  * 空字符串是合法值，报文仍需保留结尾 NUL，因此长度为 18 + 1。
  */
 void test_v1_empty_string_is_valid() {
-  const Wire::EncodeResult result =
-      Wire::encode_v1(make_string_golden_record(""));
+  const Wire::EncodeResult result = Wire::encode_v1(make_string_golden_record(""));
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._bytes.size() == Wire::V1_HEADER_SIZE + 1U);
   assert(result._bytes.size() == 19U);
-  assert(result._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V1));
-  assert(result._bytes.at(1) ==
-         static_cast<std::uint8_t>(Wire::WireValueType::STRING));
+  assert(result._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V1));
+  assert(result._bytes.at(1) == static_cast<std::uint8_t>(Wire::WireValueType::STRING));
   assert(result._bytes.back() == 0U);
 }
 
@@ -347,13 +299,12 @@ void test_v1_empty_string_is_valid() {
  */
 void test_v1_accepts_63_byte_string() {
   const std::string value(63U, 'A');
-  const Wire::EncodeResult result =
-      Wire::encode_v1(make_string_golden_record(value));
+  const Wire::EncodeResult result = Wire::encode_v1(make_string_golden_record(value));
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._bytes.size() == Wire::V1_MAX_DATAGRAM_SIZE);
-  for (std::size_t index = Wire::V1_HEADER_SIZE;
-       index < Wire::V1_HEADER_SIZE + value.size(); ++index) {
+  for (std::size_t index = Wire::V1_HEADER_SIZE; index < Wire::V1_HEADER_SIZE + value.size();
+       ++index) {
     assert(result._bytes.at(index) == static_cast<std::uint8_t>('A'));
   }
   assert(result._bytes.back() == 0U);
@@ -372,8 +323,7 @@ void test_v1_rejects_64_byte_string() {
   assert(result._bytes.empty());
 
   // 编码失败也不能改写调用方保存的字符串。
-  const auto *stored_value =
-      std::get_if<std::string>(&record._data._value);
+  const auto* stored_value = std::get_if<std::string>(&record._data._value);
   assert(stored_value != nullptr);
   assert(*stored_value == value);
 }
@@ -389,8 +339,7 @@ void test_v1_rejects_much_longer_string() {
   assert(result._status == Wire::WireStatus::STRING_TOO_LONG);
   assert(result._bytes.empty());
 
-  const auto *stored_value =
-      std::get_if<std::string>(&record._data._value);
+  const auto* stored_value = std::get_if<std::string>(&record._data._value);
   assert(stored_value != nullptr);
   assert(stored_value->size() == 1024U);
   assert(*stored_value == value);
@@ -425,7 +374,7 @@ void test_v1_near_maximum_string_sizes() {
  *
  * 总长度为 40 + 2 + 8 = 50 字节。
  */
-inline constexpr const char *V2_GOLDEN_DESCRIPTION = "v2";
+inline constexpr const char* V2_GOLDEN_DESCRIPTION = "v2";
 
 /*
  * 使用非零时间戳验证 64 位 seconds 和 32 位 nanoseconds 的大端序。
@@ -440,16 +389,14 @@ MonData::StoredRecord make_v2_numeric_golden_record() {
   record._data._description = V2_GOLDEN_DESCRIPTION;
 
   const auto elapsed =
-      std::chrono::seconds{V2_GOLDEN_SECONDS} +
-      std::chrono::nanoseconds{V2_GOLDEN_NANOSECONDS};
+      std::chrono::seconds{V2_GOLDEN_SECONDS} + std::chrono::nanoseconds{V2_GOLDEN_NANOSECONDS};
 
   /*
    * 不假设 system_clock::duration 的具体精度，显式转换到项目使用的
    * MonitorTimestamp::duration。
    */
   record._changed_at = MonData::MonitorTimestamp{
-      std::chrono::duration_cast<MonData::MonitorTimestamp::duration>(
-          elapsed)};
+      std::chrono::duration_cast<MonData::MonitorTimestamp::duration>(elapsed)};
 
   return record;
 }
@@ -458,8 +405,7 @@ MonData::StoredRecord make_v2_numeric_golden_record() {
  * 单独验证测试夹具，避免夹具字段构造错误掩盖 Codec 的真实问题。
  */
 void test_v2_numeric_golden_fixture() {
-  const MonData::StoredRecord record =
-      make_v2_numeric_golden_record();
+  const MonData::StoredRecord record = make_v2_numeric_golden_record();
 
   assert(record._data._key._mid == GOLDEN_MID);
   assert(record._data._key._level == GOLDEN_LEVEL);
@@ -469,19 +415,15 @@ void test_v2_numeric_golden_fixture() {
   assert(record._data._description == V2_GOLDEN_DESCRIPTION);
   assert(record._data._description.size() == 2U);
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record._data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record._data._value);
 
   assert(numeric != nullptr);
   assert(numeric->_value == GOLDEN_NUMERIC_VALUE);
   assert(numeric->_state == GOLDEN_NUMERIC_STATE);
 
   const auto elapsed = record._changed_at.time_since_epoch();
-  const auto seconds =
-      std::chrono::duration_cast<std::chrono::seconds>(elapsed);
-  const auto nanoseconds =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          elapsed - seconds);
+  const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
+  const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed - seconds);
 
   assert(seconds.count() == V2_GOLDEN_SECONDS);
   assert(nanoseconds.count() == V2_GOLDEN_NANOSECONDS);
@@ -500,27 +442,25 @@ void test_v2_numeric_golden_fixture() {
  * - NumericValue 固定占 8 字节。
  */
 void test_v2_numeric_matches_golden_bytes() {
-  const std::vector<std::uint8_t> expected{
-      0x02,                               // version = V2
-      0x00,                               // type = NUMERIC
-      0x00, 0x00,                         // flags = 0
-      0x00, 0x32,                         // total_length = 50
-      0x00, 0x28,                         // header_length = 40
-      0x11, 0x22, 0x33, 0x44,             // mid
-      0x00, 0x00, 0x00, 0x04,             // level
-      0x55, 0x66, 0x77, 0x88,             // fid
-      0x00, 0x00, 0x00, 0x03,             // eid
-      0x00, 0x00, 0x00, 0x00,             // timestamp seconds high bytes
-      0x01, 0x02, 0x03, 0x04,             // timestamp seconds low bytes
-      0x05, 0x06, 0x07, 0x08,             // timestamp nanoseconds
-      0x00, 0x02,                         // description_length = 2
-      0x00, 0x08,                         // value_length = 8
-      0x76, 0x32,                         // description = "v2"
-      0x00, 0x00, 0x30, 0x39,             // value = 12345
-      0x00, 0x00, 0x00, 0x02};            // state = fresh
+  const std::vector<std::uint8_t> expected{0x02,                     // version = V2
+                                           0x00,                     // type = NUMERIC
+                                           0x00, 0x00,               // flags = 0
+                                           0x00, 0x32,               // total_length = 50
+                                           0x00, 0x28,               // header_length = 40
+                                           0x11, 0x22, 0x33, 0x44,   // mid
+                                           0x00, 0x00, 0x00, 0x04,   // level
+                                           0x55, 0x66, 0x77, 0x88,   // fid
+                                           0x00, 0x00, 0x00, 0x03,   // eid
+                                           0x00, 0x00, 0x00, 0x00,   // timestamp seconds high bytes
+                                           0x01, 0x02, 0x03, 0x04,   // timestamp seconds low bytes
+                                           0x05, 0x06, 0x07, 0x08,   // timestamp nanoseconds
+                                           0x00, 0x02,               // description_length = 2
+                                           0x00, 0x08,               // value_length = 8
+                                           0x76, 0x32,               // description = "v2"
+                                           0x00, 0x00, 0x30, 0x39,   // value = 12345
+                                           0x00, 0x00, 0x00, 0x02};  // state = fresh
 
-  const Wire::EncodeResult result =
-      Wire::encode_v2(make_v2_numeric_golden_record());
+  const Wire::EncodeResult result = Wire::encode_v2(make_v2_numeric_golden_record());
 
   assert(result._status == Wire::WireStatus::SUCCESS);
   assert(result._bytes.size() == Wire::V2_HEADER_SIZE + 2U + 8U);
@@ -543,12 +483,10 @@ void test_v2_numeric_matches_golden_bytes() {
  * data[0] == 2 -> decode_v2()
  */
 void test_unified_encode_dispatches_v1() {
-  const MonData::StoredRecord record =
-      make_numeric_golden_record();
+  const MonData::StoredRecord record = make_numeric_golden_record();
 
   const Wire::EncodeResult direct = Wire::encode_v1(record);
-  const Wire::EncodeResult unified =
-      Wire::encode(record, Wire::WireVersion::V1);
+  const Wire::EncodeResult unified = Wire::encode(record, Wire::WireVersion::V1);
 
   assert(direct._status == Wire::WireStatus::SUCCESS);
   assert(unified._status == Wire::WireStatus::SUCCESS);
@@ -556,8 +494,7 @@ void test_unified_encode_dispatches_v1() {
   assert(unified._bytes == direct._bytes);
   assert(unified._bytes.size() == Wire::V1_NUMERIC_DATAGRAM_SIZE);
   assert(!unified._bytes.empty());
-  assert(unified._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V1));
+  assert(unified._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V1));
 }
 
 /*
@@ -565,12 +502,10 @@ void test_unified_encode_dispatches_v1() {
  * 入口只能负责分派，不能重新构造或修改 V2 数据报。
  */
 void test_unified_encode_dispatches_v2() {
-  const MonData::StoredRecord record =
-      make_v2_numeric_golden_record();
+  const MonData::StoredRecord record = make_v2_numeric_golden_record();
 
   const Wire::EncodeResult direct = Wire::encode_v2(record);
-  const Wire::EncodeResult unified =
-      Wire::encode(record, Wire::WireVersion::V2);
+  const Wire::EncodeResult unified = Wire::encode(record, Wire::WireVersion::V2);
 
   assert(direct._status == Wire::WireStatus::SUCCESS);
   assert(unified._status == Wire::WireStatus::SUCCESS);
@@ -578,8 +513,7 @@ void test_unified_encode_dispatches_v2() {
   assert(unified._bytes == direct._bytes);
   assert(unified._bytes.size() == 50U);
   assert(!unified._bytes.empty());
-  assert(unified._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V2));
+  assert(unified._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V2));
 }
 
 /*
@@ -587,19 +521,16 @@ void test_unified_encode_dispatches_v2() {
  * 就绕过 V1 编码器或改变旧 V1 的 NUL 终止行为。
  */
 void test_unified_encode_dispatches_v1_string() {
-  const MonData::StoredRecord record =
-      make_string_golden_record("legacy-string");
+  const MonData::StoredRecord record = make_string_golden_record("legacy-string");
 
   const Wire::EncodeResult direct = Wire::encode_v1(record);
-  const Wire::EncodeResult unified =
-      Wire::encode(record, Wire::WireVersion::V1);
+  const Wire::EncodeResult unified = Wire::encode(record, Wire::WireVersion::V1);
 
   assert(direct._status == Wire::WireStatus::SUCCESS);
   assert(unified._status == direct._status);
   assert(unified._bytes == direct._bytes);
   assert(!unified._bytes.empty());
-  assert(unified._bytes.front() ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V1));
+  assert(unified._bytes.front() == static_cast<std::uint8_t>(Wire::WireVersion::V1));
   assert(unified._bytes.back() == 0U);
 }
 
@@ -609,9 +540,7 @@ void test_unified_encode_dispatches_v1_string() {
  */
 void test_unified_encode_rejects_unknown_version() {
   const Wire::EncodeResult result =
-      Wire::encode(
-          make_numeric_golden_record(),
-          static_cast<Wire::WireVersion>(0xffU));
+      Wire::encode(make_numeric_golden_record(), static_cast<Wire::WireVersion>(0xffU));
 
   assert(result._status == Wire::WireStatus::WRONG_VERSION);
   assert(result._bytes.empty());
@@ -622,21 +551,18 @@ void test_unified_encode_rejects_unknown_version() {
  * Key 和数值，同时将缺失的元数据表达为空。
  */
 void test_unified_decode_dispatches_v1() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v1(make_numeric_golden_record());
+  const Wire::EncodeResult encoded = Wire::encode_v1(make_numeric_golden_record());
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(!encoded._bytes.empty());
-  assert(encoded._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V1));
+  assert(encoded._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V1));
 
-  const Wire::DecodeResult decoded =
-      Wire::decode(encoded._bytes.data(), encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
 
-  const Wire::DecodedRecord &record = *decoded._record;
+  const Wire::DecodedRecord& record = *decoded._record;
 
   assert(record._version == Wire::WireVersion::V1);
   assert(record._data._key._mid == GOLDEN_MID);
@@ -646,8 +572,7 @@ void test_unified_decode_dispatches_v1() {
   assert(record._data._description.empty());
   assert(!record._changed_at.has_value());
 
-  const auto *numeric =
-      std::get_if<MonData::NumericValue>(&record._data._value);
+  const auto* numeric = std::get_if<MonData::NumericValue>(&record._data._value);
 
   assert(numeric != nullptr);
   assert(numeric->_value == GOLDEN_NUMERIC_VALUE);
@@ -659,23 +584,20 @@ void test_unified_decode_dispatches_v1() {
  * timestamp、value 和 state。
  */
 void test_unified_decode_dispatches_v2() {
-  const MonData::StoredRecord source =
-      make_v2_numeric_golden_record();
+  const MonData::StoredRecord source = make_v2_numeric_golden_record();
 
   const Wire::EncodeResult encoded = Wire::encode_v2(source);
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(!encoded._bytes.empty());
-  assert(encoded._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V2));
+  assert(encoded._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V2));
 
-  const Wire::DecodeResult decoded =
-      Wire::decode(encoded._bytes.data(), encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
 
-  const Wire::DecodedRecord &record = *decoded._record;
+  const Wire::DecodedRecord& record = *decoded._record;
 
   assert(record._version == Wire::WireVersion::V2);
   assert(record._data._key._mid == source._data._key._mid);
@@ -686,10 +608,8 @@ void test_unified_decode_dispatches_v2() {
   assert(record._changed_at.has_value());
   assert(*record._changed_at == source._changed_at);
 
-  const auto *decoded_numeric =
-      std::get_if<MonData::NumericValue>(&record._data._value);
-  const auto *source_numeric =
-      std::get_if<MonData::NumericValue>(&source._data._value);
+  const auto* decoded_numeric = std::get_if<MonData::NumericValue>(&record._data._value);
+  const auto* source_numeric = std::get_if<MonData::NumericValue>(&source._data._value);
 
   assert(decoded_numeric != nullptr);
   assert(source_numeric != nullptr);
@@ -703,44 +623,32 @@ void test_unified_decode_dispatches_v2() {
  */
 void test_unified_v2_string_round_trip() {
   const std::string source_value{"ab\0cd", 5U};
-  const MonData::MonitorTimestamp timestamp{
-      std::chrono::seconds{123} +
-      std::chrono::nanoseconds{456}};
+  const MonData::MonitorTimestamp timestamp{std::chrono::seconds{123} +
+                                            std::chrono::nanoseconds{456}};
   const MonData::StoredRecord source{
-      MonData::MonitorData{
-          MonData::MonitorKey{1U, 2U, 3U, 4U},
-          "string-description",
-          source_value},
+      MonData::MonitorData{MonData::MonitorKey{1U, 2U, 3U, 4U}, "string-description", source_value},
       timestamp};
 
   const Wire::EncodeResult direct = Wire::encode_v2(source);
-  const Wire::EncodeResult unified =
-      Wire::encode(source, Wire::WireVersion::V2);
+  const Wire::EncodeResult unified = Wire::encode(source, Wire::WireVersion::V2);
 
   assert(direct._status == Wire::WireStatus::SUCCESS);
   assert(unified._status == direct._status);
   assert(unified._bytes == direct._bytes);
   assert(!unified._bytes.empty());
-  assert(unified._bytes.front() ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V2));
+  assert(unified._bytes.front() == static_cast<std::uint8_t>(Wire::WireVersion::V2));
 
-  const Wire::DecodeResult decoded =
-      Wire::decode(
-          unified._bytes.data(),
-          unified._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode(unified._bytes.data(), unified._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::SUCCESS);
   assert(decoded._record.has_value());
   assert(decoded._record->_version == Wire::WireVersion::V2);
   assert(decoded._record->_data._key == source._data._key);
-  assert(decoded._record->_data._description ==
-         source._data._description);
+  assert(decoded._record->_data._description == source._data._description);
   assert(decoded._record->_changed_at.has_value());
   assert(*decoded._record->_changed_at == timestamp);
 
-  const auto *decoded_value =
-      std::get_if<std::string>(
-          &decoded._record->_data._value);
+  const auto* decoded_value = std::get_if<std::string>(&decoded._record->_data._value);
 
   assert(decoded_value != nullptr);
   assert(*decoded_value == source_value);
@@ -779,20 +687,16 @@ void test_unified_decode_rejects_null_pointer_with_nonzero_size() {
  * 后，应由对应专用解码器返回 SHORT_HEADER。
  */
 void test_unified_decode_delegates_short_header_errors() {
-  const std::vector<std::uint8_t> short_v1{
-      static_cast<std::uint8_t>(Wire::WireVersion::V1)};
+  const std::vector<std::uint8_t> short_v1{static_cast<std::uint8_t>(Wire::WireVersion::V1)};
 
-  const Wire::DecodeResult v1_result =
-      Wire::decode(short_v1.data(), short_v1.size());
+  const Wire::DecodeResult v1_result = Wire::decode(short_v1.data(), short_v1.size());
 
   assert(v1_result._status == Wire::WireStatus::SHORT_HEADER);
   assert(!v1_result._record.has_value());
 
-  const std::vector<std::uint8_t> short_v2{
-      static_cast<std::uint8_t>(Wire::WireVersion::V2)};
+  const std::vector<std::uint8_t> short_v2{static_cast<std::uint8_t>(Wire::WireVersion::V2)};
 
-  const Wire::DecodeResult v2_result =
-      Wire::decode(short_v2.data(), short_v2.size());
+  const Wire::DecodeResult v2_result = Wire::decode(short_v2.data(), short_v2.size());
 
   assert(v2_result._status == Wire::WireStatus::SHORT_HEADER);
   assert(!v2_result._record.has_value());
@@ -803,17 +707,12 @@ void test_unified_decode_delegates_short_header_errors() {
  * 将它归类为 EMPTY_INPUT 或根据后续长度猜测协议。
  */
 void test_unified_decode_rejects_unknown_versions() {
-  const std::vector<std::uint8_t> unknown_versions{
-      0x00,
-      0x03,
-      0x7f,
-      0xff};
+  const std::vector<std::uint8_t> unknown_versions{0x00, 0x03, 0x7f, 0xff};
 
   for (const std::uint8_t version : unknown_versions) {
     const std::vector<std::uint8_t> datagram{version};
 
-    const Wire::DecodeResult result =
-        Wire::decode(datagram.data(), datagram.size());
+    const Wire::DecodeResult result = Wire::decode(datagram.data(), datagram.size());
 
     assert(result._status == Wire::WireStatus::WRONG_VERSION);
     assert(!result._record.has_value());
@@ -828,8 +727,7 @@ void test_unified_decode_does_not_guess_version_from_size() {
   std::vector<std::uint8_t> datagram(Wire::V2_HEADER_SIZE, 0U);
   datagram.at(0) = 0x03;
 
-  const Wire::DecodeResult result =
-      Wire::decode(datagram.data(), datagram.size());
+  const Wire::DecodeResult result = Wire::decode(datagram.data(), datagram.size());
 
   assert(result._status == Wire::WireStatus::WRONG_VERSION);
   assert(!result._record.has_value());
@@ -839,16 +737,13 @@ void test_unified_decode_does_not_guess_version_from_size() {
  * 专用 V1 解码器必须检查 version，不能接受合法的 V2 数据报。
  */
 void test_decode_v1_rejects_v2_datagram() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v2(make_v2_numeric_golden_record());
+  const Wire::EncodeResult encoded = Wire::encode_v2(make_v2_numeric_golden_record());
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(!encoded._bytes.empty());
-  assert(encoded._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V2));
+  assert(encoded._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V2));
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v1(encoded._bytes.data(), encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v1(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::WRONG_VERSION);
   assert(!decoded._record.has_value());
@@ -859,16 +754,13 @@ void test_decode_v1_rejects_v2_datagram() {
  * 仅仅归类为损坏或过短的 V2 数据报。
  */
 void test_decode_v2_rejects_v1_datagram() {
-  const Wire::EncodeResult encoded =
-      Wire::encode_v1(make_numeric_golden_record());
+  const Wire::EncodeResult encoded = Wire::encode_v1(make_numeric_golden_record());
 
   assert(encoded._status == Wire::WireStatus::SUCCESS);
   assert(!encoded._bytes.empty());
-  assert(encoded._bytes.at(0) ==
-         static_cast<std::uint8_t>(Wire::WireVersion::V1));
+  assert(encoded._bytes.at(0) == static_cast<std::uint8_t>(Wire::WireVersion::V1));
 
-  const Wire::DecodeResult decoded =
-      Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
+  const Wire::DecodeResult decoded = Wire::decode_v2(encoded._bytes.data(), encoded._bytes.size());
 
   assert(decoded._status == Wire::WireStatus::WRONG_VERSION);
   assert(!decoded._record.has_value());
@@ -882,10 +774,8 @@ void test_wrong_version_never_returns_record() {
   std::vector<std::uint8_t> datagram(Wire::V2_HEADER_SIZE, 0U);
   datagram.at(0) = 0xff;
 
-  const Wire::DecodeResult v1_result =
-      Wire::decode_v1(datagram.data(), datagram.size());
-  const Wire::DecodeResult v2_result =
-      Wire::decode_v2(datagram.data(), datagram.size());
+  const Wire::DecodeResult v1_result = Wire::decode_v1(datagram.data(), datagram.size());
+  const Wire::DecodeResult v2_result = Wire::decode_v2(datagram.data(), datagram.size());
 
   assert(v1_result._status == Wire::WireStatus::WRONG_VERSION);
   assert(v2_result._status == Wire::WireStatus::WRONG_VERSION);
@@ -893,7 +783,7 @@ void test_wrong_version_never_returns_record() {
   assert(!v2_result._record.has_value());
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_numeric_golden_fixture();

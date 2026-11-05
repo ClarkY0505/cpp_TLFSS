@@ -84,8 +84,8 @@ class EventLoop : NoCopy {
   using ChannelList = std::vector<Channel*>;
   std::atomic<bool> _looping;
   std::atomic<bool> _quit;
-  const pid_t _thread_id;                       // 记录当前loop所在线程的id
-  TIME::Timestamp _poll_return_time;            // poller 返回发生事件的channels的时间点
+  const pid_t _thread_id;             // 记录当前loop所在线程的id
+  TIME::Timestamp _poll_return_time;  // poller 返回发生事件的channels的时间点
   std::unique_ptr<Poller> _poller;
 
   //
@@ -97,9 +97,9 @@ class EventLoop : NoCopy {
   ChannelList _active_channels;
   Channel* _current_active_channel;
 
-  mutable std::mutex _mutex;               // 保护下列变量在线程中来安全操作一致性
+  mutable std::mutex _mutex;  // 保护下列变量在线程中来安全操作一致性
   std::atomic<bool> _calling_pending_functors;  // 标识当前loop是否有需要执行的回调操作
-  std::vector<Functor> _pending_functors;  // 存储loop需要执行的所有回调操作
+  std::vector<Functor> _pending_functors;       // 存储loop需要执行的所有回调操作
 };
 }  // namespace TLSS::NET
 

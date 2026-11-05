@@ -27,10 +27,8 @@ using namespace std::chrono_literals;
 
 constexpr std::uint32_t MODULE_ID = 0x901U;
 
-const MonData::NumericValue &
-numeric_value(const MonData::StoredRecord &record) {
-  assert(std::holds_alternative<MonData::NumericValue>(
-      record._data._value));
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  assert(std::holds_alternative<MonData::NumericValue>(record._data._value));
   return std::get<MonData::NumericValue>(record._data._value);
 }
 
@@ -39,8 +37,7 @@ AlarmEnqueueResult durable_result() {
 }
 
 template <typename Predicate>
-bool wait_until(Predicate predicate,
-                std::chrono::milliseconds timeout = 2s) {
+bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (!predicate() && std::chrono::steady_clock::now() < deadline) {
@@ -51,8 +48,7 @@ bool wait_until(Predicate predicate,
 }
 
 static_assert(std::is_same_v<Engine::AlarmPublisher, AlarmPublisher>);
-static_assert(std::is_invocable_r_v<AlarmEnqueueResult, AlarmPublisher,
-                                    MonData::StoredRecord>);
+static_assert(std::is_invocable_r_v<AlarmEnqueueResult, AlarmPublisher, MonData::StoredRecord>);
 
 /*
  * AlarmEnqueueResult 必须采用失败安全的默认值。只有 SUCCESS 表示候选记录
@@ -84,8 +80,7 @@ void test_error_falls_back_to_normal_publisher() {
   }));
 
   const MonData::MonitorKey key{MODULE_ID, 1U, 10U, 1U};
-  const MonData::UpdateResult result =
-      engine.report_error(key, 0U, "initial zero error");
+  const MonData::UpdateResult result = engine.report_error(key, 0U, "initial zero error");
 
   assert(result._status == MonData::UpdateStatus::INSERTED);
   assert(result.changed());
@@ -145,13 +140,11 @@ void test_enqueue_failures_and_exceptions_roll_back_and_can_retry() {
 
   for (std::size_t index = 0U; index < failures.size(); ++index) {
     const AlarmEnqueueStatus status = failures[index];
-    assert(engine.set_alarm_publisher(
-        [status](MonData::StoredRecord) {
-          return AlarmEnqueueResult{status, 28};
-        }));
+    assert(engine.set_alarm_publisher([status](MonData::StoredRecord) {
+      return AlarmEnqueueResult{status, 28};
+    }));
 
-    const MonData::MonitorKey key{
-        MODULE_ID, 2U, 20U, static_cast<std::uint32_t>(index)};
+    const MonData::MonitorKey key{MODULE_ID, 2U, 20U, static_cast<std::uint32_t>(index)};
     const auto result = engine.report_error(key, 11U, "must roll back");
 
     assert(result._status == MonData::UpdateStatus::DURABILITY_FAILED);
@@ -161,17 +154,17 @@ void test_enqueue_failures_and_exceptions_roll_back_and_can_retry() {
   }
 
   const MonData::MonitorKey retry_key{MODULE_ID, 2U, 20U, 100U};
-  assert(engine.set_alarm_publisher(
-      [](MonData::StoredRecord) -> AlarmEnqueueResult {
-        throw std::runtime_error("simulated spool exception");
-      }));
+  assert(engine.set_alarm_publisher([](MonData::StoredRecord) -> AlarmEnqueueResult {
+    throw std::runtime_error("simulated spool exception");
+  }));
 
   const auto thrown = engine.report_error(retry_key, 17U, "throw");
   assert(thrown._status == MonData::UpdateStatus::DURABILITY_FAILED);
   assert(!engine.find_data(retry_key).has_value());
 
-  assert(engine.set_alarm_publisher(
-      [](MonData::StoredRecord) { return durable_result(); }));
+  assert(engine.set_alarm_publisher([](MonData::StoredRecord) {
+    return durable_result();
+  }));
   const auto retried = engine.report_error(retry_key, 17U, "retry");
   assert(retried._status == MonData::UpdateStatus::INSERTED);
   assert(engine.find_data(retry_key).has_value());
@@ -185,8 +178,9 @@ void test_failed_reliable_update_preserves_existing_record() {
   Engine engine{MonConfig{"m9-alarm-existing", 0U, 1U}};
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-  assert(engine.set_alarm_publisher(
-      [](MonData::StoredRecord) { return durable_result(); }));
+  assert(engine.set_alarm_publisher([](MonData::StoredRecord) {
+    return durable_result();
+  }));
 
   const MonData::MonitorKey key{MODULE_ID, 2U, 21U, 1U};
   assert(engine.report_error(key, 20U, "old description")._status ==
@@ -206,8 +200,9 @@ void test_failed_reliable_update_preserves_existing_record() {
   assert(after_failure->_data._description == before->_data._description);
   assert(after_failure->_changed_at == before->_changed_at);
 
-  assert(engine.set_alarm_publisher(
-      [](MonData::StoredRecord) { return durable_result(); }));
+  assert(engine.set_alarm_publisher([](MonData::StoredRecord) {
+    return durable_result();
+  }));
   const auto retried = engine.report_error(key, 21U, "new description");
   assert(retried._status == MonData::UpdateStatus::UPDATED);
   assert(numeric_value(*engine.find_data(key))._value == 21U);
@@ -221,13 +216,13 @@ void test_alarm_publisher_receives_enriched_copy() {
   Engine engine{MonConfig{"m9-alarm-enrichment", 0U, 1U}};
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-  assert(engine.register_module(MonitorModuleInfo{
-             MODULE_ID,
-             "reliable-module",
-             "reliable alarm test module",
-             {{MonitorLevel::INFO, "unused"},
-              {MonitorLevel::EMERGENCY_STOP, "disk unavailable"}}}) ==
-         ModuleRegisterStatus::SUCCESS);
+  assert(
+      engine.register_module(MonitorModuleInfo{
+          MODULE_ID,
+          "reliable-module",
+          "reliable alarm test module",
+          {{MonitorLevel::INFO, "unused"}, {MonitorLevel::EMERGENCY_STOP, "disk unavailable"}}}) ==
+      ModuleRegisterStatus::SUCCESS);
 
   MonData::StoredRecord received;
   bool called = false;
@@ -245,8 +240,7 @@ void test_alarm_publisher_receives_enriched_copy() {
   assert(result._status == MonData::UpdateStatus::INSERTED);
   assert(called);
 
-  const std::uint32_t expected_level =
-      static_cast<std::uint32_t>(MonitorLevel::EMERGENCY_STOP);
+  const std::uint32_t expected_level = static_cast<std::uint32_t>(MonitorLevel::EMERGENCY_STOP);
   assert(received._data._key._level == expected_level);
   assert(received._data._description == "disk unavailable");
   assert(numeric_value(received)._value == 31U);
@@ -284,8 +278,7 @@ void test_non_error_reporting_stays_on_normal_publisher() {
          MonData::UpdateStatus::INSERTED);
   assert(engine
              .update_data(MonData::MonitorData{
-                 {MODULE_ID, 0U, 40U, 3U}, "direct",
-                 MonData::NumericValue{3U, 0U}})
+                 {MODULE_ID, 0U, 40U, 3U}, "direct", MonData::NumericValue{3U, 0U}})
              ._status == MonData::UpdateStatus::INSERTED);
 
   assert(normal_calls.load(std::memory_order_relaxed) == 3U);
@@ -320,19 +313,22 @@ void test_unregister_affects_only_future_alarm_reports() {
     std::unique_lock<std::mutex> lock(gate_mutex);
     entered = true;
     gate_condition.notify_all();
-    gate_condition.wait(lock, [&] { return release; });
+    gate_condition.wait(lock, [&] {
+      return release;
+    });
     return durable_result();
   }));
 
   MonData::UpdateResult first_result;
   std::thread reporter([&] {
-    first_result =
-        engine.report_error({MODULE_ID, 1U, 50U, 1U}, 1U, "in flight");
+    first_result = engine.report_error({MODULE_ID, 1U, 50U, 1U}, 1U, "in flight");
   });
 
   {
     std::unique_lock<std::mutex> lock(gate_mutex);
-    assert(gate_condition.wait_for(lock, 2s, [&] { return entered; }));
+    assert(gate_condition.wait_for(lock, 2s, [&] {
+      return entered;
+    }));
   }
 
   std::atomic<bool> unregistered{false};
@@ -359,8 +355,7 @@ void test_unregister_affects_only_future_alarm_reports() {
   assert(first_result._status == MonData::UpdateStatus::INSERTED);
   assert(alarm_calls.load(std::memory_order_relaxed) == 1U);
 
-  const auto second =
-      engine.report_error({MODULE_ID, 1U, 50U, 2U}, 2U, "after unregister");
+  const auto second = engine.report_error({MODULE_ID, 1U, 50U, 2U}, 2U, "after unregister");
   assert(second._status == MonData::UpdateStatus::INSERTED);
   assert(alarm_calls.load(std::memory_order_relaxed) == 1U);
   assert(normal_calls.load(std::memory_order_relaxed) == 1U);
@@ -397,14 +392,12 @@ void test_concurrent_same_error_enqueues_once() {
   }
 
   start.store(true, std::memory_order_release);
-  for (std::thread &worker : workers) {
+  for (std::thread& worker : workers) {
     worker.join();
   }
 
-  assert(std::count(statuses.begin(), statuses.end(),
-                    MonData::UpdateStatus::INSERTED) == 1);
-  assert(std::count(statuses.begin(), statuses.end(),
-                    MonData::UpdateStatus::UNCHANGED) ==
+  assert(std::count(statuses.begin(), statuses.end(), MonData::UpdateStatus::INSERTED) == 1);
+  assert(std::count(statuses.begin(), statuses.end(), MonData::UpdateStatus::UNCHANGED) ==
          static_cast<std::ptrdiff_t>(thread_count - 1U));
   assert(alarm_calls.load(std::memory_order_relaxed) == 1U);
   assert(engine.query_data().size() == 1U);
@@ -417,8 +410,9 @@ void test_concurrent_same_error_enqueues_once() {
 void test_engine_lifecycle_rules_for_alarm_publisher() {
   Engine engine{MonConfig{"m9-alarm-lifecycle", 0U, 1U}};
 
-  const auto publisher =
-      [](MonData::StoredRecord) { return durable_result(); };
+  const auto publisher = [](MonData::StoredRecord) {
+    return durable_result();
+  };
   assert(!engine.set_alarm_publisher(publisher));
   assert(engine.report_error({MODULE_ID, 1U, 70U, 1U}, 1U)._status ==
          MonData::UpdateStatus::INVALID);
@@ -431,25 +425,30 @@ void test_engine_lifecycle_rules_for_alarm_publisher() {
   bool entered = false;
   bool release = false;
 
-  const auto timer = engine.set_timer(
-      MonCallback{"m9-blocking-worker",
-                  [&]() -> int {
-                    std::unique_lock<std::mutex> lock(gate_mutex);
-                    entered = true;
-                    gate_condition.notify_all();
-                    gate_condition.wait(lock, [&] { return release; });
-                    return 0;
-                  },
-                  false},
-      TimerFlags::RECURRING | TimerFlags::WORKER, 1ms);
+  const auto timer = engine.set_timer(MonCallback{"m9-blocking-worker",
+                                                  [&]() -> int {
+                                                    std::unique_lock<std::mutex> lock(gate_mutex);
+                                                    entered = true;
+                                                    gate_condition.notify_all();
+                                                    gate_condition.wait(lock, [&] {
+                                                      return release;
+                                                    });
+                                                    return 0;
+                                                  },
+                                                  false},
+                                      TimerFlags::RECURRING | TimerFlags::WORKER, 1ms);
   assert(timer.has_value());
 
   ENGINESTATE run_result = ENGINESTATE::INITFAILED;
-  std::thread runner([&] { run_result = engine.run(); });
+  std::thread runner([&] {
+    run_result = engine.run();
+  });
 
   {
     std::unique_lock<std::mutex> lock(gate_mutex);
-    assert(gate_condition.wait_for(lock, 2s, [&] { return entered; }));
+    assert(gate_condition.wait_for(lock, 2s, [&] {
+      return entered;
+    }));
   }
   assert(engine.get_phase() == EnginePhase::RUNNING);
   assert(engine.set_alarm_publisher(publisher));
@@ -474,7 +473,7 @@ void test_engine_lifecycle_rules_for_alarm_publisher() {
          MonData::UpdateStatus::INVALID);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_alarm_enqueue_result_contract();

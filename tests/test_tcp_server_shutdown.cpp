@@ -15,14 +15,16 @@
 namespace {
 using namespace std::chrono_literals;
 
-// 断言失败直接终止测试进程，避免后续网络操作掩盖首个失败点。 / Terminate the test process immediately on assertion failure so later network operations cannot hide the first failure.
+// 断言失败直接终止测试进程，避免后续网络操作掩盖首个失败点。 / Terminate the test process
+// immediately on assertion failure so later network operations cannot hide the first failure.
 void require(bool condition) {
   if (!condition) {
     std::abort();
   }
 }
 
-// 让内核分配本机临时端口，供每个停机场景独立监听。 / Let the kernel assign a local ephemeral port for each shutdown scenario to listen independently.
+// 让内核分配本机临时端口，供每个停机场景独立监听。 / Let the kernel assign a local ephemeral port
+// for each shutdown scenario to listen independently.
 uint16_t reserve_port() {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   require(fd >= 0);
@@ -37,7 +39,8 @@ uint16_t reserve_port() {
   return port;
 }
 
-// 建立测试客户端；连接失败时返回 -1，便于验证监听已关闭。 / Create a test client; return -1 on connection failure to verify that the listener has closed.
+// 建立测试客户端；连接失败时返回 -1，便于验证监听已关闭。 / Create a test client; return -1 on
+// connection failure to verify that the listener has closed.
 int connect_to(uint16_t port) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   require(fd >= 0);
@@ -51,9 +54,11 @@ int connect_to(uint16_t port) {
   }
   return fd;
 }
-}  // namespace / 命名空间结束
+}  // namespace
 
-// 验证停止接收后新连接被拒绝，旧连接完成半关闭并等待对端 FIN。 / Verify that new connections are rejected after accepting stops, while existing connections half-close and wait for the peer's FIN.
+// 验证停止接收后新连接被拒绝，旧连接完成半关闭并等待对端 FIN。 / Verify that new connections are
+// rejected after accepting stops, while existing connections half-close and wait for the peer's
+// FIN.
 void graceful_close_after_peer_fin() {
   const uint16_t port = reserve_port();
   TLSS::NET::EventLoop loop;
@@ -75,13 +80,17 @@ void graceful_close_after_peer_fin() {
 
     std::promise<void> paused;
     auto paused_future = paused.get_future();
-    server.stop_accepting([&] { paused.set_value(); });
+    server.stop_accepting([&] {
+      paused.set_value();
+    });
     require(paused_future.wait_for(5s) == std::future_status::ready);
     require(connect_to(port) < 0);
 
     std::promise<void> drained;
     auto drained_future = drained.get_future();
-    server.shutdown_connections([&] { drained.set_value(); });
+    server.shutdown_connections([&] {
+      drained.set_value();
+    });
     char byte = 0;
     require(::recv(client, &byte, 1, 0) == 0);
     ::close(client);
@@ -95,7 +104,8 @@ void graceful_close_after_peer_fin() {
   controller.join();
 }
 
-// 验证零 IO 工作线程时，未主动关闭的客户端可被超时路径强制清理。 / Verify that with zero IO worker threads, the timeout path forcibly cleans up clients that do not close themselves.
+// 验证零 IO 工作线程时，未主动关闭的客户端可被超时路径强制清理。 / Verify that with zero IO worker
+// threads, the timeout path forcibly cleans up clients that do not close themselves.
 void force_close_idle_peer_without_io_threads() {
   const uint16_t port = reserve_port();
   TLSS::NET::EventLoop loop;
@@ -116,12 +126,16 @@ void force_close_idle_peer_without_io_threads() {
 
     std::promise<void> paused;
     auto paused_future = paused.get_future();
-    server.stop_accepting([&] { paused.set_value(); });
+    server.stop_accepting([&] {
+      paused.set_value();
+    });
     require(paused_future.wait_for(5s) == std::future_status::ready);
 
     std::promise<void> drained;
     auto drained_future = drained.get_future();
-    server.shutdown_connections([&] { drained.set_value(); });
+    server.shutdown_connections([&] {
+      drained.set_value();
+    });
     require(drained_future.wait_for(50ms) == std::future_status::timeout);
     server.force_close_connections();
     require(drained_future.wait_for(5s) == std::future_status::ready);
@@ -134,7 +148,8 @@ void force_close_idle_peer_without_io_threads() {
   controller.join();
 }
 
-// 验证未连接 socket 的预期错误不会使 shutdown_write 终止进程。 / Verify that expected errors on an unconnected socket do not make shutdown_write terminate the process.
+// 验证未连接 socket 的预期错误不会使 shutdown_write 终止进程。 / Verify that expected errors on an
+// unconnected socket do not make shutdown_write terminate the process.
 void shutdown_write_on_unconnected_socket_is_nonfatal() {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   require(fd >= 0);
@@ -142,7 +157,8 @@ void shutdown_write_on_unconnected_socket_is_nonfatal() {
   socket.shutdown_write();
 }
 
-// 依次执行预期错误、优雅关闭和强制关闭三个回归场景。 / Run regression scenarios for expected errors, graceful shutdown, and forced shutdown in sequence.
+// 依次执行预期错误、优雅关闭和强制关闭三个回归场景。 / Run regression scenarios for expected
+// errors, graceful shutdown, and forced shutdown in sequence.
 int main() {
   shutdown_write_on_unconnected_socket_is_nonfatal();
   graceful_close_after_peer_fin();

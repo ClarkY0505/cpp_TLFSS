@@ -17,8 +17,7 @@ using namespace std::chrono_literals;
 
 constexpr std::uint32_t MODULE_ID = 0x100U;
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
   while (std::chrono::steady_clock::now() < deadline) {
@@ -37,8 +36,7 @@ MonitorModuleInfo standard_module() {
       MODULE_ID,
       "module-a",
       "metadata service",
-      {{MonitorLevel::INFO, "heartbeat"},
-       {MonitorLevel::WARN, "metadata timeout"}}};
+      {{MonitorLevel::INFO, "heartbeat"}, {MonitorLevel::WARN, "metadata timeout"}}};
 }
 
 /* 模块只能在 READY 注册；CREATED 阶段必须明确拒绝。 */
@@ -46,22 +44,19 @@ void test_module_registration_requires_ready_phase() {
   Engine engine{MonConfig{"m8-module-phase", 0U, 1U}};
 
   assert(engine.get_phase() == EnginePhase::CREATED);
-  assert(engine.register_module(standard_module()) ==
-         ModuleRegisterStatus::INVALID_PHASE);
+  assert(engine.register_module(standard_module()) == ModuleRegisterStatus::INVALID_PHASE);
   assert(engine.modules().empty());
 
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::READY);
-  assert(engine.register_module(standard_module()) ==
-         ModuleRegisterStatus::SUCCESS);
+  assert(engine.register_module(standard_module()) == ModuleRegisterStatus::SUCCESS);
 }
 
 /* Engine 的所有模块查询都返回独立副本，并读取同一份错误表。 */
 void test_engine_module_queries_return_value_snapshots() {
   Engine engine{MonConfig{"m8-module-snapshot", 0U, 1U}};
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
-  assert(engine.register_module(standard_module()) ==
-         ModuleRegisterStatus::SUCCESS);
+  assert(engine.register_module(standard_module()) == ModuleRegisterStatus::SUCCESS);
 
   auto by_id = engine.find_module_by_id(MODULE_ID);
   auto by_name = engine.find_module_by_name("module-a");
@@ -93,14 +88,12 @@ void test_invalid_error_level_does_not_partially_register_module() {
   Engine engine{MonConfig{"m8-invalid-level", 0U, 1U}};
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
 
-  MonitorModuleInfo invalid{
-      0x200U,
-      "invalid-module",
-      "invalid metadata",
-      {{static_cast<MonitorLevel>(99U), "invalid level"}}};
+  MonitorModuleInfo invalid{0x200U,
+                            "invalid-module",
+                            "invalid metadata",
+                            {{static_cast<MonitorLevel>(99U), "invalid level"}}};
 
-  assert(engine.register_module(std::move(invalid)) ==
-         ModuleRegisterStatus::INVALID_ERROR_LEVEL);
+  assert(engine.register_module(std::move(invalid)) == ModuleRegisterStatus::INVALID_ERROR_LEVEL);
   assert(!engine.find_module_by_id(0x200U).has_value());
   assert(!engine.find_module_by_name("invalid-module").has_value());
   assert(!engine.find_error(0x200U, 0U).has_value());
@@ -114,37 +107,34 @@ void test_invalid_error_level_does_not_partially_register_module() {
 void test_running_freezes_modules_and_stopped_keeps_snapshots() {
   Engine engine{MonConfig{"m8-module-lifecycle", 0U, 1U}};
   assert(engine.init() == ENGINESTATE::SUCCESSFUL);
-  assert(engine.register_module(standard_module()) ==
-         ModuleRegisterStatus::SUCCESS);
+  assert(engine.register_module(standard_module()) == ModuleRegisterStatus::SUCCESS);
 
   const MonData::MonitorKey supplied{MODULE_ID, 99U, 7U, 0U};
-  const MonData::MonitorKey normalized{
-      MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::INFO), 7U, 0U};
+  const MonData::MonitorKey normalized{MODULE_ID, static_cast<std::uint32_t>(MonitorLevel::INFO),
+                                       7U, 0U};
 
-  const MonData::UpdateResult inserted =
-      engine.report_count(supplied, 1U);
+  const MonData::UpdateResult inserted = engine.report_count(supplied, 1U);
   assert(inserted._status == MonData::UpdateStatus::INSERTED);
 
   std::promise<ENGINESTATE> result_promise;
   std::future<ENGINESTATE> result = result_promise.get_future();
-  std::thread runner([&] { result_promise.set_value(engine.run()); });
+  std::thread runner([&] {
+    result_promise.set_value(engine.run());
+  });
 
   assert(wait_for_phase(engine, EnginePhase::RUNNING, 2s));
-  assert(engine.register_module(
-             {0x300U, "late-module", "must be rejected", {}}) ==
+  assert(engine.register_module({0x300U, "late-module", "must be rejected", {}}) ==
          ModuleRegisterStatus::INVALID_PHASE);
 
   engine.stop();
 
-  const MonData::UpdateResult rejected =
-      engine.report_count(supplied, 2U);
+  const MonData::UpdateResult rejected = engine.report_count(supplied, 2U);
   assert(rejected._status == MonData::UpdateStatus::INVALID);
 
   runner.join();
   assert(result.get() == ENGINESTATE::SUCCESSFUL);
   assert(engine.get_phase() == EnginePhase::STOPPED);
-  assert(engine.register_module(
-             {0x400U, "stopped-module", "must be rejected", {}}) ==
+  assert(engine.register_module({0x400U, "stopped-module", "must be rejected", {}}) ==
          ModuleRegisterStatus::INVALID_PHASE);
 
   assert(engine.find_module_by_id(MODULE_ID).has_value());
@@ -168,8 +158,7 @@ void test_engine_destruction_keeps_reporter_registry_reference_valid() {
   for (std::size_t index = 0U; index < iterations; ++index) {
     Engine engine{MonConfig{"m8-destruction", 0U, 1U}};
     assert(engine.init() == ENGINESTATE::SUCCESSFUL);
-    assert(engine.register_module(standard_module()) ==
-           ModuleRegisterStatus::SUCCESS);
+    assert(engine.register_module(standard_module()) == ModuleRegisterStatus::SUCCESS);
 
     assert(engine.set_publisher([&](MonData::StoredRecord record) {
       assert(record._data._description == "heartbeat");
@@ -177,15 +166,15 @@ void test_engine_destruction_keeps_reporter_registry_reference_valid() {
       published.fetch_add(1U, std::memory_order_relaxed);
     }));
 
-    const auto result = engine.report_count(
-        {MODULE_ID, 99U, static_cast<std::uint32_t>(index), 0U}, 1U);
+    const auto result =
+        engine.report_count({MODULE_ID, 99U, static_cast<std::uint32_t>(index), 0U}, 1U);
     assert(result._status == MonData::UpdateStatus::INSERTED);
   }
 
   assert(published.load(std::memory_order_relaxed) == iterations);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_module_registration_requires_ready_phase();

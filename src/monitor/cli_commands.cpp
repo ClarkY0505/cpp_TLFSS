@@ -21,41 +21,39 @@
 namespace TLSSMON {
 namespace {
 
-constexpr const char *HELP_COMMAND_NAME = "help";
-constexpr const char *HELP_COMMAND_DESCRIPTION = "list available commands";
-constexpr const char *DB_DUMP_COMMAND_NAME = "db_dump";
-constexpr const char *DB_DUMP_COMMAND_DESCRIPTION = "dump monitor records";
-constexpr const char *MODULES_COMMAND_NAME = "modules";
-constexpr const char *MODULES_COMMAND_DESCRIPTION = "list registered modules";
-constexpr const char *MODULES_COMMAND_USAGE = "usage: modules\n";
-constexpr const char *USE_COMMAND_NAME = "use";
-constexpr const char *USE_COMMAND_DESCRIPTION = "select active module";
-constexpr const char *USE_COMMAND_USAGE = "usage: use <module|all>\n";
+constexpr const char* HELP_COMMAND_NAME = "help";
+constexpr const char* HELP_COMMAND_DESCRIPTION = "list available commands";
+constexpr const char* DB_DUMP_COMMAND_NAME = "db_dump";
+constexpr const char* DB_DUMP_COMMAND_DESCRIPTION = "dump monitor records";
+constexpr const char* MODULES_COMMAND_NAME = "modules";
+constexpr const char* MODULES_COMMAND_DESCRIPTION = "list registered modules";
+constexpr const char* MODULES_COMMAND_USAGE = "usage: modules\n";
+constexpr const char* USE_COMMAND_NAME = "use";
+constexpr const char* USE_COMMAND_DESCRIPTION = "select active module";
+constexpr const char* USE_COMMAND_USAGE = "usage: use <module|all>\n";
 constexpr std::int64_t NANOSECONDS_PER_SECOND = INT64_C(1'000'000'000);
-constexpr const char *ALARM_STATUS_COMMAND_NAME = "alarm_status";
-constexpr const char *ALARM_STATUS_COMMAND_DESCRIPTION =
-    "show reliable alarm channel state";
-constexpr const char *ALARM_STATUS_COMMAND_USAGE = "usage: alarm_status\n";
+constexpr const char* ALARM_STATUS_COMMAND_NAME = "alarm_status";
+constexpr const char* ALARM_STATUS_COMMAND_DESCRIPTION = "show reliable alarm channel state";
+constexpr const char* ALARM_STATUS_COMMAND_USAGE = "usage: alarm_status\n";
 
-const char *cli_boolean(bool value) noexcept {
+const char* cli_boolean(bool value) noexcept {
   return value ? "true" : "false";
 }
 
-static_assert(std::is_same_v<MonData::MonitorTimestamp::duration,
-                             std::chrono::nanoseconds>,
+static_assert(std::is_same_v<MonData::MonitorTimestamp::duration, std::chrono::nanoseconds>,
               "MonitorTimestamp must use nanosecond precision");
 
 static_assert(std::is_signed_v<MonData::MonitorTimestamp::duration::rep>,
               "MonitorTimestamp representation must be signed");
 
-std::string format_modules(const std::vector<MonitorModuleInfo> &modules) {
+std::string format_modules(const std::vector<MonitorModuleInfo>& modules) {
   if (modules.empty()) {
     return "0 modules\n";
   }
 
   std::string output;
 
-  for (const MonitorModuleInfo &module : modules) {
+  for (const MonitorModuleInfo& module : modules) {
     output += module._name;
     output += " mid=";
     output += std::to_string(module._mid);
@@ -65,20 +63,19 @@ std::string format_modules(const std::vector<MonitorModuleInfo> &modules) {
   return output;
 }
 
-std::string format_help(const std::vector<CliCommandInfo> &commands) {
+std::string format_help(const std::vector<CliCommandInfo>& commands) {
   std::size_t maximum_name_length = 0U;
 
-  for (const CliCommandInfo &command : commands) {
+  for (const CliCommandInfo& command : commands) {
     maximum_name_length = std::max(maximum_name_length, command._name.size());
   }
 
   std::string output;
 
-  for (const CliCommandInfo &command : commands) {
+  for (const CliCommandInfo& command : commands) {
     output += command._name;
     if (!command._help.empty()) {
-      const std::size_t padding =
-          maximum_name_length - command._name.size() + 4U;
+      const std::size_t padding = maximum_name_length - command._name.size() + 4U;
       output.append(padding, ' ');
       output += command._help;
     }
@@ -88,7 +85,7 @@ std::string format_help(const std::vector<CliCommandInfo> &commands) {
   return output;
 }
 
-std::string escape_cli_text(const std::string &input) {
+std::string escape_cli_text(const std::string& input) {
   // db_dump 每条记录占一行；控制字符必须转义，避免破坏输出边界。
   constexpr char hex_digits[] = "0123456789ABCDEF";
 
@@ -99,36 +96,36 @@ std::string escape_cli_text(const std::string &input) {
     const auto byte = static_cast<unsigned char>(character);
 
     switch (byte) {
-    case '"':
-      output += "\\\"";
-      break;
+      case '"':
+        output += "\\\"";
+        break;
 
-    case '\\':
-      output += "\\\\";
-      break;
+      case '\\':
+        output += "\\\\";
+        break;
 
-    case '\n':
-      output += "\\n";
-      break;
+      case '\n':
+        output += "\\n";
+        break;
 
-    case '\r':
-      output += "\\r";
-      break;
+      case '\r':
+        output += "\\r";
+        break;
 
-    case '\t':
-      output += "\\t";
-      break;
+      case '\t':
+        output += "\\t";
+        break;
 
-    default:
-      if (byte < 0x20U || byte == 0x7FU) {
-        output += "\\x";
-        output.push_back(hex_digits[(byte >> 4U) & 0x0FU]);
-        output.push_back(hex_digits[byte & 0x0FU]);
-      } else {
-        output.push_back(character);
-      }
+      default:
+        if (byte < 0x20U || byte == 0x7FU) {
+          output += "\\x";
+          output.push_back(hex_digits[(byte >> 4U) & 0x0FU]);
+          output.push_back(hex_digits[byte & 0x0FU]);
+        } else {
+          output.push_back(character);
+        }
 
-      break;
+        break;
     }
   }
 
@@ -153,8 +150,7 @@ std::string format_timestamp(MonData::MonitorTimestamp timestamp) {
   return std::to_string(seconds) + '.' + fraction;
 }
 
-std::string
-format_publisher_status(const ReliableAlarmPublisherStatus &status) {
+std::string format_publisher_status(const ReliableAlarmPublisherStatus& status) {
   std::string output{"alarm publisher: active="};
 
   output += cli_boolean(status._active);
@@ -196,8 +192,7 @@ format_publisher_status(const ReliableAlarmPublisherStatus &status) {
   return output;
 }
 
-std::string
-format_collector_status(const ReliableAlarmCollectorStatus &status) {
+std::string format_collector_status(const ReliableAlarmCollectorStatus& status) {
   std::string output{"alarm collector: active="};
 
   output += cli_boolean(status._active);
@@ -229,10 +224,9 @@ format_collector_status(const ReliableAlarmCollectorStatus &status) {
   return output;
 }
 
-void append_record(std::string &output, const MonData::StoredRecord &record,
-                   const Engine &engine) {
-  const MonData::MonitorData &data = record._data;
-  const MonData::MonitorKey &key = data._key;
+void append_record(std::string& output, const MonData::StoredRecord& record, const Engine& engine) {
+  const MonData::MonitorData& data = record._data;
+  const MonData::MonitorKey& key = data._key;
 
   output += "mid=";
   output += std::to_string(key._mid);
@@ -246,14 +240,14 @@ void append_record(std::string &output, const MonData::StoredRecord &record,
   output += " eid=";
   output += std::to_string(key._eid);
 
-  if (const auto *numeric = std::get_if<MonData::NumericValue>(&data._value)) {
+  if (const auto* numeric = std::get_if<MonData::NumericValue>(&data._value)) {
     output += " num=";
     output += std::to_string(numeric->_value);
 
     output += " state=";
     output += std::to_string(numeric->_state);
   } else {
-    const std::string &value = std::get<std::string>(data._value);
+    const std::string& value = std::get<std::string>(data._value);
 
     output += " str=\"";
     output += escape_cli_text(value);
@@ -263,8 +257,7 @@ void append_record(std::string &output, const MonData::StoredRecord &record,
   std::string display_description = data._description;
   // 线协议自带描述优先；只有为空时才查本地注册的事件描述。
   if (display_description.empty()) {
-    const std::optional<MonitorErrorInfo> error =
-        engine.find_error(key._mid, key._eid);
+    const std::optional<MonitorErrorInfo> error = engine.find_error(key._mid, key._eid);
     if (error.has_value()) {
       display_description = error->_description;
     }
@@ -279,10 +272,10 @@ void append_record(std::string &output, const MonData::StoredRecord &record,
   output.push_back('\n');
 }
 
-std::string format_db_dump(const std::vector<MonData::StoredRecord> &records,
-                           const Engine &engine) {
+std::string format_db_dump(const std::vector<MonData::StoredRecord>& records,
+                           const Engine& engine) {
   std::string output;
-  for (const MonData::StoredRecord &record : records) {
+  for (const MonData::StoredRecord& record : records) {
     append_record(output, record, engine);
   }
 
@@ -297,9 +290,9 @@ std::string format_db_dump(const std::vector<MonData::StoredRecord> &records,
   return output;
 }
 
-} // namespace
+}  // namespace
 
-CliRegisterStatus register_help_command(CliRegistry &registry) {
+CliRegisterStatus register_help_command(CliRegistry& registry) {
   /*
    * CliRegistry 按值保存 Handler。
    *
@@ -307,77 +300,69 @@ CliRegisterStatus register_help_command(CliRegistry &registry) {
    * 在 help 命令可以被分派期间保持存活。
    */
   return registry.register_command(
-      HELP_COMMAND_NAME, HELP_COMMAND_DESCRIPTION,
-      [&registry](const CliArguments &) -> std::string {
+      HELP_COMMAND_NAME, HELP_COMMAND_DESCRIPTION, [&registry](const CliArguments&) -> std::string {
         const std::vector<CliCommandInfo> snapshot = registry.commands();
         return format_help(snapshot);
       });
 }
 
-CliRegisterStatus register_db_dump_command(CliRegistry &registry,
-                                           Engine &engine) {
+CliRegisterStatus register_db_dump_command(CliRegistry& registry, Engine& engine) {
   return registry.register_command(
       DB_DUMP_COMMAND_NAME, DB_DUMP_COMMAND_DESCRIPTION,
-      [&engine](CliSessionContext &context,
-                const CliArguments &) -> std::string {
+      [&engine](CliSessionContext& context, const CliArguments&) -> std::string {
         MonData::MonitorFilter filter;
         if (context._selected_mid.has_value()) {
           filter.module_id = context._selected_mid;
         }
 
-        const std::vector<MonData::StoredRecord> snapshot =
-            engine.query_data(filter);
+        const std::vector<MonData::StoredRecord> snapshot = engine.query_data(filter);
         return format_db_dump(snapshot, engine);
       });
 }
 
-CliRegisterStatus register_modules_command(CliRegistry &registry,
-                                           MonitorModuleRegistry &modules) {
-  return registry.register_command(
-      MODULES_COMMAND_NAME, MODULES_COMMAND_DESCRIPTION,
-      [&modules](const CliArguments &arguments) -> std::string {
-        if (!arguments.empty()) {
-          return MODULES_COMMAND_USAGE;
-        }
-        const std::vector<MonitorModuleInfo> snapshot = modules.modules();
+CliRegisterStatus register_modules_command(CliRegistry& registry, MonitorModuleRegistry& modules) {
+  return registry.register_command(MODULES_COMMAND_NAME, MODULES_COMMAND_DESCRIPTION,
+                                   [&modules](const CliArguments& arguments) -> std::string {
+                                     if (!arguments.empty()) {
+                                       return MODULES_COMMAND_USAGE;
+                                     }
+                                     const std::vector<MonitorModuleInfo> snapshot =
+                                         modules.modules();
 
-        return format_modules(snapshot);
-      });
+                                     return format_modules(snapshot);
+                                   });
 }
 
-CliRegisterStatus register_modules_command(CliRegistry &registry,
-                                           Engine &engine) {
-  return registry.register_command(
-      MODULES_COMMAND_NAME, MODULES_COMMAND_DESCRIPTION,
-      [&engine](const CliArguments &arguments) -> std::string {
-        /*
-         * modules 不接受参数。
-         */
-        if (!arguments.empty()) {
-          return MODULES_COMMAND_USAGE;
-        }
+CliRegisterStatus register_modules_command(CliRegistry& registry, Engine& engine) {
+  return registry.register_command(MODULES_COMMAND_NAME, MODULES_COMMAND_DESCRIPTION,
+                                   [&engine](const CliArguments& arguments) -> std::string {
+                                     /*
+                                      * modules 不接受参数。
+                                      */
+                                     if (!arguments.empty()) {
+                                       return MODULES_COMMAND_USAGE;
+                                     }
 
-        /*
-         * Engine::modules() 返回独立快照。
-         *
-         * Handler 不会持有 Engine Registry 内部节点的引用。
-         */
-        const std::vector<MonitorModuleInfo> snapshot = engine.modules();
+                                     /*
+                                      * Engine::modules() 返回独立快照。
+                                      *
+                                      * Handler 不会持有 Engine Registry 内部节点的引用。
+                                      */
+                                     const std::vector<MonitorModuleInfo> snapshot =
+                                         engine.modules();
 
-        return format_modules(snapshot);
-      });
+                                     return format_modules(snapshot);
+                                   });
 }
 
-CliRegisterStatus register_use_command(CliRegistry &registry,
-                                       MonitorModuleRegistry &modules) {
+CliRegisterStatus register_use_command(CliRegistry& registry, MonitorModuleRegistry& modules) {
   /*
    * use 需要修改当前连接的 CliSessionContext，
    * 因此这里必须注册 CliSessionHandler，而不是旧 CliHandler。
    */
   return registry.register_command(
       USE_COMMAND_NAME, USE_COMMAND_DESCRIPTION,
-      [&modules](CliSessionContext &context,
-                 const CliArguments &arguments) -> std::string {
+      [&modules](CliSessionContext& context, const CliArguments& arguments) -> std::string {
         /*
          * 不带参数时只查询当前选择，不修改 Context。
          */
@@ -398,7 +383,7 @@ CliRegisterStatus register_use_command(CliRegistry &registry,
           return USE_COMMAND_USAGE;
         }
 
-        const std::string &requested_name = arguments[0];
+        const std::string& requested_name = arguments[0];
 
         /*
          * all 是保留名称，用于清除当前选择。
@@ -414,8 +399,7 @@ CliRegisterStatus register_use_command(CliRegistry &registry,
          * find_by_name() 返回时 Registry 锁已经释放，
          * 后续修改 Session 不会持有 ModuleRegistry 锁。
          */
-        const std::optional<MonitorModuleInfo> module =
-            modules.find_by_name(requested_name);
+        const std::optional<MonitorModuleInfo> module = modules.find_by_name(requested_name);
 
         /*
          * 未知模块不能改变当前选择。
@@ -436,11 +420,10 @@ CliRegisterStatus register_use_command(CliRegistry &registry,
       });
 }
 
-CliRegisterStatus register_use_command(CliRegistry &registry, Engine &engine) {
+CliRegisterStatus register_use_command(CliRegistry& registry, Engine& engine) {
   return registry.register_command(
       USE_COMMAND_NAME, USE_COMMAND_DESCRIPTION,
-      [&engine](CliSessionContext &context,
-                const CliArguments &arguments) -> std::string {
+      [&engine](CliSessionContext& context, const CliArguments& arguments) -> std::string {
         if (arguments.empty()) {
           if (!context.has_selected_module()) {
             return "current module: all\n";
@@ -453,14 +436,13 @@ CliRegisterStatus register_use_command(CliRegistry &registry, Engine &engine) {
           return USE_COMMAND_USAGE;
         }
 
-        const std::string &requested_name = arguments[0];
+        const std::string& requested_name = arguments[0];
         if (requested_name == "all") {
           context.clear_module();
           return "using module: all\n";
         }
 
-        const std::optional<MonitorModuleInfo> module =
-            engine.find_module_by_name(requested_name);
+        const std::optional<MonitorModuleInfo> module = engine.find_module_by_name(requested_name);
         if (!module.has_value()) {
           return "unknown module: " + requested_name + '\n';
         }
@@ -472,14 +454,12 @@ CliRegisterStatus register_use_command(CliRegistry &registry, Engine &engine) {
       });
 }
 
-CliRegisterStatus
-register_alarm_status_command(CliRegistry &registry,
-                              const ReliableAlarmPublisher *publisher,
-                              const ReliableAlarmCollector *collector) {
-
+CliRegisterStatus register_alarm_status_command(CliRegistry& registry,
+                                                const ReliableAlarmPublisher* publisher,
+                                                const ReliableAlarmCollector* collector) {
   return registry.register_command(
       ALARM_STATUS_COMMAND_NAME, ALARM_STATUS_COMMAND_DESCRIPTION,
-      [publisher, collector](const CliArguments &arguments) -> std::string {
+      [publisher, collector](const CliArguments& arguments) -> std::string {
         if (!arguments.empty()) {
           return ALARM_STATUS_COMMAND_USAGE;
         }
@@ -504,4 +484,4 @@ register_alarm_status_command(CliRegistry &registry,
       });
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

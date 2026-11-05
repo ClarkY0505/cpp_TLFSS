@@ -31,7 +31,7 @@ enum class ENGINESTATE : int {
   ALREADYRUNNING = -505,
   WAITFAILED = -506,
   PIPEERROR = -507,
-  AIOINITERR = -508, ///< 唤醒管道已创建，但其读端注册到 AIO 失败。
+  AIOINITERR = -508,  ///< 唤醒管道已创建，但其读端注册到 AIO 失败。
   SUCCESSFUL = 0
 };
 
@@ -51,7 +51,7 @@ struct MonContext;
  *       The engine cannot be restarted after entering STOPPED.
  */
 class Engine {
-public:
+ public:
   using MonitorPublisher = MonitorReporter::Publisher;
   using AlarmPublisher = TLSSMON::AlarmPublisher;
   /**
@@ -195,8 +195,7 @@ public:
    * 不能使用 _control_mutex 包围整个 Reporter/Publisher 调用，否则 Publisher
    * 重新进入 Engine 时可能死锁。
    */
-  MonData::UpdateResult report_count(MonData::MonitorKey key,
-                                     std::uint32_t value,
+  MonData::UpdateResult report_count(MonData::MonitorKey key, std::uint32_t value,
                                      std::string description = {});
   /**
    * @brief 上报错误值；配置可靠告警通道时，先持久化再更新 Store。
@@ -205,8 +204,7 @@ public:
    * @param description 可选的可读描述。
    * @return 写入或持久化结果。
    */
-  MonData::UpdateResult report_error(MonData::MonitorKey key,
-                                     std::uint32_t value,
+  MonData::UpdateResult report_error(MonData::MonitorKey key, std::uint32_t value,
                                      std::string description = {});
   /**
    * @brief 上报字符串值，并按 Store 规则更新记录。
@@ -215,8 +213,7 @@ public:
    * @param description 可选的可读描述。
    * @return 写入结果。
    */
-  MonData::UpdateResult report_string(MonData::MonitorKey key,
-                                      std::string value,
+  MonData::UpdateResult report_string(MonData::MonitorKey key, std::string value,
                                       std::string description = {});
 
   /**
@@ -230,8 +227,7 @@ public:
    *
    * changed_at 由 Engine 在接受写入时生成。
    */
-  MonData::UpdateResult update_data(MonData::MonitorData data,
-                                    bool force = false);
+  MonData::UpdateResult update_data(MonData::MonitorData data, bool force = false);
   /**
    * @brief 使用调用方提供的变化时间保存监控数据。
    * @param data 完整监控记录。
@@ -247,8 +243,7 @@ public:
    * force 规则与 update_data() 完全相同。
    */
   MonData::UpdateResult update_data_at(MonData::MonitorData data,
-                                       MonData::MonitorTimestamp changed_at,
-                                       bool force = false);
+                                       MonData::MonitorTimestamp changed_at, bool force = false);
 
   /**
    * @brief 根据完整 Key 查询一条监控记录。
@@ -260,8 +255,7 @@ public:
    *
    * 返回结果是 Store 中记录的副本。
    */
-  std::optional<MonData::StoredRecord>
-  find_data(const MonData::MonitorKey &key) const;
+  std::optional<MonData::StoredRecord> find_data(const MonData::MonitorKey& key) const;
 
   /**
    * @brief 根据过滤条件查询监控记录快照。
@@ -274,8 +268,7 @@ public:
    * 空过滤器返回全部记录，顺序保持：
    * mid -> level -> fid -> eid。
    */
-  std::vector<MonData::StoredRecord>
-  query_data(const MonData::MonitorFilter &filter = {}) const;
+  std::vector<MonData::StoredRecord> query_data(const MonData::MonitorFilter& filter = {}) const;
 
   /**
    * @brief 向事件循环注册文件描述符及其回调。
@@ -346,8 +339,7 @@ public:
    * @param name 区分大小写的名称。
    * @return 找到时返回独立副本，否则返回 std::nullopt。
    */
-  std::optional<MonitorModuleInfo>
-  find_module_by_name(std::string_view name) const;
+  std::optional<MonitorModuleInfo> find_module_by_name(std::string_view name) const;
   /**
    * @brief 根据 mid 和 eid 查询错误元数据。
    *
@@ -362,8 +354,7 @@ public:
    * @param eid 事件 ID，即模块错误表的下标。
    * @return 找到时返回独立副本，否则返回 std::nullopt。
    */
-  std::optional<MonitorErrorInfo> find_error(std::uint32_t mid,
-                                             std::uint32_t eid) const;
+  std::optional<MonitorErrorInfo> find_error(std::uint32_t mid, std::uint32_t eid) const;
   /**
    * @brief 返回全部模块的独立快照。
    *
@@ -387,7 +378,8 @@ public:
    * @return 操作成功时返回 true，否则返回 false。
    */
   bool set_alarm_publisher(AlarmPublisher publisher);
-private:
+
+ private:
   /** @brief use to control a,b,c and switch operating status */
   std::mutex _control_mutex;
 
@@ -397,6 +389,6 @@ private:
   std::atomic<EnginePhase> _phase{EnginePhase::CREATED};
 };
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // TLSSMON_ENGINE_H
+#endif  // TLSSMON_ENGINE_H

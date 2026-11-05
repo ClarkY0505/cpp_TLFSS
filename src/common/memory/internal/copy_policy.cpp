@@ -16,11 +16,8 @@ CopyPlan select_copy_plan(std::size_t size, CopyHint hint) noexcept {
     return {CopyStrategy::RepMovsb, 1};
   }
 
-   if (size <= k_avx2_threshold) {
-    return {
-        CopyStrategy::Avx2Cached,
-        1
-    };
+  if (size <= k_avx2_threshold) {
+    return {CopyStrategy::Avx2Cached, 1};
   }
 
   if (size < k_glibc_threshold) {

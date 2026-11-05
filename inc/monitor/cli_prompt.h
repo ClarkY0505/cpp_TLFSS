@@ -35,9 +35,8 @@ bool is_valid_cli_prompt_name(std::string_view name) noexcept;
  * @param context 当前客户端独立的会话状态。
  * @return 包含末尾空格的提示符；名称非法时返回空字符串。
  */
-std::string make_cli_prompt(std::string_view default_name,
-                            const CliSessionContext &context);
+std::string make_cli_prompt(std::string_view default_name, const CliSessionContext& context);
 
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __CLI_PROMPT_H__
+#endif  // __CLI_PROMPT_H__

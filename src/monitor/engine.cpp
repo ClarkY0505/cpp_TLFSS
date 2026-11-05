@@ -1,6 +1,6 @@
+#include "engine.h"
 #include "aio_manager.h"
 #include "callback_registry.h"
-#include "engine.h"
 #include "engine_type.h"
 #include "monitor_data.h"
 #include "monitor_module.h"
@@ -9,8 +9,10 @@
 #include "timer_manager.h"
 #include "wake_pipe.h"
 
-#include <atomic>
 #include <bits/types/struct_timeval.h>
+#include <pthread.h>
+#include <sys/select.h>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -20,8 +22,6 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <pthread.h>
-#include <sys/select.h>
 #include <utility>
 namespace TLSSMON {
 
@@ -75,7 +75,7 @@ static_assert(accepts_data_read(EnginePhase::RUNNING));
 static_assert(accepts_data_read(EnginePhase::STOPPING));
 static_assert(accepts_data_read(EnginePhase::STOPPED));
 
-} // namespace EngineUtil
+}  // namespace EngineUtil
 
 struct MonContext final {
   // Store/Reporter 与事件循环资源同生共死；Reporter 引用的 Store 和模块表
@@ -86,13 +86,16 @@ struct MonContext final {
    *
    * @param config[in] 监控配置。配置内容会被移动到上下文中。
    */
-  explicit MonContext(MonConfig config, const MonitorModuleRegistry &modules)
-      : _name(std::move(config._name)), _cli_port(config._port),
-        _software_id(config._id), _reporter(_store, modules),
-        _aio(_cbs, _wakeup), _timers(_cbs, _wakeup) {}
+  explicit MonContext(MonConfig config, const MonitorModuleRegistry& modules)
+      : _name(std::move(config._name))
+      , _cli_port(config._port)
+      , _software_id(config._id)
+      , _reporter(_store, modules)
+      , _aio(_cbs, _wakeup)
+      , _timers(_cbs, _wakeup) {}
 
-  MonContext(const MonContext &) = delete;
-  MonContext &operator=(const MonContext &) = delete;
+  MonContext(const MonContext&) = delete;
+  MonContext& operator=(const MonContext&) = delete;
 
   const std::string _name;
   const std::uint16_t _cli_port;
@@ -109,15 +112,15 @@ struct MonContext final {
   std::optional<AioHandle> _wakeup_handle;
 };
 
-Engine::Engine(MonConfig config) : _config(std::move(config)) {}
+Engine::Engine(MonConfig config)
+    : _config(std::move(config)) {}
 Engine::~Engine() = default;
 
 ENGINESTATE Engine::init() {
   // 先抢占初始化阶段，避免两个线程各自创建一套运行资源。
   EnginePhase expected = EnginePhase::CREATED;
   if (!_phase.compare_exchange_strong(expected, EnginePhase::INITIALIZING,
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire)) {
+                                      std::memory_order_acq_rel, std::memory_order_acquire)) {
     return ENGINESTATE::ALREADYINITIALIZED;
   }
 
@@ -135,17 +138,15 @@ ENGINESTATE Engine::init() {
       return ENGINESTATE::PIPEINITERR;
     }
 
-    MonContext *context_ptr = context.get();
+    MonContext* context_ptr = context.get();
     MonCallback wakeup_cb{"wakeup",
                           [context_ptr]() noexcept -> int {
-                            const PIPESTATUS status =
-                                context_ptr->_wakeup.drain();
+                            const PIPESTATUS status = context_ptr->_wakeup.drain();
                             return static_cast<int>(status);
                           },
                           false};
 
-    auto wakeup_handle =
-        context->_aio.add(context->_wakeup.read_fd(), std::move(wakeup_cb));
+    auto wakeup_handle = context->_aio.add(context->_wakeup.read_fd(), std::move(wakeup_cb));
     if (!wakeup_handle) {
       _phase.store(EnginePhase::CREATED, std::memory_order_release);
 
@@ -158,7 +159,7 @@ ENGINESTATE Engine::init() {
 
     return ENGINESTATE::SUCCESSFUL;
 
-  } catch (const std::bad_alloc &) {
+  } catch (const std::bad_alloc&) {
     _phase.store(EnginePhase::CREATED, std::memory_order_release);
 
     return ENGINESTATE::INITFAILED;
@@ -169,8 +170,7 @@ ENGINESTATE Engine::run() {
   std::unique_lock<std::mutex> lock(_control_mutex);
   EnginePhase expected = EnginePhase::READY;
 
-  if (!_phase.compare_exchange_strong(expected, EnginePhase::RUNNING,
-                                      std::memory_order_acq_rel,
+  if (!_phase.compare_exchange_strong(expected, EnginePhase::RUNNING, std::memory_order_acq_rel,
                                       std::memory_order_acquire)) {
     if (expected == EnginePhase::RUNNING) {
       return ENGINESTATE::ALREADYRUNNING;
@@ -179,7 +179,7 @@ ENGINESTATE Engine::run() {
     return ENGINESTATE::NOTREADY;
   }
 
-  MonContext *const context = _context.get();
+  MonContext* const context = _context.get();
   if (nullptr == context) {
     _phase.store(EnginePhase::STOPPED, std::memory_order_release);
     return ENGINESTATE::NOTREADY;
@@ -229,8 +229,7 @@ void Engine::stop() {
     std::lock_guard<std::mutex> lock(_control_mutex);
     EnginePhase expected = EnginePhase::RUNNING;
 
-    if (!_phase.compare_exchange_strong(expected, EnginePhase::STOPPING,
-                                        std::memory_order_acq_rel,
+    if (!_phase.compare_exchange_strong(expected, EnginePhase::STOPPING, std::memory_order_acq_rel,
                                         std::memory_order_acquire)) {
       return;
     }
@@ -251,7 +250,9 @@ EnginePhase Engine::get_phase() const noexcept {
   return _phase.load(std::memory_order_acquire);
 }
 
-std::uint16_t Engine::cli_port() const noexcept { return _config._port; }
+std::uint16_t Engine::cli_port() const noexcept {
+  return _config._port;
+}
 
 std::optional<AioHandle> Engine::add_aio(int fd, MonCallback cb) {
   std::lock_guard<std::mutex> lock(_control_mutex);
@@ -335,22 +336,20 @@ std::optional<TimerHandle> Engine::set_timer(MonCallback mcb, TimerFlags flags,
  * 层把所有写入和查询额外串行化。
  * - _context 在 init() 成功后发布，停止时不会被清空或替换。
  * */
-MonData::UpdateResult Engine::update_data(MonData::MonitorData data,
-                                          bool force) {
+MonData::UpdateResult Engine::update_data(MonData::MonitorData data, bool force) {
   const MonData::MonitorTimestamp changed_at = std::chrono::system_clock::now();
 
   return update_data_at(std::move(data), changed_at, force);
 }
 
-MonData::UpdateResult
-Engine::update_data_at(MonData::MonitorData data,
-                       MonData::MonitorTimestamp changed_at, bool force) {
+MonData::UpdateResult Engine::update_data_at(MonData::MonitorData data,
+                                             MonData::MonitorTimestamp changed_at, bool force) {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_write(phase)) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
-  MonContext *const context = _context.get();
+  MonContext* const context = _context.get();
 
   if (context == nullptr) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
@@ -365,8 +364,7 @@ Engine::update_data_at(MonData::MonitorData data,
   return context->_reporter.update(std::move(data), force, changed_at);
 }
 
-std::optional<MonData::StoredRecord>
-Engine::find_data(const MonData::MonitorKey &key) const {
+std::optional<MonData::StoredRecord> Engine::find_data(const MonData::MonitorKey& key) const {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   /*
    * CREATED、INITIALIZING 没有可读取的 Store。
@@ -377,7 +375,7 @@ Engine::find_data(const MonData::MonitorKey &key) const {
     return std::nullopt;
   }
 
-  const MonContext *const context = _context.get();
+  const MonContext* const context = _context.get();
 
   if (context == nullptr) {
     return std::nullopt;
@@ -390,14 +388,13 @@ Engine::find_data(const MonData::MonitorKey &key) const {
   return context->_store.find(key);
 }
 
-std::vector<MonData::StoredRecord>
-Engine::query_data(const MonData::MonitorFilter &filter) const {
+std::vector<MonData::StoredRecord> Engine::query_data(const MonData::MonitorFilter& filter) const {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_read(phase)) {
     return {};
   }
 
-  const MonContext *const context = _context.get();
+  const MonContext* const context = _context.get();
   if (context == nullptr) {
     return {};
   }
@@ -423,71 +420,63 @@ bool Engine::set_publisher(MonitorPublisher publisher) {
   return true;
 }
 
-MonData::UpdateResult Engine::report_count(MonData::MonitorKey key,
-                                           std::uint32_t value,
+MonData::UpdateResult Engine::report_count(MonData::MonitorKey key, std::uint32_t value,
                                            std::string description) {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_write(phase)) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
-  MonContext *const context = _context.get();
+  MonContext* const context = _context.get();
   if (context == nullptr) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
-  return context->_reporter.report_count(std::move(key), value,
-                                         std::move(description), timestamp);
+  return context->_reporter.report_count(std::move(key), value, std::move(description), timestamp);
 }
 
-MonData::UpdateResult Engine::report_error(MonData::MonitorKey key,
-                                           std::uint32_t value,
+MonData::UpdateResult Engine::report_error(MonData::MonitorKey key, std::uint32_t value,
                                            std::string description) {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_write(phase)) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
-  MonContext *const context = _context.get();
+  MonContext* const context = _context.get();
   if (context == nullptr) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
-  return context->_reporter.report_error(std::move(key), value,
-                                         std::move(description), timestamp);
+  return context->_reporter.report_error(std::move(key), value, std::move(description), timestamp);
 }
 
-MonData::UpdateResult Engine::report_string(MonData::MonitorKey key,
-                                            std::string value,
+MonData::UpdateResult Engine::report_string(MonData::MonitorKey key, std::string value,
                                             std::string description) {
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
   if (!EngineUtil::accepts_data_write(phase)) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
-  MonContext *const context = _context.get();
+  MonContext* const context = _context.get();
   if (context == nullptr) {
     return {MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   const MonData::MonitorTimestamp timestamp = std::chrono::system_clock::now();
-  return context->_reporter.report_string(std::move(key), std::move(value),
-                                          std::move(description), timestamp);
+  return context->_reporter.report_string(std::move(key), std::move(value), std::move(description),
+                                          timestamp);
 }
 
-std::optional<MonitorModuleInfo>
-Engine::find_module_by_id(std::uint32_t mid) const {
+std::optional<MonitorModuleInfo> Engine::find_module_by_id(std::uint32_t mid) const {
   return _modules.find_by_id(mid);
 }
-std::optional<MonitorModuleInfo>
-Engine::find_module_by_name(std::string_view name) const {
+std::optional<MonitorModuleInfo> Engine::find_module_by_name(std::string_view name) const {
   return _modules.find_by_name(name);
 }
 
-std::optional<MonitorErrorInfo> Engine::find_error(std::uint32_t mid,
-                                                   std::uint32_t eid) const {
+std::optional<MonitorErrorInfo> Engine::find_error(std::uint32_t mid, std::uint32_t eid) const {
   return _modules.find_error(mid, eid);
 }
 
@@ -496,7 +485,6 @@ std::vector<MonitorModuleInfo> Engine::modules() const {
 }
 
 bool Engine::set_alarm_publisher(AlarmPublisher publisher) {
-
   std::lock_guard<std::mutex> lock(_control_mutex);
 
   const EnginePhase phase = _phase.load(std::memory_order_acquire);
@@ -514,4 +502,4 @@ bool Engine::set_alarm_publisher(AlarmPublisher publisher) {
   return true;
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

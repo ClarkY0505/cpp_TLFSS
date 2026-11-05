@@ -152,10 +152,9 @@ struct CliSessionContext final {
  * 2. 释放注册表锁；
  * 3. 再调用复制出来的 Handler。
  */
-using CliHandler = std::function<std::string(const CliArguments &)>;
+using CliHandler = std::function<std::string(const CliArguments&)>;
 /** @brief 可读取和修改当前客户端 Session 状态的处理函数。 */
-using CliSessionHandler =
-    std::function<std::string(CliSessionContext &, const CliArguments &)>;
+using CliSessionHandler = std::function<std::string(CliSessionContext&, const CliArguments&)>;
 
 /** @brief 命令分派状态及完整输出文本。 */
 struct CliDispatchResult final {
@@ -168,6 +167,6 @@ struct CliCommandInfo final {
   std::string _name;
   std::string _help;
 };
-} // namespace TLSSMON
+}  // namespace TLSSMON
 
-#endif // __CLI_TYPES_H__
+#endif  // __CLI_TYPES_H__

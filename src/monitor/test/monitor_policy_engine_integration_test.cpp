@@ -1,6 +1,7 @@
 #include "engine.h"
 #include "monitor_policy.h"
 
+#include <unistd.h>
 #include <array>
 #include <cassert>
 #include <chrono>
@@ -8,7 +9,6 @@
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -27,22 +27,20 @@ std::uint32_t level_value(MonitorLevel level) {
   return static_cast<std::uint32_t>(level);
 }
 
-const MonData::NumericValue &
-numeric_value(const MonData::StoredRecord &record) {
-  assert(std::holds_alternative<MonData::NumericValue>(
-      record._data._value));
+const MonData::NumericValue& numeric_value(const MonData::StoredRecord& record) {
+  assert(std::holds_alternative<MonData::NumericValue>(record._data._value));
   return std::get<MonData::NumericValue>(record._data._value);
 }
 
-void register_policy_module(Engine &engine) {
-  const ModuleRegisterStatus status = engine.register_module(MonitorModuleInfo{
-      MODULE_ID,
-      "policy-module",
-      "M9 policy integration module",
-      {{MonitorLevel::INFO, "unused"},
-       {MonitorLevel::WARN, "sustained overheating"},
-       {MonitorLevel::INFO, "smoothed sensor value"},
-       {MonitorLevel::WARN, "error burst"}}});
+void register_policy_module(Engine& engine) {
+  const ModuleRegisterStatus status =
+      engine.register_module(MonitorModuleInfo{MODULE_ID,
+                                               "policy-module",
+                                               "M9 policy integration module",
+                                               {{MonitorLevel::INFO, "unused"},
+                                                {MonitorLevel::WARN, "sustained overheating"},
+                                                {MonitorLevel::INFO, "smoothed sensor value"},
+                                                {MonitorLevel::WARN, "error burst"}}});
   assert(status == ModuleRegisterStatus::SUCCESS);
 }
 
@@ -73,36 +71,32 @@ void test_timer_cont_for_reports_only_sustained_error() {
       {92U, PolicyTime{5000}},
   }};
 
-  std::shared_ptr<MonitorPolicy> policy{
-      make_cont_for_policy(80U, PolicyTime{3000})};
+  std::shared_ptr<MonitorPolicy> policy{make_cont_for_policy(80U, PolicyTime{3000})};
   assert(policy);
 
   std::size_t index = 0U;
   std::optional<MonData::UpdateStatus> report_status;
   const auto timer = engine.set_timer(
-      MonCallback{
-          "m9-cont-for-sample",
-          [&, policy]() -> int {
-            assert(index < samples.size());
-            const Sample sample = samples[index];
-            const PolicyFeedResult decision =
-                policy->feed(sample._value, sample._time);
+      MonCallback{"m9-cont-for-sample",
+                  [&, policy]() -> int {
+                    assert(index < samples.size());
+                    const Sample sample = samples[index];
+                    const PolicyFeedResult decision = policy->feed(sample._value, sample._time);
 
-            if (decision._noteworthy) {
-              const MonData::UpdateResult result = engine.report_error(
-                  {MODULE_ID, 99U, FUNCTION_ID, TEMPERATURE_EID},
-                  sample._value);
-              assert(result.changed());
-              report_status = result._status;
-            }
+                    if (decision._noteworthy) {
+                      const MonData::UpdateResult result = engine.report_error(
+                          {MODULE_ID, 99U, FUNCTION_ID, TEMPERATURE_EID}, sample._value);
+                      assert(result.changed());
+                      report_status = result._status;
+                    }
 
-            ++index;
-            if (index == samples.size()) {
-              engine.stop();
-            }
-            return 0;
-          },
-          false},
+                    ++index;
+                    if (index == samples.size()) {
+                      engine.stop();
+                    }
+                    return 0;
+                  },
+                  false},
       TimerFlags::RECURRING, std::chrono::milliseconds{1});
   assert(timer.has_value());
   assert(engine.run() == ENGINESTATE::SUCCESSFUL);
@@ -111,15 +105,14 @@ void test_timer_cont_for_reports_only_sustained_error() {
   assert(report_status == MonData::UpdateStatus::INSERTED);
   assert(published.size() == 1U);
 
-  const MonData::StoredRecord &record = published.front();
+  const MonData::StoredRecord& record = published.front();
   assert(record._data._key._level == level_value(MonitorLevel::WARN));
   assert(record._data._description == "sustained overheating");
   assert(numeric_value(record)._value == 92U);
   assert(numeric_value(record)._state == 2U);
 
-  const auto stored = engine.find_data(
-      {MODULE_ID, level_value(MonitorLevel::WARN), FUNCTION_ID,
-       TEMPERATURE_EID});
+  const auto stored =
+      engine.find_data({MODULE_ID, level_value(MonitorLevel::WARN), FUNCTION_ID, TEMPERATURE_EID});
   assert(stored.has_value());
   assert(numeric_value(*stored)._value == 92U);
 }
@@ -139,8 +132,7 @@ void test_smooth_trim_reports_smoothed_value() {
 
   auto policy = make_smooth_trim_policy(3U, 50U);
   assert(policy);
-  const MonData::MonitorKey key{MODULE_ID, 99U, FUNCTION_ID,
-                                SMOOTH_VALUE_EID};
+  const MonData::MonitorKey key{MODULE_ID, 99U, FUNCTION_ID, SMOOTH_VALUE_EID};
 
   const auto feed_and_report = [&](std::uint32_t raw, PolicyTime now) {
     const PolicyFeedResult decision = policy->feed(raw, now);
@@ -176,8 +168,7 @@ void test_policy_output_still_passes_through_store_dedup() {
     published.push_back(std::move(record));
   }));
 
-  auto policy =
-      make_times_per_period_policy(10U, 3U, PolicyTime{1000});
+  auto policy = make_times_per_period_policy(10U, 3U, PolicyTime{1000});
   assert(policy);
   std::vector<MonData::UpdateStatus> statuses;
 
@@ -185,10 +176,7 @@ void test_policy_output_still_passes_through_store_dedup() {
     const PolicyFeedResult decision = policy->feed(20U, now);
     if (decision._noteworthy) {
       statuses.push_back(
-          engine
-              .report_error(
-                  {MODULE_ID, 99U, FUNCTION_ID, ERROR_BURST_EID}, 20U)
-              ._status);
+          engine.report_error({MODULE_ID, 99U, FUNCTION_ID, ERROR_BURST_EID}, 20U)._status);
     }
   };
 
@@ -216,8 +204,7 @@ void test_aio_callback_can_own_and_feed_policy() {
     published.push_back(std::move(record));
   }));
 
-  std::shared_ptr<MonitorPolicy> policy{
-      make_times_per_period_policy(0U, 1U, PolicyTime{1000})};
+  std::shared_ptr<MonitorPolicy> policy{make_times_per_period_policy(0U, 1U, PolicyTime{1000})};
   assert(policy);
 
   int pipe_fds[2]{-1, -1};
@@ -226,32 +213,26 @@ void test_aio_callback_can_own_and_feed_policy() {
 
   const auto aio = engine.add_aio(
       pipe_fds[0],
-      MonCallback{
-          "m9-policy-aio-event",
-          [&, policy]() -> int {
-            char signal = '\0';
-            assert(::read(pipe_fds[0], &signal, sizeof(signal)) ==
-                   static_cast<ssize_t>(sizeof(signal)));
+      MonCallback{"m9-policy-aio-event",
+                  [&, policy]() -> int {
+                    char signal = '\0';
+                    assert(::read(pipe_fds[0], &signal, sizeof(signal)) ==
+                           static_cast<ssize_t>(sizeof(signal)));
 
-            const PolicyFeedResult decision =
-                policy->feed(1U, PolicyTime{100});
-            assert(decision._noteworthy);
-            assert(engine
-                       .report_error(
-                           {MODULE_ID, 99U, FUNCTION_ID, ERROR_BURST_EID},
-                           1U)
-                       ._status == MonData::UpdateStatus::INSERTED);
+                    const PolicyFeedResult decision = policy->feed(1U, PolicyTime{100});
+                    assert(decision._noteworthy);
+                    assert(engine.report_error({MODULE_ID, 99U, FUNCTION_ID, ERROR_BURST_EID}, 1U)
+                               ._status == MonData::UpdateStatus::INSERTED);
 
-            callback_executed = true;
-            engine.stop();
-            return 0;
-          },
-          false});
+                    callback_executed = true;
+                    engine.stop();
+                    return 0;
+                  },
+                  false});
   assert(aio.has_value());
 
   const char signal = 'x';
-  assert(::write(pipe_fds[1], &signal, sizeof(signal)) ==
-         static_cast<ssize_t>(sizeof(signal)));
+  assert(::write(pipe_fds[1], &signal, sizeof(signal)) == static_cast<ssize_t>(sizeof(signal)));
   assert(engine.run() == ENGINESTATE::SUCCESSFUL);
 
   assert(callback_executed);
@@ -261,7 +242,7 @@ void test_aio_callback_can_own_and_feed_policy() {
   assert(::close(pipe_fds[1]) == 0);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_timer_cont_for_reports_only_sustained_error();

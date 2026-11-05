@@ -1,8 +1,8 @@
-#include "common/base/base_logger.h"
 #include "common/base/mysql_connection.h"
+#include "common/base/base_logger.h"
 
-#include <mysql/mysql.h>
 #include <mysql/errmsg.h>
+#include <mysql/mysql.h>
 #include <cstdlib>
 #include <memory>
 #include <utility>
@@ -178,7 +178,7 @@ bool DbConnection::update_prepared(const std::string& sql, const std::vector<DbV
 }
 
 DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
-                                              const std::vector<DbValue>& params) {
+                                               const std::vector<DbValue>& params) {
   DbExecuteResult result;
   if (!_connected || _conn == nullptr) {
     result.error_code = CR_SERVER_GONE_ERROR;

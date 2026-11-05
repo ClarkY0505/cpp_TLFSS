@@ -10,14 +10,12 @@ using namespace TLSSMON;
 
 namespace {
 
-void expect(const PolicyFeedResult &result, bool noteworthy,
-            std::uint32_t value) {
+void expect(const PolicyFeedResult& result, bool noteworthy, std::uint32_t value) {
   assert(result._noteworthy == noteworthy);
   assert(result._value == value);
 }
 
-std::unique_ptr<MonitorPolicy> make_policy(std::uint32_t threshold,
-                                           PolicyTime duration) {
+std::unique_ptr<MonitorPolicy> make_policy(std::uint32_t threshold, PolicyTime duration) {
   auto policy = make_cont_for_policy(threshold, duration);
   assert(policy);
   return policy;
@@ -75,7 +73,7 @@ void test_time_regression_cannot_trigger() {
   expect(policy->feed(20U, PolicyTime{1100}), true, 1U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_factory_validation_and_initial_state();

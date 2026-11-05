@@ -1,5 +1,5 @@
-#include "common/net/channel.h"
 #include "common/net/epoll_poller.h"
+#include "common/net/channel.h"
 #include "common/net/net_logger.h"
 #include "common/net/poller.h"
 #include "common/net/timestamp.h"
@@ -25,11 +25,13 @@ const int k_deleted = 2;
 }  // namespace
 
 EpollPoller::EpollPoller(EventLoop* loop)
-    : Poller(loop), _epoll_fd(::epoll_create1(EPOLL_CLOEXEC)), _events(_k_init_event_list_size) {
+    : Poller(loop)
+    , _epoll_fd(::epoll_create1(EPOLL_CLOEXEC))
+    , _events(_k_init_event_list_size) {
   if (_epoll_fd < 0) {
     const int saved_err = errno;
     net_logger()->critical("epoll_create1 error={}, reason={}", saved_err,
-                        std::error_code(saved_err, std::generic_category()).message());
+                           std::error_code(saved_err, std::generic_category()).message());
     net_logger()->flush();
     std::abort();
   }

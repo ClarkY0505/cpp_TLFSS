@@ -1,5 +1,5 @@
-#include "monitor_data.h"
 #include "monitor_store.h"
+#include "monitor_data.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -29,21 +29,18 @@ static_assert(std::is_nothrow_move_constructible_v<MonData::UpdateResult>,
  * - 字符串比较完整内容；
  * - 数值和字符串类型不同，视为发生变化。
  */
-bool same_monitor_value(const MonData::MonitorData &incoming,
-                        const MonData::StoredRecord &stored) noexcept {
-  const auto *incoming_numeric =
-      std::get_if<MonData::NumericValue>(&incoming._value);
+bool same_monitor_value(const MonData::MonitorData& incoming,
+                        const MonData::StoredRecord& stored) noexcept {
+  const auto* incoming_numeric = std::get_if<MonData::NumericValue>(&incoming._value);
 
   if (incoming_numeric != nullptr) {
-    const auto *stored_numeric =
-        std::get_if<MonData::NumericValue>(&stored._data._value);
+    const auto* stored_numeric = std::get_if<MonData::NumericValue>(&stored._data._value);
 
-    return stored_numeric != nullptr &&
-           stored_numeric->_value == incoming_numeric->_value;
+    return stored_numeric != nullptr && stored_numeric->_value == incoming_numeric->_value;
   }
 
-  const auto *incoming_string = std::get_if<std::string>(&incoming._value);
-  const auto *stored_string = std::get_if<std::string>(&stored._data._value);
+  const auto* incoming_string = std::get_if<std::string>(&incoming._value);
+  const auto* stored_string = std::get_if<std::string>(&stored._data._value);
 
   return incoming_string != nullptr && stored_string != nullptr &&
          *incoming_string == *stored_string;
@@ -55,8 +52,8 @@ bool same_monitor_value(const MonData::MonitorData &incoming,
  * update_prepared() 传入有效 std::function。
  * 空函数、返回 false 或抛出异常都视为持久化失败。
  */
-bool run_prepare(const MonitorStore::PrepareUpdate *prepare,
-                 const MonData::StoredRecord &candidate) noexcept {
+bool run_prepare(const MonitorStore::PrepareUpdate* prepare,
+                 const MonData::StoredRecord& candidate) noexcept {
   // prepare 是提交前屏障：异常与 false 等价，候选值不进入可见状态。
   if (prepare == nullptr) {
     return true;
@@ -75,10 +72,9 @@ bool run_prepare(const MonitorStore::PrepareUpdate *prepare,
   }
 }
 
-} // namespace
+}  // namespace
 
-std::optional<MonData::StoredRecord>
-MonitorStore::find(const MonData::MonitorKey &key) const {
+std::optional<MonData::StoredRecord> MonitorStore::find(const MonData::MonitorKey& key) const {
   std::lock_guard<std::mutex> lock(_mutex);
   const auto pos = _records.find(key);
   if (pos == _records.end()) {
@@ -98,18 +94,16 @@ void MonitorStore::clear() {
   _records.clear();
 }
 
-MonData::UpdateResult
-MonitorStore::update_impl(MonData::MonitorData data, bool force,
-                          MonData::MonitorTimestamp timestamp,
-                          const PrepareUpdate *prepare) {
+MonData::UpdateResult MonitorStore::update_impl(MonData::MonitorData data, bool force,
+                                                MonData::MonitorTimestamp timestamp,
+                                                const PrepareUpdate* prepare) {
   if (data._value.valueless_by_exception()) {
     return MonData::UpdateResult{MonData::UpdateStatus::INVALID, std::nullopt};
   }
 
   const MonData::MonitorKey key = data._key;
 
-  const auto *incoming_numeric =
-      std::get_if<MonData::NumericValue>(&data._value);
+  const auto* incoming_numeric = std::get_if<MonData::NumericValue>(&data._value);
 
   std::lock_guard<std::mutex> lock(_mutex);
 
@@ -126,10 +120,8 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
      * - 不执行 prepare；
      * - 不创建空 Key 节点。
      */
-    if (incoming_numeric != nullptr && incoming_numeric->_value == 0U &&
-        !force) {
-      return MonData::UpdateResult{MonData::UpdateStatus::IGNORED_INITIAL_ZERO,
-                                   std::nullopt};
+    if (incoming_numeric != nullptr && incoming_numeric->_value == 0U && !force) {
+      return MonData::UpdateResult{MonData::UpdateStatus::IGNORED_INITIAL_ZERO, std::nullopt};
     }
 
     MonData::StoredRecord candidate{std::move(data), timestamp};
@@ -144,8 +136,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
      * - prepare 尚未执行；
      * - outbox 尚未写入。
      */
-    MonData::UpdateResult committed_result{MonData::UpdateStatus::INSERTED,
-                                           candidate};
+    MonData::UpdateResult committed_result{MonData::UpdateStatus::INSERTED, candidate};
 
     /*
      * 先让 map 完成节点分配。
@@ -159,8 +150,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
     const auto inserted = _records.emplace(key, std::move(candidate));
 
     if (!inserted.second) {
-      return MonData::UpdateResult{MonData::UpdateStatus::INVALID,
-                                   std::nullopt};
+      return MonData::UpdateResult{MonData::UpdateStatus::INVALID, std::nullopt};
     }
 
     /*
@@ -174,8 +164,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
        */
       _records.erase(inserted.first);
 
-      return MonData::UpdateResult{MonData::UpdateStatus::DURABILITY_FAILED,
-                                   std::nullopt};
+      return MonData::UpdateResult{MonData::UpdateStatus::DURABILITY_FAILED, std::nullopt};
     }
 
     /*
@@ -190,8 +179,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
    * 不调用 prepare，不更新时间戳和元数据。
    */
   if (same_monitor_value(data, existing->second)) {
-    return MonData::UpdateResult{MonData::UpdateStatus::UNCHANGED,
-                                 existing->second};
+    return MonData::UpdateResult{MonData::UpdateStatus::UNCHANGED, existing->second};
   }
 
   /*
@@ -202,8 +190,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
   /*
    * 先准备返回副本，确保 prepare 成功后不再发生复制分配。
    */
-  MonData::UpdateResult committed_result{MonData::UpdateStatus::UPDATED,
-                                         candidate};
+  MonData::UpdateResult committed_result{MonData::UpdateStatus::UPDATED, candidate};
 
   /*
    * prepare 接收到完整候选记录：
@@ -215,8 +202,7 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
    * 此时 Store 仍保存旧记录。
    */
   if (!run_prepare(prepare, candidate)) {
-    return MonData::UpdateResult{MonData::UpdateStatus::DURABILITY_FAILED,
-                                 std::nullopt};
+    return MonData::UpdateResult{MonData::UpdateStatus::DURABILITY_FAILED, std::nullopt};
   }
 
   /*
@@ -230,22 +216,18 @@ MonitorStore::update_impl(MonData::MonitorData data, bool force,
   return committed_result;
 }
 
-MonData::UpdateResult
-MonitorStore::update(MonData::MonitorData data, bool force,
-                     MonData::MonitorTimestamp timestamp) {
+MonData::UpdateResult MonitorStore::update(MonData::MonitorData data, bool force,
+                                           MonData::MonitorTimestamp timestamp) {
   return update_impl(std::move(data), force, timestamp, nullptr);
 }
 
-MonData::UpdateResult
-MonitorStore::update_prepared(MonData::MonitorData data, bool force,
-                              MonData::MonitorTimestamp timestamp,
-                              const PrepareUpdate &prepare) {
+MonData::UpdateResult MonitorStore::update_prepared(MonData::MonitorData data, bool force,
+                                                    MonData::MonitorTimestamp timestamp,
+                                                    const PrepareUpdate& prepare) {
   return update_impl(std::move(data), force, timestamp, &prepare);
 }
 
-std::vector<MonData::StoredRecord>
-MonitorStore::query(const MonData::MonitorFilter &filter) const {
-
+std::vector<MonData::StoredRecord> MonitorStore::query(const MonData::MonitorFilter& filter) const {
   std::vector<MonData::StoredRecord> result;
   {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -257,10 +239,9 @@ MonitorStore::query(const MonData::MonitorFilter &filter) const {
     // MonitorKey::operator< 保证：
     //
     // mid → level → fid → eid
-    for (const auto &entry : _records) {
-      const MonData::MonitorKey &key = entry.first;
-      if (filter.module_id.has_value() &&
-          key._mid != filter.module_id.value()) {
+    for (const auto& entry : _records) {
+      const MonData::MonitorKey& key = entry.first;
+      if (filter.module_id.has_value() && key._mid != filter.module_id.value()) {
         continue;
       }
 
@@ -268,8 +249,7 @@ MonitorStore::query(const MonData::MonitorFilter &filter) const {
         continue;
       }
 
-      if (filter.function_id.has_value() &&
-          key._fid != filter.function_id.value()) {
+      if (filter.function_id.has_value() && key._fid != filter.function_id.value()) {
         continue;
       }
 
@@ -286,4 +266,4 @@ MonitorStore::query(const MonData::MonitorFilter &filter) const {
 
   return result;
 }
-} // namespace TLSSMON
+}  // namespace TLSSMON

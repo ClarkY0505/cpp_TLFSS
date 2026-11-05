@@ -2,6 +2,10 @@
 #include "cli_server.h"
 #include "monitor_module_registry.h"
 
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -10,13 +14,9 @@
 #include <cstdint>
 #include <future>
 #include <iostream>
-#include <netinet/in.h>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
@@ -24,19 +24,21 @@ using namespace TLSSMON;
 using namespace std::chrono_literals;
 
 class ScopedFd final {
-public:
-  explicit ScopedFd(int fd = -1) noexcept : _fd(fd) {}
+ public:
+  explicit ScopedFd(int fd = -1) noexcept
+      : _fd(fd) {}
   ~ScopedFd() {
     if (_fd >= 0) {
       (void)::close(_fd);
     }
   }
 
-  ScopedFd(const ScopedFd &) = delete;
-  ScopedFd &operator=(const ScopedFd &) = delete;
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
 
-  ScopedFd(ScopedFd &&other) noexcept : _fd(other.release()) {}
-  ScopedFd &operator=(ScopedFd &&other) noexcept {
+  ScopedFd(ScopedFd&& other) noexcept
+      : _fd(other.release()) {}
+  ScopedFd& operator=(ScopedFd&& other) noexcept {
     if (this != &other) {
       if (_fd >= 0) {
         (void)::close(_fd);
@@ -46,9 +48,11 @@ public:
     return *this;
   }
 
-  int get() const noexcept { return _fd; }
+  int get() const noexcept {
+    return _fd;
+  }
 
-private:
+ private:
   int release() noexcept {
     const int fd = _fd;
     _fd = -1;
@@ -58,8 +62,7 @@ private:
   int _fd{-1};
 };
 
-bool wait_for_phase(Engine &engine, EnginePhase expected,
-                    std::chrono::milliseconds timeout = 2s) {
+bool wait_for_phase(Engine& engine, EnginePhase expected, std::chrono::milliseconds timeout = 2s) {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (engine.get_phase() == expected) {
@@ -79,16 +82,15 @@ ScopedFd connect_loopback(std::uint16_t port) {
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   address.sin_port = htons(port);
 
-  assert(::connect(client.get(), reinterpret_cast<const sockaddr *>(&address),
-                   sizeof(address)) == 0);
+  assert(::connect(client.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) ==
+         0);
   return client;
 }
 
 bool send_all(int fd, std::string_view text) {
   std::size_t offset = 0U;
   while (offset < text.size()) {
-    const ssize_t count =
-        ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
+    const ssize_t count = ::send(fd, text.data() + offset, text.size() - offset, MSG_NOSIGNAL);
     if (count > 0) {
       offset += static_cast<std::size_t>(count);
       continue;
@@ -101,8 +103,7 @@ bool send_all(int fd, std::string_view text) {
   return true;
 }
 
-bool receive_exact(int fd, std::string_view expected,
-                   std::chrono::milliseconds timeout = 2s) {
+bool receive_exact(int fd, std::string_view expected, std::chrono::milliseconds timeout = 2s) {
   std::string received;
   received.reserve(expected.size());
   const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -113,16 +114,14 @@ bool receive_exact(int fd, std::string_view expected,
       return false;
     }
 
-    const auto remaining =
-        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     pollfd descriptor{};
     descriptor.fd = fd;
     descriptor.events = POLLIN;
 
     int ready;
     do {
-      ready = ::poll(&descriptor, 1,
-                     std::max(1, static_cast<int>(remaining.count())));
+      ready = ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
     } while (ready < 0 && errno == EINTR);
 
     if (ready <= 0 || (descriptor.revents & (POLLERR | POLLNVAL)) != 0) {
@@ -131,8 +130,7 @@ bool receive_exact(int fd, std::string_view expected,
 
     char buffer[4096];
     const std::size_t needed = expected.size() - received.size();
-    const ssize_t count =
-        ::recv(fd, buffer, std::min(needed, sizeof(buffer)), 0);
+    const ssize_t count = ::recv(fd, buffer, std::min(needed, sizeof(buffer)), 0);
     if (count > 0) {
       received.append(buffer, static_cast<std::size_t>(count));
       continue;
@@ -146,8 +144,7 @@ bool receive_exact(int fd, std::string_view expected,
   return received == expected;
 }
 
-std::string receive_until_close(int fd,
-                                std::chrono::milliseconds timeout = 2s) {
+std::string receive_until_close(int fd, std::chrono::milliseconds timeout = 2s) {
   std::string received;
   const auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -188,36 +185,33 @@ std::string receive_until_close(int fd,
 }
 
 class RunningModuleCli final {
-public:
+ public:
   RunningModuleCli()
-      : _engine(MonConfig{"module-cli-test", 0U, 1U}),
-        _server(_engine, _registry,
-                CliServerConfig{0U, CLI_MAX_CLIENTS, "storage"}) {
+      : _engine(MonConfig{"module-cli-test", 0U, 1U})
+      , _server(_engine, _registry, CliServerConfig{0U, CLI_MAX_CLIENTS, "storage"}) {
     assert(_engine.init() == ENGINESTATE::SUCCESSFUL);
     assert(_modules.register_module({10U, "module-a", "first module"}) ==
            ModuleRegisterStatus::SUCCESS);
     assert(_modules.register_module({20U, "module-b", "second module"}) ==
            ModuleRegisterStatus::SUCCESS);
 
-    assert(register_use_command(_registry, _modules) ==
-           CliRegisterStatus::SUCCESS);
-    assert(_registry.register_command(
-               "ping", "return pong",
-               [](const CliArguments &) { return std::string{"pong\n"}; }) ==
-           CliRegisterStatus::SUCCESS);
-    assert(_registry.register_command(
-               "multi", "return multiple lines", [](const CliArguments &) {
-                 return std::string{"first\nsecond\n"};
-               }) == CliRegisterStatus::SUCCESS);
-    assert(_registry.register_command(
-               "stop", "stop engine", [this](const CliArguments &) {
-                 _engine.stop();
-                 return std::string{"stopping\n"};
-               }) == CliRegisterStatus::SUCCESS);
+    assert(register_use_command(_registry, _modules) == CliRegisterStatus::SUCCESS);
+    assert(_registry.register_command("ping", "return pong", [](const CliArguments&) {
+      return std::string{"pong\n"};
+    }) == CliRegisterStatus::SUCCESS);
+    assert(_registry.register_command("multi", "return multiple lines", [](const CliArguments&) {
+      return std::string{"first\nsecond\n"};
+    }) == CliRegisterStatus::SUCCESS);
+    assert(_registry.register_command("stop", "stop engine", [this](const CliArguments&) {
+      _engine.stop();
+      return std::string{"stopping\n"};
+    }) == CliRegisterStatus::SUCCESS);
 
     assert(_server.start());
     _future = _promise.get_future();
-    _runner = std::thread([this] { _promise.set_value(_engine.run()); });
+    _runner = std::thread([this] {
+      _promise.set_value(_engine.run());
+    });
     assert(wait_for_phase(_engine, EnginePhase::RUNNING));
   }
 
@@ -230,13 +224,17 @@ public:
     _server.close();
   }
 
-  RunningModuleCli(const RunningModuleCli &) = delete;
-  RunningModuleCli &operator=(const RunningModuleCli &) = delete;
+  RunningModuleCli(const RunningModuleCli&) = delete;
+  RunningModuleCli& operator=(const RunningModuleCli&) = delete;
 
-  std::uint16_t port() const noexcept { return _server.bound_port(); }
-  Engine &engine() noexcept { return _engine; }
+  std::uint16_t port() const noexcept {
+    return _server.bound_port();
+  }
+  Engine& engine() noexcept {
+    return _engine;
+  }
 
-private:
+ private:
   Engine _engine;
   MonitorModuleRegistry _modules;
   CliRegistry _registry;
@@ -256,8 +254,7 @@ void test_initial_prompt_and_module_switching() {
 
   assert(receive_exact(client.get(), "[storage]> "));
   assert(send_all(client.get(), "use module-a\n"));
-  assert(receive_exact(client.get(),
-                       "* using module: module-a\n[module-a]> "));
+  assert(receive_exact(client.get(), "* using module: module-a\n[module-a]> "));
 
   assert(send_all(client.get(), "ping\n"));
   assert(receive_exact(client.get(), "* pong\n[module-a]> "));
@@ -275,8 +272,7 @@ void test_empty_and_failed_commands_keep_current_prompt() {
 
   assert(receive_exact(client.get(), "[storage]> "));
   assert(send_all(client.get(), "use module-b\n"));
-  assert(receive_exact(client.get(),
-                       "* using module: module-b\n[module-b]> "));
+  assert(receive_exact(client.get(), "* using module: module-b\n[module-b]> "));
 
   assert(send_all(client.get(), "\nmissing\nuse absent\n"));
   assert(receive_exact(client.get(),
@@ -293,8 +289,7 @@ void test_multiple_commands_preserve_prompt_order() {
   ScopedFd client = connect_loopback(server.port());
 
   assert(receive_exact(client.get(), "[storage]> "));
-  assert(send_all(client.get(),
-                  "use module-a\nping\nuse module-b\nping\n"));
+  assert(send_all(client.get(), "use module-a\nping\nuse module-b\nping\n"));
   assert(receive_exact(client.get(),
                        "* using module: module-a\n[module-a]> "
                        "* pong\n[module-a]> "
@@ -309,8 +304,7 @@ void test_multiline_reply_prefixes_every_line() {
 
   assert(receive_exact(client.get(), "[storage]> "));
   assert(send_all(client.get(), "multi\n"));
-  assert(receive_exact(client.get(),
-                       "* first\n* second\n[storage]> "));
+  assert(receive_exact(client.get(), "* first\n* second\n[storage]> "));
 }
 
 /*
@@ -321,8 +315,7 @@ void test_oversized_line_closes_without_prompt() {
   ScopedFd client = connect_loopback(server.port());
 
   assert(receive_exact(client.get(), "[storage]> "));
-  assert(send_all(client.get(),
-                  std::string(CLI_MAX_LINE_SIZE + 1U, 'x')));
+  assert(send_all(client.get(), std::string(CLI_MAX_LINE_SIZE + 1U, 'x')));
   assert(receive_until_close(client.get()) == "error: line too long\n");
   assert(server.engine().get_phase() == EnginePhase::RUNNING);
 }
@@ -341,7 +334,7 @@ void test_stop_closes_without_trailing_prompt() {
   assert(wait_for_phase(server.engine(), EnginePhase::STOPPED));
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_initial_prompt_and_module_switching();

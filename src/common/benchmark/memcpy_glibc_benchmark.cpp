@@ -32,7 +32,8 @@ constexpr double k_gib = 1024.0 * 1024.0 * 1024.0;
 
 class AlignedBuffer {
  public:
-  explicit AlignedBuffer(std::size_t size) : size_(size) {
+  explicit AlignedBuffer(std::size_t size)
+      : size_(size) {
     void* pointer = nullptr;
     if (posix_memalign(&pointer, k_alignment, size) != 0) {
       throw std::bad_alloc{};
@@ -40,12 +41,18 @@ class AlignedBuffer {
     data_ = static_cast<std::uint8_t*>(pointer);
   }
 
-  ~AlignedBuffer() { std::free(data_); }
+  ~AlignedBuffer() {
+    std::free(data_);
+  }
   AlignedBuffer(const AlignedBuffer&) = delete;
   AlignedBuffer& operator=(const AlignedBuffer&) = delete;
 
-  std::uint8_t* data() noexcept { return data_; }
-  std::size_t size() const noexcept { return size_; }
+  std::uint8_t* data() noexcept {
+    return data_;
+  }
+  std::size_t size() const noexcept {
+    return size_;
+  }
 
  private:
   std::uint8_t* data_{nullptr};
@@ -73,13 +80,11 @@ __attribute__((noinline)) void* direct_nt_copy(void* dst, const void* src, std::
                               TLSS::MEMORY::CopyHint::Streaming);
 }
 
-__attribute__((noinline)) void* auto_default_copy(void* dst, const void* src,
-                                                   std::size_t size) {
+__attribute__((noinline)) void* auto_default_copy(void* dst, const void* src, std::size_t size) {
   return TLSS::MEMORY::memcpy(dst, src, size);
 }
 
-__attribute__((noinline)) void* auto_streaming_copy(void* dst, const void* src,
-                                                     std::size_t size) {
+__attribute__((noinline)) void* auto_streaming_copy(void* dst, const void* src, std::size_t size) {
   return TLSS::MEMORY::memcpy(dst, src, size, TLSS::MEMORY::CopyBackend::Auto,
                               TLSS::MEMORY::CopyHint::Streaming);
 }
@@ -111,12 +116,26 @@ constexpr std::array<BenchmarkCase, 3> k_runtime_cases{{
 }};
 
 constexpr std::array<std::size_t, 12> k_sizes{{
-    1024, 2048, 3072, 4096, 8192, 16384, 32768, 65536,
-    131072, 262144, 524288, 1048576,
+    1024,
+    2048,
+    3072,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+    131072,
+    262144,
+    524288,
+    1048576,
 }};
 
 constexpr std::array<std::size_t, 5> k_runtime_sizes{{
-    65536, 131072, 262144, 524288, 1048576,
+    65536,
+    131072,
+    262144,
+    524288,
+    1048576,
 }};
 
 void initialize_source(std::uint8_t* src, std::size_t size) {
@@ -131,16 +150,14 @@ double median(std::vector<double> values) {
   return values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2.0;
 }
 
-void check_result(CopyFunction copy, std::uint8_t* dst, const std::uint8_t* src,
-                  std::size_t size) {
+void check_result(CopyFunction copy, std::uint8_t* dst, const std::uint8_t* src, std::size_t size) {
   if (copy(dst, src, size) != dst || std::memcmp(dst, src, size) != 0) {
     throw std::runtime_error("copy result mismatch");
   }
 }
 
-BenchmarkResult run_streaming_once(CopyFunction copy, std::uint8_t* dst,
-                                   const std::uint8_t* src, std::size_t copy_size,
-                                   std::size_t working_set_size) {
+BenchmarkResult run_streaming_once(CopyFunction copy, std::uint8_t* dst, const std::uint8_t* src,
+                                   std::size_t copy_size, std::size_t working_set_size) {
   if (copy_size == 0 || copy_size > working_set_size) {
     throw std::invalid_argument("invalid streaming copy size");
   }
@@ -231,24 +248,21 @@ void run_suite(std::string_view mode, const std::array<BenchmarkCase, N>& cases,
         const std::size_t case_index = (round + position) % N;
         const BenchmarkCase& test_case = cases[case_index];
         std::memset(dst, 0, size);
-        const BenchmarkResult result = hot
-                                           ? run_hot_once(test_case.copy, dst, src, copy_size)
-                                           : run_streaming_once(test_case.copy, dst, src, copy_size,
-                                                                k_working_set);
+        const BenchmarkResult result =
+            hot ? run_hot_once(test_case.copy, dst, src, copy_size)
+                : run_streaming_once(test_case.copy, dst, src, copy_size, k_working_set);
         bandwidth_samples[case_index].push_back(result.gib_per_second);
         latency_samples[case_index].push_back(result.ns_per_call);
         std::cout << "sample," << mode << ',' << copy_size << ',' << test_case.name << ','
-                  << round + 1 << ',' << std::fixed << std::setprecision(6)
-                  << result.gib_per_second << ',' << result.ns_per_call << ',' << result.call_count
-                  << '\n';
+                  << round + 1 << ',' << std::fixed << std::setprecision(6) << result.gib_per_second
+                  << ',' << result.ns_per_call << ',' << result.call_count << '\n';
       }
     }
 
     for (std::size_t case_index = 0; case_index < N; ++case_index) {
-      std::cout << "median," << mode << ',' << copy_size << ',' << cases[case_index].name
-                << ",5," << std::fixed << std::setprecision(6)
-                << median(bandwidth_samples[case_index]) << ','
-                << median(latency_samples[case_index]) << ",0\n";
+      std::cout << "median," << mode << ',' << copy_size << ',' << cases[case_index].name << ",5,"
+                << std::fixed << std::setprecision(6) << median(bandwidth_samples[case_index])
+                << ',' << median(latency_samples[case_index]) << ",0\n";
     }
     std::cout << std::flush;
   }
@@ -297,8 +311,8 @@ void print_metadata(std::string_view mode) {
   } else {
     std::cout << " working_set_bytes=" << k_working_set;
   }
-  std::cout << " target_bytes_per_sample=" << k_target_bytes
-            << " rounds=" << k_round_count << " affinity=";
+  std::cout << " target_bytes_per_sample=" << k_target_bytes << " rounds=" << k_round_count
+            << " affinity=";
   bool first = true;
   for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
     if (CPU_ISSET(cpu, &available)) {
@@ -314,7 +328,8 @@ void print_metadata(std::string_view mode) {
 int main(int argc, char** argv) {
   try {
     if (argc < 2 || argc > 3) {
-      throw std::invalid_argument("usage: memcpy_glibc_benchmark <streaming|hot|runtime> [caller_cpu]");
+      throw std::invalid_argument(
+          "usage: memcpy_glibc_benchmark <streaming|hot|runtime> [caller_cpu]");
     }
     const std::string_view mode = argv[1];
     if (mode == "streaming" && argc == 2) {

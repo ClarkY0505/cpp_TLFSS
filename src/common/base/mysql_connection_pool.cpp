@@ -1,6 +1,6 @@
+#include "common/base/mysql_connection_pool.h"
 #include "common/base/base_logger.h"
 #include "common/base/mysql_connection.h"
-#include "common/base/mysql_connection_pool.h"
 #include "common/base/tlss_thread.h"
 
 #include <dirent.h>

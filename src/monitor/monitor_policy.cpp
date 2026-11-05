@@ -24,9 +24,10 @@ namespace {
 enum class ContForState : std::uint8_t { IDLE, PENDING, ACTIVE };
 
 class ContForPolicy final : public MonitorPolicy {
-public:
+ public:
   ContForPolicy(std::uint32_t threshold, PolicyTime duration) noexcept
-      : _threshold(threshold), _duration(duration) {}
+      : _threshold(threshold)
+      , _duration(duration) {}
   PolicyFeedResult feed(std::uint32_t value, PolicyTime now) noexcept override {
     /*
      * CONT_FOR 使用严格超阈值条件。
@@ -45,50 +46,50 @@ public:
     }
 
     switch (_state) {
-    case ContForState::IDLE:
-      /*
-       * 第一次超过阈值：
-       *
-       * 只记录连续区间的起始时间，
-       * 不在本次调用立即触发。
-       */
-      _state = ContForState::PENDING;
-      _crossed_at = now;
-
-      return PolicyFeedResult{false, 0U};
-
-    case ContForState::PENDING:
-      /*
-       * 这里额外避免负 elapsed 被误认为已经经过很长时间：
-       * 时间倒退时保持 PENDING，不触发，也不改变起点。
-       */
-      if (now < _crossed_at) {
-        return PolicyFeedResult{false, 0U};
-      }
-
-      if (now - _crossed_at >= _duration) {
+      case ContForState::IDLE:
         /*
-         * 持续时间达到要求：
+         * 第一次超过阈值：
          *
-         * 本次调用产生一次上升沿，
-         * 并进入 ACTIVE。
+         * 只记录连续区间的起始时间，
+         * 不在本次调用立即触发。
          */
-        _state = ContForState::ACTIVE;
+        _state = ContForState::PENDING;
+        _crossed_at = now;
 
-        return PolicyFeedResult{true, 1U};
-      }
+        return PolicyFeedResult{false, 0U};
 
-      return PolicyFeedResult{false, 0U};
+      case ContForState::PENDING:
+        /*
+         * 这里额外避免负 elapsed 被误认为已经经过很长时间：
+         * 时间倒退时保持 PENDING，不触发，也不改变起点。
+         */
+        if (now < _crossed_at) {
+          return PolicyFeedResult{false, 0U};
+        }
 
-    case ContForState::ACTIVE:
-      /*
-       * ACTIVE 表示当前告警仍成立，但上升沿已经报告过。
-       * 因此：
-       *
-       * noteworthy = false
-       * value      = 1
-       */
-      return PolicyFeedResult{false, 1U};
+        if (now - _crossed_at >= _duration) {
+          /*
+           * 持续时间达到要求：
+           *
+           * 本次调用产生一次上升沿，
+           * 并进入 ACTIVE。
+           */
+          _state = ContForState::ACTIVE;
+
+          return PolicyFeedResult{true, 1U};
+        }
+
+        return PolicyFeedResult{false, 0U};
+
+      case ContForState::ACTIVE:
+        /*
+         * ACTIVE 表示当前告警仍成立，但上升沿已经报告过。
+         * 因此：
+         *
+         * noteworthy = false
+         * value      = 1
+         */
+        return PolicyFeedResult{false, 1U};
     }
 
     /*
@@ -102,7 +103,7 @@ public:
     return _state == ContForState::ACTIVE ? 1U : 0U;
   }
 
-private:
+ private:
   const std::uint32_t _threshold;
   const PolicyTime _duration;
 
@@ -128,11 +129,11 @@ private:
  *   当前滚动窗口是否满足频率条件。
  */
 class TimesPerPeriodPolicy final : public MonitorPolicy {
-public:
-  TimesPerPeriodPolicy(std::uint32_t threshold, std::size_t count,
-                       PolicyTime period)
-      : _threshold(threshold), _period(period),
-        _events(count, PolicyTime::zero()) {}
+ public:
+  TimesPerPeriodPolicy(std::uint32_t threshold, std::size_t count, PolicyTime period)
+      : _threshold(threshold)
+      , _period(period)
+      , _events(count, PolicyTime::zero()) {}
   PolicyFeedResult feed(std::uint32_t value, PolicyTime now) noexcept override {
     // 未超阈值的采样不算事件，也不主动清除已有告警状态。
     if (value <= _threshold) {
@@ -175,10 +176,14 @@ public:
 
     return PolicyFeedResult{fired, current_value()};
   }
-  std::uint32_t value() const noexcept override { return current_value(); }
+  std::uint32_t value() const noexcept override {
+    return current_value();
+  }
 
-private:
-  std::uint32_t current_value() const noexcept { return _alerting ? 1U : 0U; }
+ private:
+  std::uint32_t current_value() const noexcept {
+    return _alerting ? 1U : 0U;
+  }
 
   const std::uint32_t _threshold;
   const PolicyTime _period;
@@ -195,20 +200,19 @@ private:
  * 只将被接受的样本写入滑动窗口。
  */
 class SmoothTrimPolicy final : public MonitorPolicy {
-public:
+ public:
   SmoothTrimPolicy(std::size_t window, std::uint32_t trim_threshold)
-      : _trim_threshold(trim_threshold), _samples(window, 0U) {}
+      : _trim_threshold(trim_threshold)
+      , _samples(window, 0U) {}
 
-  PolicyFeedResult feed(std::uint32_t value,
-                        PolicyTime /* now */) noexcept override {
+  PolicyFeedResult feed(std::uint32_t value, PolicyTime /* now */) noexcept override {
     /*
      * 第一个样本没有历史平均值，直接接受。
      *
      * 从第二个样本开始执行异常值检查。
      */
     if (_sample_count > 0U) {
-      const std::uint32_t difference =
-          value >= _average ? value - _average : _average - value;
+      const std::uint32_t difference = value >= _average ? value - _average : _average - value;
 
       /*
        * 严格大于阈值才拒绝。
@@ -255,8 +259,8 @@ public:
      *
      * 平均值按 M9 契约使用整数除法。
      */
-    const std::uint32_t new_average = static_cast<std::uint32_t>(
-        _sum / static_cast<std::uint64_t>(_sample_count));
+    const std::uint32_t new_average =
+        static_cast<std::uint32_t>(_sum / static_cast<std::uint64_t>(_sample_count));
 
     const bool changed = new_average != _average;
 
@@ -265,9 +269,11 @@ public:
     return PolicyFeedResult{changed, _average};
   }
 
-  std::uint32_t value() const noexcept override { return _average; }
+  std::uint32_t value() const noexcept override {
+    return _average;
+  }
 
-private:
+ private:
   const std::uint32_t _trim_threshold;
 
   std::vector<std::uint32_t> _samples;
@@ -278,10 +284,9 @@ private:
   std::uint32_t _average{0U};
 };
 
-} // namespace
+}  // namespace
 
-std::unique_ptr<MonitorPolicy> make_cont_for_policy(std::uint32_t threshold,
-                                                    PolicyTime duration) {
+std::unique_ptr<MonitorPolicy> make_cont_for_policy(std::uint32_t threshold, PolicyTime duration) {
   if (duration < PolicyTime::zero()) {
     return {};
   }
@@ -289,9 +294,8 @@ std::unique_ptr<MonitorPolicy> make_cont_for_policy(std::uint32_t threshold,
   return std::make_unique<ContForPolicy>(threshold, duration);
 }
 
-std::unique_ptr<MonitorPolicy>
-make_times_per_period_policy(std::uint32_t threshold, std::size_t count,
-                             PolicyTime period) {
+std::unique_ptr<MonitorPolicy> make_times_per_period_policy(std::uint32_t threshold,
+                                                            std::size_t count, PolicyTime period) {
   /*
    * count == 0 会产生空环形缓冲区，并导致后续取模除零。
    *
@@ -303,8 +307,8 @@ make_times_per_period_policy(std::uint32_t threshold, std::size_t count,
   return std::make_unique<TimesPerPeriodPolicy>(threshold, count, period);
 }
 
-std::unique_ptr<MonitorPolicy>
-make_smooth_trim_policy(std::size_t window, std::uint32_t trim_threshold) {
+std::unique_ptr<MonitorPolicy> make_smooth_trim_policy(std::size_t window,
+                                                       std::uint32_t trim_threshold) {
   /*
    * 空窗口无法保存样本，并会导致环形下标取模除零。
    */
@@ -315,4 +319,4 @@ make_smooth_trim_policy(std::size_t window, std::uint32_t trim_threshold) {
   return std::make_unique<SmoothTrimPolicy>(window, trim_threshold);
 }
 
-} // namespace TLSSMON
+}  // namespace TLSSMON

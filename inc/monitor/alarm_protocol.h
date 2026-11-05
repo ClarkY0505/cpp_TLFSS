@@ -16,8 +16,8 @@ namespace AlarmWire {
  * ASCII "SMA1"
  */
 inline constexpr std::array<std::uint8_t, 4> ALARM_MAGIC{
-    static_cast<std::uint8_t>('S'), static_cast<std::uint8_t>('M'),
-    static_cast<std::uint8_t>('A'), static_cast<std::uint8_t>('1')};
+    static_cast<std::uint8_t>('S'), static_cast<std::uint8_t>('M'), static_cast<std::uint8_t>('A'),
+    static_cast<std::uint8_t>('1')};
 
 /**
  * @brief 这里的版本是可靠告警信封版本。
@@ -54,8 +54,7 @@ inline constexpr std::size_t ALARM_CRC32_OFFSET = 44U;
 
 inline constexpr std::size_t ALARM_HEADER_SIZE = 48U;
 
-inline constexpr std::size_t ALARM_MAX_FRAME_SIZE =
-    ALARM_HEADER_SIZE + ALARM_MAX_PAYLOAD_SIZE;
+inline constexpr std::size_t ALARM_MAX_FRAME_SIZE = ALARM_HEADER_SIZE + ALARM_MAX_PAYLOAD_SIZE;
 
 /**
  * @brief 可靠告警帧类型。
@@ -69,12 +68,7 @@ inline constexpr std::size_t ALARM_MAX_FRAME_SIZE =
  * PING/PONG：
  *   空闲连接存活检测。
  */
-enum class AlarmFrameType : std::uint8_t {
-  ALARM = 1U,
-  ACK = 2U,
-  PING = 3U,
-  PONG = 4U
-};
+enum class AlarmFrameType : std::uint8_t { ALARM = 1U, ACK = 2U, PING = 3U, PONG = 4U };
 
 /**
  * @brief 判断帧类型是否属于当前协议定义。
@@ -83,11 +77,11 @@ enum class AlarmFrameType : std::uint8_t {
  */
 constexpr bool is_valid_alarm_frame_type(AlarmFrameType type) noexcept {
   switch (type) {
-  case AlarmFrameType::ALARM:
-  case AlarmFrameType::ACK:
-  case AlarmFrameType::PING:
-  case AlarmFrameType::PONG:
-    return true;
+    case AlarmFrameType::ALARM:
+    case AlarmFrameType::ACK:
+    case AlarmFrameType::PING:
+    case AlarmFrameType::PONG:
+      return true;
   }
 
   return false;
@@ -135,10 +129,10 @@ struct AlarmFrame final {
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator==(const AlarmFrame &lhs, const AlarmFrame &rhs) {
+inline bool operator==(const AlarmFrame& lhs, const AlarmFrame& rhs) {
   return lhs._type == rhs._type && lhs._source_id == rhs._source_id &&
-         lhs._message_id == rhs._message_id &&
-         lhs._timestamp_ms == rhs._timestamp_ms && lhs._payload == rhs._payload;
+         lhs._message_id == rhs._message_id && lhs._timestamp_ms == rhs._timestamp_ms &&
+         lhs._payload == rhs._payload;
 }
 
 /**
@@ -147,7 +141,7 @@ inline bool operator==(const AlarmFrame &lhs, const AlarmFrame &rhs) {
  * @param rhs 右操作数。
  * @return 比较条件成立时返回 true，否则返回 false。
  */
-inline bool operator!=(const AlarmFrame &lhs, const AlarmFrame &rhs) {
+inline bool operator!=(const AlarmFrame& lhs, const AlarmFrame& rhs) {
   return !(lhs == rhs);
 }
 
@@ -255,7 +249,7 @@ struct AlarmFrameSizeResult final {
  * @param size 输入缓冲区的字节数。
  * @return 计算得到的 CRC32；非零长度且 data 为空时返回 0。
  */
-std::uint32_t alarm_crc32(const std::uint8_t *data, std::size_t size) noexcept;
+std::uint32_t alarm_crc32(const std::uint8_t* data, std::size_t size) noexcept;
 
 /**
  * @brief 从完整头部读取 payload 长度并计算预期帧大小。
@@ -263,15 +257,14 @@ std::uint32_t alarm_crc32(const std::uint8_t *data, std::size_t size) noexcept;
  * @param prefix_size 输入缓冲区的字节数。
  * @return 头部校验状态以及完整帧的预期字节数。
  */
-AlarmFrameSizeResult alarm_frame_size(const std::uint8_t *prefix,
-                                      std::size_t prefix_size) noexcept;
+AlarmFrameSizeResult alarm_frame_size(const std::uint8_t* prefix, std::size_t prefix_size) noexcept;
 
 /**
  * @brief 校验字段并编码完整可靠告警信封。
  * @param frame 要编码的告警帧。
  * @return 编码状态以及完整信封字节。
  */
-AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept;
+AlarmEncodeResult encode_alarm_frame(const AlarmFrame& frame) noexcept;
 
 /**
  * @brief 校验完整信封、CRC 和 ALARM payload 后解码。
@@ -279,9 +272,8 @@ AlarmEncodeResult encode_alarm_frame(const AlarmFrame &frame) noexcept;
  * @param size 输入缓冲区的字节数。
  * @return 解码状态以及成功解析的告警帧。
  */
-AlarmDecodeResult decode_alarm_frame(const std::uint8_t *data,
-                                     std::size_t size) noexcept;
+AlarmDecodeResult decode_alarm_frame(const std::uint8_t* data, std::size_t size) noexcept;
 
-} // namespace AlarmWire
-} // namespace TLSSMON
-#endif // __ALARM_PROTOCOL_H__
+}  // namespace AlarmWire
+}  // namespace TLSSMON
+#endif  // __ALARM_PROTOCOL_H__

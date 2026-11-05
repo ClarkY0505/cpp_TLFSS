@@ -10,9 +10,10 @@
 
 namespace TLSS::FileStorage::Transfer {
 
-std::shared_ptr<AsyncFileSource> AsyncFileSource::open(
-    DiskExecutor& executor, const NET::TcpConnectionPtr& conn,
-    Factory factory, Ready ready, Failed failed) {
+std::shared_ptr<AsyncFileSource> AsyncFileSource::open(DiskExecutor& executor,
+                                                       const NET::TcpConnectionPtr& conn,
+                                                       Factory factory, Ready ready,
+                                                       Failed failed) {
   if (!conn || !conn->connected()) {
     throw std::runtime_error("connection is unavailable");
   }
@@ -29,21 +30,30 @@ std::shared_ptr<AsyncFileSource> AsyncFileSource::open(
   return source;
 }
 
-AsyncFileSource::AsyncFileSource(const NET::TcpConnectionPtr& conn,
-                                 std::shared_ptr<State> state, Ready ready, Failed failed)
+AsyncFileSource::AsyncFileSource(const NET::TcpConnectionPtr& conn, std::shared_ptr<State> state,
+                                 Ready ready, Failed failed)
     : _connection(conn)
     , _state(std::move(state))
     , _ready(std::move(ready))
     , _failed(std::move(failed)) {}
 
-AsyncFileSource::~AsyncFileSource() { cancel(); }
-std::uint64_t AsyncFileSource::size() const { return _info.size; }
-const std::string& AsyncFileSource::tag() const { return _info.tag; }
-void AsyncFileSource::cancel() noexcept { _state->cancel(); }
+AsyncFileSource::~AsyncFileSource() {
+  cancel();
+}
+std::uint64_t AsyncFileSource::size() const {
+  return _info.size;
+}
+const std::string& AsyncFileSource::tag() const {
+  return _info.tag;
+}
+void AsyncFileSource::cancel() noexcept {
+  _state->cancel();
+}
 
 NET::TcpConnection::FileReadFunction AsyncFileSource::reader() {
   assert(_state->loop->is_in_loop_thread());
-  if (!_opened) throw std::logic_error("file source is not ready");
+  if (!_opened)
+    throw std::logic_error("file source is not ready");
   auto self = shared_from_this();
   return [self](off_t offset, std::size_t count, Completion completion) {
     self->_state->request(offset, count, std::move(completion));
@@ -52,7 +62,8 @@ NET::TcpConnection::FileReadFunction AsyncFileSource::reader() {
 
 void AsyncFileSource::on_opened(Info info, std::string error) {
   assert(_state->loop->is_in_loop_thread());
-  if (_state->is_cancelled()) return;
+  if (_state->is_cancelled())
+    return;
   auto conn = _connection.lock();
   if (!conn || !conn->connected()) {
     cancel();
@@ -65,7 +76,8 @@ void AsyncFileSource::on_opened(Info info, std::string error) {
   _info = std::move(info);
   _opened = true;
   try {
-    if (_ready) _ready(_info);
+    if (_ready)
+      _ready(_info);
   } catch (const std::exception& exception) {
     report_error(conn, exception.what());
   } catch (...) {
@@ -87,10 +99,14 @@ void AsyncFileSource::report_error(const NET::TcpConnectionPtr& conn, std::strin
 }
 
 AsyncFileSource::State::State(DiskExecutor& executor_arg, NET::EventLoop* loop_arg,
-                               Factory factory_arg)
-    : executor(executor_arg), loop(loop_arg), factory(std::move(factory_arg)) {}
+                              Factory factory_arg)
+    : executor(executor_arg)
+    , loop(loop_arg)
+    , factory(std::move(factory_arg)) {}
 
-AsyncFileSource::State::~State() { assert(!file); }
+AsyncFileSource::State::~State() {
+  assert(!file);
+}
 
 bool AsyncFileSource::State::is_cancelled() {
   std::lock_guard<std::mutex> lock(mutex);
@@ -104,10 +120,16 @@ std::error_code AsyncFileSource::State::make_error(int value) {
 bool AsyncFileSource::State::launch_initialize() {
   {
     std::lock_guard<std::mutex> lock(mutex);
-    if (cancelled || terminal || busy) return false;
+    if (cancelled || terminal || busy)
+      return false;
     busy = true;
     auto self = shared_from_this();
-    if (executor.post([self] { self->run_initialize(); }, false)) return true;
+    if (executor.post(
+            [self] {
+              self->run_initialize();
+            },
+            false))
+      return true;
     busy = false;
   }
   cancel();
@@ -120,7 +142,8 @@ void AsyncFileSource::State::run_initialize() {
   try {
     if (!is_cancelled()) {
       auto opened = factory();
-      if (!opened.file) throw std::runtime_error("file source factory returned null");
+      if (!opened.file)
+        throw std::runtime_error("file source factory returned null");
       file = std::move(opened.file);
       info.size = file->size;
       info.tag = std::move(opened.tag);
@@ -146,13 +169,16 @@ void AsyncFileSource::State::run_initialize() {
     }
     busy = false;
     if (post_enabled && !cancelled) {
-      loop->queue_in_loop([weak = owner, info = std::move(info), error = std::move(error)]() mutable {
-        if (auto source = weak.lock()) source->on_opened(std::move(info), std::move(error));
-      });
+      loop->queue_in_loop(
+          [weak = owner, info = std::move(info), error = std::move(error)]() mutable {
+            if (auto source = weak.lock())
+              source->on_opened(std::move(info), std::move(error));
+          });
     }
   }
   // No worker may post another result after its registration is released.
-  if (ending) executor.release(token);
+  if (ending)
+    executor.release(token);
 }
 
 void AsyncFileSource::State::request(off_t offset, std::size_t count, Completion callback) {
@@ -175,7 +201,12 @@ void AsyncFileSource::State::request(off_t offset, std::size_t count, Completion
   busy = true;
   completion = std::move(callback);
   auto self = shared_from_this();
-  if (executor.post([self, offset, count] { self->run_read(offset, count); }, false)) return;
+  if (executor.post(
+          [self, offset, count] {
+            self->run_read(offset, count);
+          },
+          false))
+    return;
   busy = false;
   post_read_locked(std::exchange(completion, Completion{}), make_error(ECANCELED), {});
   lock.unlock();
@@ -189,7 +220,9 @@ void AsyncFileSource::State::run_read(off_t offset, std::size_t count) {
     if (is_cancelled()) {
       error = make_error(ECANCELED);
     } else {
-      data = ObjectStorageEngine::read(file, offset, count, [this] { return is_cancelled(); });
+      data = ObjectStorageEngine::read(file, offset, count, [this] {
+        return is_cancelled();
+      });
     }
   } catch (const std::system_error& exception) {
     error = exception.code();
@@ -198,7 +231,8 @@ void AsyncFileSource::State::run_read(off_t offset, std::size_t count) {
   } catch (...) {
     error = make_error(EIO);
   }
-  if (error) std::string{}.swap(data);
+  if (error)
+    std::string{}.swap(data);
 
   bool ending;
   {
@@ -215,23 +249,25 @@ void AsyncFileSource::State::run_read(off_t offset, std::size_t count) {
       post_read_locked(std::exchange(completion, Completion{}), error, std::move(data));
     }
   }
-  if (ending) executor.release(token);
+  if (ending)
+    executor.release(token);
   // On success a new read may already be scheduled; don't access file here.
 }
 
 void AsyncFileSource::State::post_read_locked(Completion callback, std::error_code error,
                                               std::string data) {
-  if (!callback) return;
+  if (!callback)
+    return;
   auto weak = weak_from_this();
-  loop->queue_in_loop([weak, callback = std::move(callback), error,
-                       data = std::move(data)]() mutable {
-    auto state = weak.lock();
-    if (!state || state->is_cancelled()) {
-      error = make_error(ECANCELED);
-      std::string{}.swap(data);
-    }
-    callback(error, std::move(data));
-  });
+  loop->queue_in_loop(
+      [weak, callback = std::move(callback), error, data = std::move(data)]() mutable {
+        auto state = weak.lock();
+        if (!state || state->is_cancelled()) {
+          error = make_error(ECANCELED);
+          std::string{}.swap(data);
+        }
+        callback(error, std::move(data));
+      });
 }
 
 void AsyncFileSource::State::cancel() noexcept {
@@ -244,24 +280,28 @@ void AsyncFileSource::State::cancel() noexcept {
       // Deliver cancellation even while the worker is blocked inside pread.
       post_read_locked(std::exchange(completion, Completion{}), make_error(ECANCELED), {});
     }
-    if (token == 0 || terminal || busy) return;
+    if (token == 0 || terminal || busy)
+      return;
     busy = true;
     self = shared_from_this();
   }
-  const bool accepted = executor.post([self] {
-    {
-      std::lock_guard<std::mutex> lock(self->mutex);
-      self->terminal = true;
-    }
-    self->file.reset();
-    self->factory = {};
-    {
-      std::lock_guard<std::mutex> lock(self->mutex);
-      self->busy = false;
-    }
-    self->executor.release(self->token);
-  }, true);
-  if (!accepted) std::terminate();
+  const bool accepted = executor.post(
+      [self] {
+        {
+          std::lock_guard<std::mutex> lock(self->mutex);
+          self->terminal = true;
+        }
+        self->file.reset();
+        self->factory = {};
+        {
+          std::lock_guard<std::mutex> lock(self->mutex);
+          self->busy = false;
+        }
+        self->executor.release(self->token);
+      },
+      true);
+  if (!accepted)
+    std::terminate();
 }
 
 }  // namespace TLSS::FileStorage::Transfer

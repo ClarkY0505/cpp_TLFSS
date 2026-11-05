@@ -1,6 +1,8 @@
-#include "alarm_protocol.h"
 #include "alarm_spool.h"
+#include "alarm_protocol.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -12,9 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 using namespace TLSSMON::AlarmWire;
@@ -24,15 +24,12 @@ namespace {
 namespace fs = std::filesystem;
 
 class TemporaryDirectory final {
-public:
-  explicit TemporaryDirectory(const std::string &name) {
+ public:
+  explicit TemporaryDirectory(const std::string& name) {
     static std::atomic<std::uint64_t> sequence{0U};
-    const auto tick = std::chrono::steady_clock::now()
-                          .time_since_epoch()
-                          .count();
+    const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
     _path = fs::temp_directory_path() /
-            ("monitor-" + name + "-" +
-             std::to_string(static_cast<long long>(::getpid())) + "-" +
+            ("monitor-" + name + "-" + std::to_string(static_cast<long long>(::getpid())) + "-" +
              std::to_string(static_cast<long long>(tick)) + "-" +
              std::to_string(sequence.fetch_add(1U)));
     std::error_code error;
@@ -44,12 +41,14 @@ public:
     fs::remove_all(_path, error);
   }
 
-  TemporaryDirectory(const TemporaryDirectory &) = delete;
-  TemporaryDirectory &operator=(const TemporaryDirectory &) = delete;
+  TemporaryDirectory(const TemporaryDirectory&) = delete;
+  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
 
-  const fs::path &path() const noexcept { return _path; }
+  const fs::path& path() const noexcept {
+    return _path;
+  }
 
-private:
+ private:
   fs::path _path;
 };
 
@@ -61,8 +60,7 @@ AlarmMessageId make_message_id(std::uint8_t seed) {
   return id;
 }
 
-std::vector<std::uint8_t> make_wire(std::uint64_t source_id,
-                                    const AlarmMessageId &message_id,
+std::vector<std::uint8_t> make_wire(std::uint64_t source_id, const AlarmMessageId& message_id,
                                     std::size_t payload_size = 32U) {
   AlarmFrame frame;
   frame._type = AlarmFrameType::ALARM;
@@ -76,7 +74,7 @@ std::vector<std::uint8_t> make_wire(std::uint64_t source_id,
   return encoded._bytes;
 }
 
-mode_t permission_bits(const fs::path &path) {
+mode_t permission_bits(const fs::path& path) {
   struct stat metadata {};
   assert(::stat(path.c_str(), &metadata) == 0);
   return metadata.st_mode & static_cast<mode_t>(0777);
@@ -112,8 +110,7 @@ void test_outbox_store_read_reopen_and_remove() {
     assert(fs::is_directory(root.path() / "tmp"));
     assert(fs::is_directory(root.path() / "corrupt"));
 
-    const AlarmSpoolStoreResult stored =
-        spool.store(source_id, message_id, wire);
+    const AlarmSpoolStoreResult stored = spool.store(source_id, message_id, wire);
     assert(stored.success());
     assert(stored.durable());
     stored_path = stored._path;
@@ -161,19 +158,16 @@ void test_duplicate_and_capacity() {
   const auto first_wire = make_wire(source_id, first_id);
   const auto second_wire = make_wire(source_id, second_id);
 
-  AlarmSpool spool(
-      {root.path(), AlarmSpoolKind::OUTBOX, first_wire.size()});
+  AlarmSpool spool({root.path(), AlarmSpoolKind::OUTBOX, first_wire.size()});
   assert(spool.ready());
   assert(spool.store(source_id, first_id, first_wire).success());
 
-  const AlarmSpoolStoreResult duplicate =
-      spool.store(source_id, first_id, first_wire);
+  const AlarmSpoolStoreResult duplicate = spool.store(source_id, first_id, first_wire);
   assert(duplicate._status == AlarmSpoolStatus::DUPLICATE);
   assert(!duplicate.success());
   assert(duplicate.durable());
 
-  const AlarmSpoolStoreResult full =
-      spool.store(source_id, second_id, second_wire);
+  const AlarmSpoolStoreResult full = spool.store(source_id, second_id, second_wire);
   assert(full._status == AlarmSpoolStatus::FULL);
   assert(!full.durable());
 }
@@ -187,13 +181,11 @@ void test_inbox_layout_duplicate_and_quarantine() {
 
   AlarmSpool spool({root.path(), AlarmSpoolKind::INBOX, 0U});
   assert(spool.ready());
-  const AlarmSpoolStoreResult stored =
-      spool.store(source_id, message_id, wire);
+  const AlarmSpoolStoreResult stored = spool.store(source_id, message_id, wire);
   assert(stored.success());
   assert(stored._path.parent_path().filename() == hex_u64(source_id));
   assert(stored._path.parent_path().parent_path().filename() == "accepted");
-  assert(spool.store(source_id, message_id, wire)._status ==
-         AlarmSpoolStatus::DUPLICATE);
+  assert(spool.store(source_id, message_id, wire)._status == AlarmSpoolStatus::DUPLICATE);
 
   const AlarmSpoolPathResult quarantined = spool.quarantine(stored._path);
   assert(quarantined.success());
@@ -215,13 +207,11 @@ void test_corrupt_file_is_quarantined_on_read() {
   const AlarmMessageId message_id = make_message_id(5U);
   const auto wire = make_wire(source_id, message_id);
   AlarmSpool spool({root.path(), AlarmSpoolKind::OUTBOX, 0U});
-  const AlarmSpoolStoreResult stored =
-      spool.store(source_id, message_id, wire);
+  const AlarmSpoolStoreResult stored = spool.store(source_id, message_id, wire);
   assert(stored.success());
 
   {
-    std::fstream file(stored._path,
-                      std::ios::binary | std::ios::in | std::ios::out);
+    std::fstream file(stored._path, std::ios::binary | std::ios::in | std::ios::out);
     assert(file.good());
     file.seekp(static_cast<std::streamoff>(ALARM_HEADER_SIZE));
     const char damaged = static_cast<char>(0x33);
@@ -252,8 +242,7 @@ void test_rejects_paths_outside_spool_and_symlinks() {
   assert(spool.ready());
   assert(spool.read(outside_file)._status == AlarmSpoolStatus::OUTSIDE_ROOT);
   assert(spool.remove(outside_file)._status == AlarmSpoolStatus::OUTSIDE_ROOT);
-  assert(spool.quarantine(outside_file)._status ==
-         AlarmSpoolStatus::OUTSIDE_ROOT);
+  assert(spool.quarantine(outside_file)._status == AlarmSpoolStatus::OUTSIDE_ROOT);
   assert(fs::exists(outside_file));
 
   const fs::path link = root.path() / "pending" / "outside-link.alarm";
@@ -328,14 +317,13 @@ void test_concurrent_duplicate_store() {
     });
   }
   start.store(true, std::memory_order_release);
-  for (std::thread &worker : workers) {
+  for (std::thread& worker : workers) {
     worker.join();
   }
 
-  assert(std::count(statuses.begin(), statuses.end(),
-                    AlarmSpoolStatus::SUCCESS) == 1);
-  assert(std::count(statuses.begin(), statuses.end(),
-                    AlarmSpoolStatus::DUPLICATE) == thread_count - 1U);
+  assert(std::count(statuses.begin(), statuses.end(), AlarmSpoolStatus::SUCCESS) == 1);
+  assert(std::count(statuses.begin(), statuses.end(), AlarmSpoolStatus::DUPLICATE) ==
+         thread_count - 1U);
   assert(spool.stats()._stats._files == 1U);
 }
 
@@ -348,8 +336,7 @@ void test_rejects_invalid_frames_and_identity_mismatch() {
   AlarmSpool spool({root.path(), AlarmSpoolKind::OUTBOX, 0U});
 
   wire[ALARM_HEADER_SIZE] ^= 0x01U;
-  assert(spool.store(source_id, id, wire)._status ==
-         AlarmSpoolStatus::INVALID_FRAME);
+  assert(spool.store(source_id, id, wire)._status == AlarmSpoolStatus::INVALID_FRAME);
 
   AlarmFrame ping;
   ping._type = AlarmFrameType::PING;
@@ -361,8 +348,7 @@ void test_rejects_invalid_frames_and_identity_mismatch() {
          AlarmSpoolStatus::INVALID_FRAME);
 
   const auto valid = make_wire(source_id, id);
-  assert(spool.store(source_id + 1U, id, valid)._status ==
-         AlarmSpoolStatus::INVALID_ARGUMENT);
+  assert(spool.store(source_id + 1U, id, valid)._status == AlarmSpoolStatus::INVALID_ARGUMENT);
   assert(spool.store(source_id, make_message_id(9U), valid)._status ==
          AlarmSpoolStatus::INVALID_ARGUMENT);
   assert(spool.stats()._stats._files == 0U);
@@ -386,7 +372,7 @@ void test_corrupt_byte_count_does_not_truncate() {
   assert(stats._stats._corrupt_bytes == 70'000U);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_outbox_store_read_reopen_and_remove();

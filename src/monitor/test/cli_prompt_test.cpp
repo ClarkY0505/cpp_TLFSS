@@ -30,7 +30,7 @@ void test_prompt_tracks_session_context() {
   assert(make_cli_prompt("storage", context) == "[storage]> ");
 }
 
-} // namespace
+}  // namespace
 
 int main() {
   test_prompt_name_validation();

@@ -23,9 +23,8 @@ constexpr std::uint16_t METRIC_UDP_PORT = 9300U;
 constexpr std::uint16_t ALARM_TCP_PORT = 9400U;
 constexpr std::uint16_t COLLECTOR_CLI_PORT = 9310U;
 
-int drain_udp_receiver(
-    TLSSMON::Engine &engine,
-    const std::weak_ptr<TLSSMON::Wire::UdpReceiver> &weak_receiver) {
+int drain_udp_receiver(TLSSMON::Engine& engine,
+                       const std::weak_ptr<TLSSMON::Wire::UdpReceiver>& weak_receiver) {
   const auto receiver = weak_receiver.lock();
 
   if (!receiver) {
@@ -66,19 +65,17 @@ int drain_udp_receiver(
      * V2 changed_at 会由 ingest_decoded_record() 保留。
      */
     const TLSSMON::MonData::UpdateResult updated =
-        TLSSMON::ingest_decoded_record(engine, std::move(*received._record),
-                                       true);
+        TLSSMON::ingest_decoded_record(engine, std::move(*received._record), true);
 
     /*
      * 只记录 Key 和结果，不输出字符串 payload。
      */
     std::cout << "[collector/udp]" << " mid=" << key._mid << " fid=" << key._fid
-              << " eid=" << key._eid
-              << " update=" << static_cast<int>(updated._status) << '\n';
+              << " eid=" << key._eid << " update=" << static_cast<int>(updated._status) << '\n';
   }
 }
 
-bool register_modules(TLSSMON::Engine &engine) {
+bool register_modules(TLSSMON::Engine& engine) {
   if (engine.register_module(TLSSMON::DemoM9::disk_module()) !=
       TLSSMON::ModuleRegisterStatus::SUCCESS) {
     return false;
@@ -88,25 +85,21 @@ bool register_modules(TLSSMON::Engine &engine) {
          TLSSMON::ModuleRegisterStatus::SUCCESS;
 }
 
-bool register_commands(TLSSMON::CliRegistry &registry, TLSSMON::Engine &engine,
-                       const TLSSMON::ReliableAlarmCollector *collector) {
-  if (TLSSMON::register_help_command(registry) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+bool register_commands(TLSSMON::CliRegistry& registry, TLSSMON::Engine& engine,
+                       const TLSSMON::ReliableAlarmCollector* collector) {
+  if (TLSSMON::register_help_command(registry) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_modules_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_modules_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_use_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_use_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
-  if (TLSSMON::register_db_dump_command(registry, engine) !=
-      TLSSMON::CliRegisterStatus::SUCCESS) {
+  if (TLSSMON::register_db_dump_command(registry, engine) != TLSSMON::CliRegisterStatus::SUCCESS) {
     return false;
   }
 
@@ -117,7 +110,7 @@ bool register_commands(TLSSMON::CliRegistry &registry, TLSSMON::Engine &engine,
 
   return registry.register_command(
              "stop", "stop collector",
-             [&engine](const TLSSMON::CliArguments &arguments) -> std::string {
+             [&engine](const TLSSMON::CliArguments& arguments) -> std::string {
                if (!arguments.empty()) {
                  return "usage: stop\n";
                }
@@ -127,20 +120,19 @@ bool register_commands(TLSSMON::CliRegistry &registry, TLSSMON::Engine &engine,
              }) == TLSSMON::CliRegisterStatus::SUCCESS;
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc > 2) {
     std::cerr << "usage: " << argv[0] << " [inbox-dir]\n";
     return 1;
   }
 
-  const std::filesystem::path inbox =
-      argc == 2 ? std::filesystem::path{argv[1]}
-                : std::filesystem::path{"./m9-data/collector-inbox"};
+  const std::filesystem::path inbox = argc == 2
+                                          ? std::filesystem::path{argv[1]}
+                                          : std::filesystem::path{"./m9-data/collector-inbox"};
 
-  TLSSMON::Engine engine{
-      TLSSMON::MonConfig{"monitor-m9-collector", COLLECTOR_CLI_PORT, 10U}};
+  TLSSMON::Engine engine{TLSSMON::MonConfig{"monitor-m9-collector", COLLECTOR_CLI_PORT, 10U}};
 
   if (engine.init() != TLSSMON::ENGINESTATE::SUCCESSFUL) {
     std::cerr << "[collector] Engine initialization failed\n";
@@ -157,20 +149,18 @@ int main(int argc, char **argv) {
 
   if (!udp_receiver->ready()) {
     std::cerr << "[collector] UDP receiver initialization failed"
-              << " status=" << static_cast<int>(udp_receiver->setup_status())
-              << '\n';
+              << " status=" << static_cast<int>(udp_receiver->setup_status()) << '\n';
     return 1;
   }
 
   const std::weak_ptr<TLSSMON::Wire::UdpReceiver> weak_receiver{udp_receiver};
 
   const auto udp_handle = engine.add_aio(
-      udp_receiver->fd(),
-      TLSSMON::MonCallback{"m9-udp-collector",
-                           [&engine, weak_receiver]() -> int {
-                             return drain_udp_receiver(engine, weak_receiver);
-                           },
-                           false});
+      udp_receiver->fd(), TLSSMON::MonCallback{"m9-udp-collector",
+                                               [&engine, weak_receiver]() -> int {
+                                                 return drain_udp_receiver(engine, weak_receiver);
+                                               },
+                                               false});
 
   if (!udp_handle.has_value()) {
     std::cerr << "[collector] failed to register UDP AIO\n";
@@ -178,8 +168,7 @@ int main(int argc, char **argv) {
   }
 
   auto alarm_collector = std::make_unique<TLSSMON::ReliableAlarmCollector>(
-      engine, TLSSMON::ReliableAlarmCollectorConfig{"127.0.0.1", ALARM_TCP_PORT,
-                                                    inbox, 128U, 30s});
+      engine, TLSSMON::ReliableAlarmCollectorConfig{"127.0.0.1", ALARM_TCP_PORT, inbox, 128U, 30s});
 
   if (!alarm_collector->ready()) {
     std::cerr << "[collector] reliable collector initialization failed"
@@ -195,20 +184,17 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  TLSSMON::CliServer cli{engine, registry,
-                         TLSSMON::CliServerConfig{COLLECTOR_CLI_PORT,
-                                                  TLSSMON::CLI_MAX_CLIENTS,
-                                                  "collector"}};
+  TLSSMON::CliServer cli{
+      engine, registry,
+      TLSSMON::CliServerConfig{COLLECTOR_CLI_PORT, TLSSMON::CLI_MAX_CLIENTS, "collector"}};
 
   if (!cli.start()) {
     std::cerr << "[collector] CLI startup failed\n";
     return 1;
   }
 
-  std::cout << "[collector] UDP metrics=127.0.0.1:"
-            << udp_receiver->bound_port() << '\n'
-            << "[collector] TCP alarms=127.0.0.1:"
-            << alarm_collector->bound_port() << '\n'
+  std::cout << "[collector] UDP metrics=127.0.0.1:" << udp_receiver->bound_port() << '\n'
+            << "[collector] TCP alarms=127.0.0.1:" << alarm_collector->bound_port() << '\n'
             << "[collector] CLI=127.0.0.1:" << cli.bound_port() << '\n'
             << "[collector] inbox=" << inbox << '\n'
             << "[collector] commands: help modules use "
@@ -234,8 +220,7 @@ int main(int argc, char **argv) {
   cli.close();
 
   if (run_result != TLSSMON::ENGINESTATE::SUCCESSFUL) {
-    std::cerr << "[collector] Engine stopped with status="
-              << static_cast<int>(run_result) << '\n';
+    std::cerr << "[collector] Engine stopped with status=" << static_cast<int>(run_result) << '\n';
     return 1;
   }
 

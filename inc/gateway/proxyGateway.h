@@ -1,12 +1,9 @@
 #pragma once
 
-class proxyGateway
-{
-public:
-    proxyGateway() {}
-    ~proxyGateway() {}
+class proxyGateway {
+ public:
+  proxyGateway() {}
+  ~proxyGateway() {}
 
-private:
-
+ private:
 };
-
