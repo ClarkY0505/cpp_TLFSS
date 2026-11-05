@@ -55,6 +55,7 @@ See the build instructions, architecture, and implementation notes below.
 - [Architecture and execution model](#architecture-and-execution-model)
 - [Storage component responsibilities and call chains](#storage-component-responsibilities-and-call-chains)
 - [Module implementation](#module-implementation)
+- [Write scheduling and backpressure](#write-scheduling-and-backpressure)
 - [Metadata cache](#metadata-cache)
 - [File transfer and asynchronous disk work](#file-transfer-and-asynchronous-disk-work)
 - [Service monitoring](#service-monitoring)
@@ -72,6 +73,7 @@ See the build instructions, architecture, and implementation notes below.
 
 - **epoll Reactor networking** — Custom event loop, connection management, and read/write buffers.
 - **one-loop-per-thread** — Each IO thread runs its own EventLoop; connections are assigned in round-robin order.
+- **ordered write scheduling** — A loop-owned `WriteScheduler` sequences control text, direct file sends, and asynchronous file chunks with bounded buffering and per-round work budgets.
 - **bounded worker pool** — Bounded task queues, nonblocking submission, and asynchronous queue wait timeouts.
 - **MySQL connection pool** — Connection reuse, prepared statements, and RAII transactions.
 - **virtual filesystem namespace** — Per-user root directories and `mkdir / cd / ls / pwd` commands.
@@ -85,12 +87,12 @@ See the build instructions, architecture, and implementation notes below.
 
 | Component | Current capability | Main service integration |
 | --- | --- | --- |
-| Networking | epoll Reactor, connection buffers, IO thread pool, asynchronous TCP client | In use |
+| Networking | epoll Reactor, connection buffers, IO thread pool, asynchronous TCP client, FIFO write scheduler | In use |
 | Worker pool | Bounded execution queue, nonblocking submission, asynchronous queue wait timeouts | In use |
 | MySQL | Connection pool, prepared statements, RAII transactions | In use |
 | Authentication | Signup, password verification, transactional user and root directory creation | In use |
 | Virtual directories | `mkdir / cd / ls / pwd` | In use |
-| Metadata cache | `HashArcCache`, TTLs, directory generation coordination, statistics snapshots | Main shares a cache with the service and monitor; directory operations and download lookups use it |
+| Metadata cache | `HashArcCache`, TTLs, directory generation coordination, statistics snapshots | Directory operations and download lookups use the service's shared cache; monitoring samples its statistics |
 | Client | `tlss-cli <IPv4> <port>` with interactive commands and file upload/download | Standalone executable |
 | Monitoring | Business/resource metrics, CLI, UDP, reliable TCP alarms | Main owns the monitor runtime and resource sampler; separate `storage-monitor-collector` receives reports |
 | Memory copy | `TLSS::MEMORY::memcpy` shared library | Called by networking `Buffer::append()` with the Default hint |
@@ -138,6 +140,16 @@ An upload defaults to the local basename if the remote name is omitted. A downlo
 
 ## Architecture and execution model
 
+Three executables provide the business interface and monitoring:
+
+| Executable | Responsibility | Default endpoints |
+| --- | --- | --- |
+| `bin/storage-service` | Authentication, virtual directories, uploads/downloads, and metric production | Business TCP `9000` |
+| `bin/tlss-cli <IPv4> <port>` | Interactive business commands and local file transfers | Connects to the supplied address and port |
+| `bin/storage-monitor-collector` | Receive metrics and durable alarms; expose management commands | UDP metrics `9300`, TCP alarms `9400`, TCP management CLI `9310` |
+
+The collector is started separately. Its management CLI and the business client's command interface serve different purposes.
+
 ```mermaid
 flowchart TD
     Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
@@ -160,6 +172,18 @@ flowchart TD
     Auth --> Pool
     Pool --> MySQL[MySQL]
     Root -->|same transaction connection| MySQL
+    Network --> Writes[WriteScheduler / outbound FIFO]
+    Source --> Writes
+    Service --> Metrics[Atomic business metrics]
+    Metadata --> Metrics
+    Objects --> Metrics
+    Metrics --> Runtime[StorageMonitorRuntime]
+    Resources[SystemResourceSampler] --> Runtime
+    Runtime -->|UDP V2 metrics| Collector[storage-monitor-collector]
+    Runtime --> Outbox[Durable alarm outbox]
+    Outbox -->|TCP alarms / ACK / retry| Collector
+    Collector --> Inbox[Durable alarm inbox]
+    Collector --> CLI[Management CLI]
 ```
 
 The diagram shows the current implementation. The main service uses the custom TCP library directly; `src/gateway/` does not participate in request handling. `MetadataService` checks its cache before borrowing a database connection and executing SQL on a miss. Signup creates the root directory using the transaction connection already borrowed by the user repository, bypassing ordinary cache operations.
@@ -211,7 +235,8 @@ Implementations are in [common/net](src/common/net/), with headers in [inc/commo
 | `Poller / EPollPoller` | epoll event waiting and registration management |
 | `Channel` | File descriptor event interests, callbacks, and lifetime association |
 | `Acceptor / TcpServer` | Accept connections, maintain the connection map, and assign IO loops in round-robin order |
-| `TcpConnection` | Connection state, input/output buffers, backpressure, half-close, and forced closure |
+| `TcpConnection` | Connection state, input buffer, read controls, write-scheduler integration, half-close, and forced closure |
+| `WriteScheduler` | FIFO memory/file writes, partial-write progress, asynchronous read sequencing, queue limits, and send completion |
 | `EventLoopThreadPool` | Manage IO threads using one loop per thread |
 | `Connector / TcpClient` | Nonblocking connection setup, retries, and client connection management |
 
@@ -220,6 +245,23 @@ Cross-thread calls use `queue_in_loop()` and wake the target loop through `event
 `Buffer::read_fd()` uses `readv` with its internal writable region and a 64 KiB stack buffer. The service configures a 256 KiB output high-water mark: reaching it pauses reads, which resume after the output buffer drains. Connections also have a 1 MiB pending memory limit, including reservations for asynchronous file chunks, rather than buffering entire files. These mechanisms do not replace capacity limits on all upstream task queues.
 
 [StorageService::on_message()](src/ftp/server.cpp) splits control input on `\n`, accepts `\r\n`, retains incomplete commands, and processes complete commands in a loop. A control command may contain at most 4096 bytes; exceeding the limit closes the connection. Upload bodies are consumed by their declared length, not split on newlines. The `ftp/` module implements a custom TCP storage protocol, not standard FTP.
+
+### Write scheduling and backpressure
+
+[WriteScheduler](src/common/net/write_scheduler.cpp) is owned by `TcpConnection` and runs on the connection's IO loop. Its FIFO holds memory writes, direct `sendfile` tasks, and asynchronous-reader tasks. Control messages and file bodies share this ordering, so a queued completion frame cannot overtake the preceding body. This preserves send order; it does not serialize independently executing business commands.
+
+| Limit | Current value | Scope |
+| --- | --- | --- |
+| Pending memory charge | 1 MiB | Per connection; full retained memory messages plus one bounded reservation for each asynchronous file task |
+| Queued write tasks | 1024 | Per connection, including memory and file tasks |
+| Queued file tasks | 64 | Per connection, across both file-send modes |
+| Asynchronous read chunk | 64 KiB | At most one outstanding read for the front file task |
+| Writable-event budget | 1 MiB and 64 steps | Stop the current round when either budget is exhausted |
+| Business output high-water mark | 256 KiB | Pause application reads on crossing; resume after the output queue drains |
+
+Direct `sendfile` payloads are not charged as buffered memory. Asynchronous file tasks reserve at most one chunk rather than their complete file size. These limits are distinct from the disk executor's 64 attached resources and the business task queues.
+
+While the front task awaits disk data, the scheduler disables `EPOLLOUT`. Completion is queued to the owning loop and checked against its read sequence; stale results are ignored. Partial writes retain their offsets, and connection closure cancels pending tasks. File completion callbacks are deferred through the loop, after the scheduler releases file/reader references. The scheduler borrows the socket; `TcpConnection` controls its lifetime and applies event-interest changes.
 
 ### Sessions, signup, and login
 
@@ -304,9 +346,20 @@ Server → OK
 
 Server control responses use the `\n@TLSS ` prefix. The client parses them and displays transfer results. `UOK` confirms upload completion. For downloads, the client sends `ACK` only after the local file has been fully written, verified, synchronized, and published, then displays completion on `OK`. A low-level send callback only reports bytes submitted to the socket, not peer persistence.
 
+The server tracks these phases on the owning IO loop:
+
+```text
+Upload:   preparing_upload → receiving_upload → finalizing_upload → idle
+Download: preparing_download → sending_download → waiting_download_ack → idle
+```
+
+`TransferContext` captures user identity, directory, and transfer generation. Workers use these snapshots; callbacks check them against the current session before changing task state. Upload requests declare size and filename without an expected client digest. The server computes SHA-256 and returns it in `UOK`; the current client validates its format and displays it. Downloads compare the received contents with the digest in `DATA` before publishing the local file.
+
 Receivers hand off at most 64 KiB at a time and pause reads with an independent token until disk results return to the owning IO loop. Senders use `send_file_async()` with asynchronous `pread` chunks of at most 64 KiB, sharing a FIFO output queue with control text. `EPOLLOUT` is disabled while waiting for disk data to avoid spinning. File opening, IO, verification, synchronization, and closure run on disk workers; results return through `queue_in_loop()`. The low-level direct `sendfile` API remains available, but current business file transfers use asynchronous chunks.
 
 Uploads first write a `.tlss-part-*` temporary file, synchronize it, publish a hash-named object through a hard link on the same filesystem, remove the temporary path, and synchronize the directory. An existing object is reused only if its size and hash match. MySQL metadata is inserted after publication, followed by `UOK`. If metadata insertion fails, the object is retained because other files may share it. The filesystem and MySQL therefore do not form one atomic transaction; orphan reclamation and repair after process crashes remain unimplemented.
+
+Published server objects use mode `0444`; downloaded local files use `0600`. Object reads reject symbolic links and non-regular files. These filesystem checks complement the user-scoped metadata lookup.
 
 Disconnection cancels file work and leaves cleanup to disk workers. Weak references, transfer generations, and asynchronous read sequence numbers reject stale results. Body IO failures can close the connection directly; a failed transfer does not always leave a reusable session.
 
@@ -350,7 +403,7 @@ Monitoring uses the `TLSSMON` namespace. Its [Engine](src/monitor/engine.cpp) ru
 | `MonitorWire / UDP` | Custom V1/V2 binary protocols and metric transmission/reception |
 | `ReliableAlarmPublisher / Collector / AlarmSpool` | Local persistence, TCP delivery, ACKs, retries, deduplication, and recovery |
 
-Metric keys are `(mid, level, fid, eid)`, and values are numeric or strings. Store keeps each key's current record and change timestamp; it is not a historical time-series database. An ordinary initial zero may be ignored, and unchanged values usually do not publish. `report_count()` submits the caller's value rather than incrementing automatically. V2 carries descriptions and producer change timestamps; V1 uses the Collector's time on receipt.
+Metric keys are `(mid, level, fid, eid)`, and values are numeric or strings. Store keeps each key's current record and change timestamp; it is not a historical time-series database. An ordinary initial zero may be ignored. Numeric deduplication compares the value alone; unchanged values retain the previous state, description, and change timestamp and do not publish. Strings compare their complete contents. `report_count()` submits the caller's value rather than incrementing automatically. V2 carries descriptions and producer change timestamps; V1 uses the Collector's time on receipt.
 
 ```text
 Ordinary metrics:
@@ -366,7 +419,7 @@ report_error → persist outbox → commit local Store
 
 If reliable-channel persistence fails, the new local Store value is not committed, allowing the same value to be retried. Ordinary publishing callbacks run after releasing the Store lock. Reliable alarms perform pre-commit persistence under the Store lock; only bounded local persistence is allowed, with no network waiting or Store reentry.
 
-Alarm handling includes CRC verification, stream decoding, deduplication by message identity, partial writes, retry backoff, corrupt-file quarantine, restart recovery, and file/directory synchronization. This provides persistent retries and receiver deduplication, not end-to-end exactly-once guarantees for arbitrary external business effects.
+Alarm handling includes CRC verification, stream decoding, deduplication by `(source_id, message_id)`, partial writes, retry backoff, corrupt-file quarantine, restart recovery, and file/directory synchronization. ACK loss can cause retransmission; the collector recognizes an already accepted identity and acknowledges it again. This provides persistent retries and receiver deduplication, not end-to-end exactly-once guarantees for arbitrary external business effects.
 
 The CLI supports `help`, `modules`, `use`, `db_dump`, and `alarm_status`; `db_dump` queries the monitoring Store. The storage collector also provides `service_status` and `stop`. The standalone demos remain available for studying the library separately.
 
@@ -725,7 +778,7 @@ The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_
 
 The upstream gRPC and Protobuf repositories are recorded as Git submodules. Run `git submodule update --init --recursive` if you need their source. CMake currently looks for installed Protobuf and gRPC packages instead of building the submodules automatically.
 
-Although RPC business services are not implemented, the top-level build still requires gRPC, Protobuf, and their code generation tools. Python 3 is used for the optional directory SQL test; additional client interaction scripts are not registered with CTest. Kafka is not integrated and is not a current build or runtime dependency.
+Although RPC business services are not implemented, the top-level build still requires gRPC, Protobuf, and their code generation tools. Python 3 enables the optional directory SQL and collector process smoke tests; additional client interaction scripts are not registered with CTest. Kafka is not integrated and is not a current build or runtime dependency.
 
 ### Configure the database
 
@@ -932,11 +985,12 @@ The program also supports `hot / runtime` modes. Only `runtime` accepts an optio
 
 ## Tests and where to start reading
 
-`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) registers object storage and verification, signup transaction boundaries, metadata caching, memory copy linking, TCP shutdown, asynchronous worker submission, file transfer scenarios, atomic storage metrics, resource sampling, and the storage monitor runtime. Python 3 enables directory SQL and storage collector process smoke tests. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
+`ctest --preset debug` only runs tests registered with CMake; it does not discover all test sources automatically. [tests/CMakeLists.txt](tests/CMakeLists.txt) registers object storage and verification, signup transaction boundaries, metadata caching, memory copy linking, TCP shutdown, write scheduling, asynchronous worker submission, file transfer scenarios, atomic storage metrics, resource sampling, and the storage monitor runtime. Python 3 enables directory SQL and storage collector process smoke tests. GoogleTest enables two additional targets, `test_ftp_server` and `test_monitor_timer`; the FTP server test still contains only a placeholder assertion. The [monitoring CMake configuration](src/monitor/CMakeLists.txt) separately registers tests under `src/monitor/test/` without requiring GoogleTest.
 
 | Area | Coverage and boundaries |
 | --- | --- |
 | Networking | Server shutdown is registered with CTest; `test_tcp_client.cpp` also checks cancellation/reconnection, stale callbacks, and lifetimes but is not registered with CMake |
+| Write scheduling | [Scheduler regressions](tests/test_write_scheduler.cpp) and [connection integration](tests/test_tcp_write_scheduler.cpp) exercise the extracted scheduler and its TcpConnection hooks |
 | Worker pool | Asynchronous waiting, timeouts, capacity, and shutdown |
 | Object storage and verification | Real `ObjectStorageEngine / VerifyEngine`: length constraints, digests, offset reads, same-content reuse, corrupt-object rejection, and temporary file cleanup; no MySQL required |
 | Metadata cache | 17 scenarios covering all three queries, TTLs, write invalidation, uncached failures, concurrent load coalescing, stale-fill prevention, coordination shard concurrency, size limits, statistics, disabling, shared caches, and LRU/LFU behavior; in-process database substitutes |
@@ -953,31 +1007,36 @@ To run individual built regression groups:
 ctest --preset debug -R '^metadata_cache_'
 ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
+ctest --preset debug -R '^(write_scheduler_test|tcp_write_scheduler_test)$'
 ctest --preset debug -R '^monitor_'
 ctest --preset debug -R '^(storage_metrics_test|system_resource_sampler_test|storage_monitor_.*|storage_collector_smoke)$'
 ```
 
 Networking, transfer, and some monitoring tests create local TCP/UDP sockets; demo smoke tests also use fixed ports. The environment must allow local listeners, with those ports free. These regression groups do not require a real MySQL server and do not replace end-to-end validation with the real database and interactive client.
 
-Use `ctest --preset debug -N` to list tests registered in the current build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun; this document does not claim a fixed passing test count.
+Use `ctest --preset debug -N` to list tests registered in the current build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun.
+
+**Local verification snapshot — 2026-11-05:** Debug configuration and build succeeded, and `ctest --preset debug` passed all 142 registered tests. Python 3 was available; GoogleTest was not found, so its two conditional targets were excluded. The run required permission to create local TCP/UDP sockets. This records the inspected working tree, including uncommitted changes, and is not a fixed test count or a claim that a clean checkout of the latest commit has the same coverage. Real MySQL/client end-to-end tests, sanitizer runs, and performance benchmarks were not performed in this verification.
 
 The unregistered MySQL integration test sources use `TLSS_TEST_MYSQL_HOST`, `TLSS_TEST_MYSQL_USER`, `TLSS_TEST_MYSQL_PASSWORD`, and `TLSS_TEST_MYSQL_DATABASE`, with optional `TLSS_TEST_MYSQL_PORT`. The signup end-to-end test additionally requires `TLSS_TEST_FTP_SIGNUP=1` and uses the service connection pool configuration. Use a dedicated test database. Some cases skip when their environment is not configured; a skip is not successful validation. Some old tests still reference obsolete interfaces; see [remaining work](#current-limitations-and-remaining-work).
 
 Suggested source reading order:
 
 1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`: service entry point, command dispatch, session state, and shutdown flow.
-2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`: connection and message handling.
+2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp` → `src/common/net/write_scheduler.cpp`: connection/message handling, ordered sends, asynchronous read completion, and backpressure.
 3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`: database operations for signup, login, and virtual directories.
 5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`: hits, generation invalidation, load coalescing, and sharded capacities.
-6. Start with `src/ftp/transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp`: task state, publication, verification, async adapters, and sending.
+6. Start with `src/ftp/transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp` and `src/common/net/write_scheduler.cpp`: task state, publication, verification, async adapters, and sending.
 7. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`: integrated monitoring; `src/monitor/demo/` provides independent library examples.
 8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
 9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
 
+Some tutorial notes describe earlier revisions. Check their stated source baseline against the current implementation and CMake registrations when behavior differs.
+
 ## Current limitations and remaining work
 
-- Single-node uploads/downloads and content-addressed persistence are implemented. Resumable transfers, overwrite updates, file deletion, and object garbage collection are not. Failures between object publication and MySQL insertion can leave unreferenced objects; crash recovery for temporary files and metadata consistency is not implemented.
+- Single-node uploads/downloads and content-addressed persistence are implemented. Resumable transfers, overwrite updates, file/directory deletion, moves, renames, and object garbage collection are not. Failures between object publication and MySQL insertion can leave unreferenced objects; crash recovery for temporary files and metadata consistency is not implemented.
 - Service monitoring supports one storage-service instance per collector and stores current values rather than historical time series. Host memory sampling does not account for cgroup limits.
 - Metadata cache coordination covers callers explicitly sharing one cache instance. Other processes, independent instances, and direct SQL writes rely on TTL refresh. Directory deletion, moves, and renames will require additional invalidation rules.
 - RPC and gateway code are placeholders; `.proto` files and the YAML example are empty. Ports, thread counts, and other settings do not yet share a unified configuration entry point.

@@ -55,6 +55,7 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 - [架构与执行模型](#架构与执行模型)
 - [存储组件职责与调用链](#存储组件职责与调用链)
 - [模块实现](#模块实现)
+- [发送调度与背压](#发送调度与背压)
 - [元数据缓存](#元数据缓存)
 - [文件传输与异步磁盘任务](#文件传输与异步磁盘任务)
 - [主服务监控](#主服务监控)
@@ -72,6 +73,7 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 
 - **epoll Reactor networking** — 自行实现事件循环、连接管理与读写缓冲。
 - **one-loop-per-thread** — 每个 IO 线程运行独立的 EventLoop，连接按轮询分配。
+- **有序发送调度** — 由 IO loop 内的 `WriteScheduler` 统一推进控制文本、直接文件发送和异步文件块，限制缓冲容量与单轮工作量。
 - **bounded worker pool** — 有界任务队列、非阻塞提交与异步排队超时。
 - **MySQL connection pool** — 连接复用、预处理语句与 RAII 事务。
 - **virtual filesystem namespace** — 用户根目录与 `mkdir / cd / ls / pwd` 命令。
@@ -85,12 +87,12 @@ TLSS 目前是一个持续开发中的单节点存储系统原型，面向技术
 
 | 部分 | 当前能力 | 主服务集成状态 |
 | --- | --- | --- |
-| 网络库 | epoll Reactor、连接缓冲、IO 线程池、异步 TCP 客户端 | 已使用 |
+| 网络库 | epoll Reactor、连接缓冲、IO 线程池、异步 TCP 客户端、FIFO 发送调度器 | 已使用 |
 | 业务线程池 | 有界执行队列、非阻塞提交、异步排队超时 | 已使用 |
 | MySQL | 连接池、预处理语句、RAII 事务 | 已使用 |
 | 认证 | 注册、密码校验、用户与根目录事务创建 | 已使用 |
 | 虚拟目录 | `mkdir / cd / ls / pwd` | 已使用 |
-| 元数据缓存 | `HashArcCache`、TTL、目录版本协调、统计快照 | 主入口显式共享缓存供服务和监控使用，目录操作和下载查询已接入 |
+| 元数据缓存 | `HashArcCache`、TTL、目录版本协调、统计快照 | 目录操作和下载查询使用服务持有的共享缓存；监控采样其统计信息 |
 | 客户端 | `tlss-cli <IPv4> <port>`，支持交互命令和文件上传/下载 | 独立可执行程序 |
 | 监控 | 业务与资源指标、CLI、UDP、可靠 TCP 告警 | 主入口持有监控运行时与资源采样器，独立 `storage-monitor-collector` 接收上报 |
 | 内存拷贝 | `TLSS::MEMORY::memcpy` 动态库 | 已被网络 `Buffer::append()` 调用，使用 Default 提示 |
@@ -138,6 +140,16 @@ download "readme-copy.md" "./readme-downloaded.md"
 
 ## 架构与执行模型
 
+三个可执行程序分别承载业务交互和监控：
+
+| 可执行程序 | 职责 | 默认端点 |
+| --- | --- | --- |
+| `bin/storage-service` | 认证、虚拟目录、文件上传/下载及指标生产 | 业务 TCP `9000` |
+| `bin/tlss-cli <IPv4> <port>` | 交互式业务命令与本地文件传输 | 连接参数指定的地址和端口 |
+| `bin/storage-monitor-collector` | 接收指标与持久化告警，提供管理命令 | 指标 UDP `9300`、告警 TCP `9400`、管理 CLI TCP `9310` |
+
+Collector 需要单独启动；其管理 CLI 与业务客户端的命令入口各有用途。
+
 ```mermaid
 flowchart TD
     Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
@@ -160,6 +172,18 @@ flowchart TD
     Auth --> Pool
     Pool --> MySQL[MySQL]
     Root -->|same transaction connection| MySQL
+    Network --> Writes[WriteScheduler / outbound FIFO]
+    Source --> Writes
+    Service --> Metrics[Atomic business metrics]
+    Metadata --> Metrics
+    Objects --> Metrics
+    Metrics --> Runtime[StorageMonitorRuntime]
+    Resources[SystemResourceSampler] --> Runtime
+    Runtime -->|UDP V2 metrics| Collector[storage-monitor-collector]
+    Runtime --> Outbox[Durable alarm outbox]
+    Outbox -->|TCP alarms / ACK / retry| Collector
+    Collector --> Inbox[Durable alarm inbox]
+    Collector --> CLI[Management CLI]
 ```
 
 图中为当前实现。主服务直接使用自研 TCP 网络库，`src/gateway/` 尚未参与请求处理。`MetadataService` 先查缓存，未命中时通过连接池执行 SQL；注册创建根目录时复用用户仓储已借用的事务连接，不经过普通缓存读写入口。
@@ -211,7 +235,8 @@ flowchart TD
 | `Poller / EPollPoller` | epoll 事件等待与注册管理 |
 | `Channel` | fd 关注事件、回调及生命周期关联 |
 | `Acceptor / TcpServer` | 接受连接、维护连接表、轮询分配 IO loop |
-| `TcpConnection` | 连接状态、输入输出缓冲、背压、半关闭和强制关闭 |
+| `TcpConnection` | 连接状态、输入缓冲、读取控制、发送调度器集成、半关闭和强制关闭 |
+| `WriteScheduler` | 内存/文件 FIFO 发送、短写进度、异步读取序号、队列限制和发送完成通知 |
 | `EventLoopThreadPool` | one-loop-per-thread 的 IO 线程管理 |
 | `Connector / TcpClient` | 非阻塞建连、失败重试与客户端连接管理 |
 
@@ -220,6 +245,23 @@ flowchart TD
 `Buffer::read_fd()` 使用 `readv`，组合内部可写区和 64 KiB 栈缓冲。服务为连接设置 256 KiB 输出高水位，达到水位后暂停读取，写缓冲排空后恢复；连接待发送内存（含异步文件块预留）另有 1 MiB 上限，而不是将整个文件装入该缓冲。这些措施不能替代所有上游任务队列的容量控制。
 
 [StorageService::on_message()](src/ftp/server.cpp) 在控制阶段按 `\n` 拆行，兼容 `\r\n`，保留未收齐的命令并循环处理完整命令；单条控制命令最多 4096 字节，超过限制关闭连接。上传正文按声明长度消费，不按换行拆分。`ftp/` 实现的是自定义 TCP 存储协议，不兼容标准 FTP。
+
+### 发送调度与背压
+
+[WriteScheduler](src/common/net/write_scheduler.cpp) 由 `TcpConnection` 持有，在连接所属的 IO loop 中运行。FIFO 队列统一保存内存消息、直接 `sendfile` 任务和异步 reader 任务，控制文本与文件正文共享发送顺序，排在正文之后的完成帧不会抢先发送。这里保证的是发送顺序，独立执行的异步业务命令仍需上层协调。
+
+| 限制 | 当前取值 | 范围 |
+| --- | --- | --- |
+| 待发送内存计费 | 1 MiB | 每连接；保留中的完整内存消息，加上各异步文件任务的一块有界预留 |
+| 排队发送任务数 | 1024 | 每连接，包含内存与文件任务 |
+| 排队文件任务数 | 64 | 每连接，两种文件发送方式合计 |
+| 异步读取块大小 | 64 KiB | 队首文件任务最多有一个未完成读取 |
+| 可写事件处理预算 | 1 MiB、64 步 | 任一预算用尽即结束本轮处理 |
+| 业务输出高水位 | 256 KiB | 跨过阈值后暂停业务读取，发送队列排空后恢复 |
+
+直接 `sendfile` 的文件正文不计入缓冲内存；异步文件任务最多预留一块数据的空间，不按整个文件大小计费。这些限制与磁盘执行器的 64 个活动资源上限、业务任务队列容量分别管理。
+
+队首任务等待磁盘数据时，调度器关闭 `EPOLLOUT`；完成结果排回所属 loop，并检查读取序号以忽略过期结果。短写保留偏移，连接关闭时取消剩余任务。文件完成回调在文件/reader 引用释放后通过 loop 延迟执行。调度器借用 socket，由 `TcpConnection` 管理其生命周期并应用事件关注变更。
 
 ### 会话、注册与登录
 
@@ -304,9 +346,20 @@ signup → 用户名 → 密码 → 确认密码 → registering
 
 服务端控制响应带 `\n@TLSS ` 前缀，客户端自动解析并显示传输结果。上传完成以 `UOK` 为准；下载只有在本地文件完整写入、哈希校验、同步和发布后才发送 `ACK`，收到 `OK` 后显示完成。底层发送回调只表示字节交给 socket，不等于对端持久化确认。
 
+服务端在连接所属 IO loop 中维护以下阶段：
+
+```text
+上传：preparing_upload → receiving_upload → finalizing_upload → idle
+下载：preparing_download → sending_download → waiting_download_ack → idle
+```
+
+`TransferContext` 捕获用户身份、目录和传输代次，工作线程使用这些快照；回调改变任务状态前再与当前会话核对。上传请求只声明大小和文件名，不携带客户端预期摘要；服务端计算 SHA-256 并通过 `UOK` 返回，当前客户端检查其格式并显示。下载则在发布本地文件前，将接收内容与 `DATA` 中的摘要比较。
+
 接收端每次最多交出 64 KiB 数据，等待磁盘结果期间使用独立 token 暂停读取，完成后在所属 IO loop 恢复。发送端使用 `send_file_async()`，按最多 64 KiB 异步 `pread`，与控制文本共用 FIFO 发送队列；等待磁盘时关闭 `EPOLLOUT`，避免空转。文件打开、读写、校验、同步和关闭在磁盘线程执行，结果通过 `queue_in_loop()` 返回。底层仍保留直接 `sendfile` 接口，但当前业务文件传输使用异步分块路径。
 
 上传先写 `.tlss-part-*` 临时文件，再同步文件，通过同文件系统硬链接发布为哈希对象，移除临时路径并同步目录。已有对象只有在大小及哈希一致时才复用。发布后再登记 MySQL 元数据，最后返回 `UOK`；数据库登记失败时保留对象，避免删除其他文件可能共享的内容。因此本地文件系统与 MySQL 还不是一个原子事务，孤儿对象回收和进程崩溃后的修复仍待实现。
+
+服务端发布对象的权限为 `0444`，客户端下载文件为 `0600`；对象读取拒绝符号链接和非普通文件。这些文件系统检查与按用户限定的元数据查询共同约束访问。
 
 断连会取消文件任务并让磁盘线程收尾；弱引用、传输代次和异步读取序号用于过滤过期结果。中途正文读写失败可能直接关闭连接，不能假定收到错误后总能继续同一会话。
 
@@ -350,7 +403,7 @@ signup → 用户名 → 密码 → 确认密码 → registering
 | `MonitorWire / UDP` | V1/V2 自定义二进制协议、指标发送和接收 |
 | `ReliableAlarmPublisher / Collector / AlarmSpool` | 本地持久化、TCP 发送、ACK、重试、去重和恢复 |
 
-指标主键为 `(mid, level, fid, eid)`，值为数值或字符串。Store 保存每个 key 的当前记录和变化时间，不是历史时序数据库。普通首次零值可被忽略，值不变时通常不发布；`report_count()` 提交调用方提供的值，不自动累加。V2 包含描述和生产端变化时间，V1 接收时使用 Collector 时间。
+指标主键为 `(mid, level, fid, eid)`，值为数值或字符串。Store 保存每个 key 的当前记录和变化时间，不是历史时序数据库。普通首次零值可被忽略；数值去重只比较数值本身，相同值保留原状态、描述和变化时间，也不触发发布；字符串比较完整内容。`report_count()` 提交调用方提供的值，不自动累加。V2 包含描述和生产端变化时间，V1 接收时使用 Collector 时间。
 
 ```text
 普通指标：
@@ -366,7 +419,7 @@ report_error → outbox 持久化 → 本地 Store 提交
 
 可靠通道持久化失败时不提交本地 Store 新值，允许后续相同值重试。普通发布回调在 Store 解锁后执行；可靠告警的提交前持久化在 Store 锁内执行，只允许有界的本地持久化操作，不能网络等待或重入 Store。
 
-告警实现包含 CRC 校验、流式解码、消息身份去重、短写处理、退避重试、损坏文件隔离、重启恢复，以及文件和目录同步。这是持久化重试与接收端去重机制，不代表任意外部业务副作用均具备端到端 exactly-once 保证。
+告警实现包含 CRC 校验、流式解码、按 `(source_id, message_id)` 去重、短写处理、退避重试、损坏文件隔离、重启恢复，以及文件和目录同步。ACK 丢失会导致重传，Collector 识别已接受的消息身份并再次确认。这是持久化重试与接收端去重机制，不代表任意外部业务副作用均具备端到端 exactly-once 保证。
 
 CLI 支持 `help`、`modules`、`use`、`db_dump`、`alarm_status`；这里的 `db_dump` 查询监控 Store。存储 Collector 还提供 `service_status` 和 `stop`。独立 demo 继续保留，便于单独学习监控库。
 
@@ -725,7 +778,7 @@ cpp_TLFSS/
 
 项目的 gRPC/Protobuf 上游仓库以 Git 子模块记录；按需使用 `git submodule update --init --recursive` 获取源码。CMake 当前优先查找已安装的 Protobuf 和 gRPC，而不是自动编译子模块。
 
-虽然 RPC 业务尚未实现，顶层 CMake 当前仍要求 gRPC、Protobuf 及其代码生成工具。Python 3 用于可选的目录 SQL 测试；仓库另有未接入 CTest 的客户端交互脚本。Kafka 尚未接入，不是当前构建或运行依赖。
+虽然 RPC 业务尚未实现，顶层 CMake 当前仍要求 gRPC、Protobuf 及其代码生成工具。Python 3 用于可选的目录 SQL 和 Collector 进程 smoke 测试；仓库另有未接入 CTest 的客户端交互脚本。Kafka 尚未接入，不是当前构建或运行依赖。
 
 ### 配置数据库
 
@@ -932,11 +985,12 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 
 ## 测试与开发入口
 
-`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 注册对象存储与校验、注册事务边界、元数据缓存、内存拷贝链接、TCP 停机、线程池异步提交、文件传输场景、业务原子指标、资源采样与主服务监控运行时。找到 Python 3 时注册目录 SQL 和存储 Collector 进程 smoke 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
+`ctest --preset debug` 只运行 CMake 注册的测试，不会自动发现所有测试源码。[tests/CMakeLists.txt](tests/CMakeLists.txt) 注册对象存储与校验、注册事务边界、元数据缓存、内存拷贝链接、TCP 停机、发送调度、线程池异步提交、文件传输场景、业务原子指标、资源采样与主服务监控运行时。找到 Python 3 时注册目录 SQL 和存储 Collector 进程 smoke 测试。找到 GoogleTest 时另注册 `test_ftp_server` 和 `test_monitor_timer`；其中 FTP 服务测试仍为占位断言。[监控 CMake](src/monitor/CMakeLists.txt) 单独注册 `src/monitor/test/` 中的测试，不依赖 GoogleTest。
 
 | 范围 | 验证内容与边界 |
 | --- | --- |
 | 网络 | CTest 注册服务端停机测试；`test_tcp_client.cpp` 中另有取消/重连、旧回调及生命周期检查，尚未接入 CMake |
+| 发送调度 | [调度器回归](tests/test_write_scheduler.cpp)与[连接集成](tests/test_tcp_write_scheduler.cpp)验证独立调度器及其 TcpConnection hooks |
 | 业务线程池 | 异步等待、超时、容量与停机 |
 | 对象存储与校验 | 实际 `ObjectStorageEngine / VerifyEngine`，覆盖长度约束、摘要、偏移读取、同内容复用、损坏对象拒绝和临时文件清理；无需 MySQL |
 | 元数据缓存 | 17 个场景覆盖三类查询、TTL、写后失效、失败不缓存、并发加载合并、旧值回填防护、协调分片并发、大小限制、统计、禁用、缓存共享及 LRU/LFU 行为；使用进程内数据库替代实现 |
@@ -953,31 +1007,36 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 ctest --preset debug -R '^metadata_cache_'
 ctest --preset debug -R '^(storage_engines_test|signup_transaction_boundary_test)$'
 ctest --preset debug -R '^ftp_transfer_'
+ctest --preset debug -R '^(write_scheduler_test|tcp_write_scheduler_test)$'
 ctest --preset debug -R '^monitor_'
 ctest --preset debug -R '^(storage_metrics_test|system_resource_sampler_test|storage_monitor_.*|storage_collector_smoke)$'
 ```
 
 网络、传输和部分监控测试会创建本机 TCP/UDP 套接字，demo smoke 还会使用固定端口；运行环境需允许本机监听，并避免已有进程占用相应端口。这些回归组无需启动真实 MySQL，不能替代真实数据库和交互客户端的端到端验证。
 
-可使用 `ctest --preset debug -N` 查看当前构建目录登记的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake，不在文档中固定为某个通过数量。
+可使用 `ctest --preset debug -N` 查看当前构建目录登记的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake。
+
+**本地验证快照 — 2026-11-05：** Debug 配置与构建成功，`ctest --preset debug` 的 142 项已注册测试全部通过。环境提供 Python 3，未找到 GoogleTest，因此不包含其两个条件目标；运行时需要允许创建本机 TCP/UDP 套接字。这是包含未提交改动的已核查工作区结果，不是固定测试数量，也不表示最新提交的干净检出具有相同覆盖。本次未执行真实 MySQL/客户端端到端测试、Sanitizer 或性能基准。
 
 未注册的 MySQL 集成测试源码使用 `TLSS_TEST_MYSQL_HOST`、`TLSS_TEST_MYSQL_USER`、`TLSS_TEST_MYSQL_PASSWORD`、`TLSS_TEST_MYSQL_DATABASE`，以及可选的 `TLSS_TEST_MYSQL_PORT`。注册端到端测试另需 `TLSS_TEST_FTP_SIGNUP=1`，并使用服务连接池配置。请使用专门的测试数据库；未配置环境时部分用例会跳过，跳过不等于验证成功。当前仍有旧测试接口失配，见[待收尾事项](#当前限制与待收尾事项)。
 
 建议按以下顺序阅读源码：
 
 1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`：了解服务入口、命令派发、会话状态与停机流程。
-2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp`：追踪连接与消息处理。
+2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp` → `src/common/net/write_scheduler.cpp`：追踪连接与消息处理、有序发送、异步读取完成及背压。
 3. `src/common/base/tlss_thread_pool.cpp`、`src/common/base/mysql_connection_pool.cpp`：查看任务与数据库资源的生命周期。
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`：追踪注册、登录与虚拟目录的数据库操作。
 5. `inc/ftp/metadata_cache.h` → `inc/common/cache/arc_cache.h` → `tests/test_metadata_cache.cpp`：理解缓存命中、版本失效、加载合并与分片容量。
-6. 从 `src/ftp/transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp`：追踪任务状态、发布、校验、异步适配与发送。
+6. 从 `src/ftp/transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp` 和 `src/common/net/write_scheduler.cpp`：追踪任务状态、发布、校验、异步适配与发送。
 7. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`：追踪主服务监控；`src/monitor/demo/` 提供独立库示例。
 8. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
 9. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
 
+部分导学笔记描述的是早期版本；内容有差异时，请核对其标注的源码基线，并以当前实现和 CMake 注册项为准。
+
 ## 当前限制与待收尾事项
 
-- 已实现单机上传/下载和内容寻址落盘；尚无断点续传、覆盖更新、文件删除和对象垃圾回收。对象发布与 MySQL 登记之间的故障可能留下无引用对象，崩溃后的临时文件清理与一致性修复尚未实现。
+- 已实现单机上传/下载和内容寻址落盘；尚无断点续传、覆盖更新、文件/目录删除、移动、重命名和对象垃圾回收。对象发布与 MySQL 登记之间的故障可能留下无引用对象，崩溃后的临时文件清理与一致性修复尚未实现。
 - 主服务监控限定一个 Collector 对应一个 storage-service 实例，仅保存当前值，没有历史时序存储；主机内存采样尚未按 cgroup 限额调整。
 - 元数据缓存只协调显式共享同一缓存实例的调用者；跨进程、独立实例及直接 SQL 写入依赖 TTL 刷新。后续目录删除、移动与重命名还需补齐失效规则。
 - RPC/网关为占位，`.proto` 和 YAML 配置示例为空；端口、线程数量等尚无统一配置入口。
