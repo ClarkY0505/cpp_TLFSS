@@ -1,10 +1,10 @@
 # 本项目有已设置的代码风格
 # 批量格式化方式：
 # find inc src tests proto -type f \
-#  \( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \
-#     -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
-#     -o -name '*.cxx' -o -name '*.proto' \) \
-#  -exec clang-format -i --style=file {} +
+# \( -name '*.h' -o -name '*.hpp' -o -name '*.hh' \
+#    -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
+#    -o -name '*.cxx' -o -name '*.proto' \) \
+# -exec clang-format -i --style=file {} +
 
 # 如果只是编辑已有目标已经包含的 .h/.cpp，不需要重新 cmake --preset debug，直接构建即可：
 # cmake --build --preset debug
@@ -214,6 +214,7 @@ add_subdirectory(src/gateway)
 add_subdirectory(src/logger)
 add_subdirectory(src/monitor)
 add_subdirectory(src/rpc)
+add_subdirectory(src/observability)
 
 # =============================================================================
 # 主程序
@@ -227,6 +228,7 @@ add_dependencies(tlss-cli prepare_runtime_directories)
 target_link_libraries(tlss-cli PRIVATE ftp_lib)
 
 target_link_libraries(storage-service
+    observability_lib
     common_lib
     ftp_lib
     gateway_lib
