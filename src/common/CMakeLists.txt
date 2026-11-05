@@ -25,6 +25,7 @@ add_library(common_lib
     net/socket.cpp
     net/tcp_server.cpp
     net/tcp_connection.cpp
+    net/write_scheduler.cpp
     net/connector.cpp
     net/tcp_client.cpp
 )

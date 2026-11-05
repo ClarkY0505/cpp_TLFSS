@@ -6,14 +6,13 @@
 #include "common/net/callbacks.h"
 #include "common/net/inet_address.h"
 #include "common/net/timestamp.h"
-#include "monitor/monitor_wire.h"
+#include "common/net/write_types.h"
 
 #include <netinet/in.h>
 #include <sys/types.h>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <system_error>
@@ -22,6 +21,7 @@ namespace TLSS::NET {
 class Channel;
 class EventLoop;
 class Socket;
+class WriteScheduler;
 
 /*
  * TcpServer  -> Acceptor => 有一个新用户连接，通过accept函数拿到connfd =>
@@ -29,12 +29,10 @@ class Socket;
  * */
 class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection> {
  public:
-  static constexpr std::size_t kAsyncFileChunk = 64 * 1024;
-  using FileSendCallback = std::function<void(std::error_code error, uint64_t bytes_sent)>;
-  using FileReadCompletion = std::function<void(std::error_code, std::string)>;
-
-  using FileReadFunction =
-      std::function<void(off_t offset, std::size_t count, FileReadCompletion completion)>;
+  static constexpr std::size_t kAsyncFileChunk = detail::kAsyncFileChunk;
+  using FileSendCallback = detail::FileSendCallback;
+  using FileReadCompletion = detail::FileReadCompletion;
+  using FileReadFunction = detail::FileReadFunction;
   TcpConnection(EventLoop* loop, const std::string& name, int sockfd, const InetAddress& local_addr,
                 const InetAddress& peer_addr);
   ~TcpConnection();
@@ -119,39 +117,6 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
  private:
   enum StateE { k_disconnected, k_connecting, k_connected, k_disconnecting };
-  struct FileHandle {
-    explicit FileHandle(int value = -1)
-        : fd(value) {}
-    ~FileHandle();
-
-    FileHandle(const FileHandle&) = delete;
-    FileHandle& operator=(const FileHandle&) = delete;
-
-    int fd;
-  };
-  struct PendingWrite {
-    enum class Kind { memory, file, buffered_file };
-
-    Kind kind = Kind::memory;
-
-    // 普通数据任务
-    std::string data;
-    std::size_t data_offset = 0;
-
-    // 文件任务。
-    // shared_ptr 使任务可被 std::function 捕获。
-    std::shared_ptr<FileHandle> file;
-    off_t file_offset = 0;
-    uint64_t remaining = 0;
-    uint64_t file_sent = 0;
-    FileSendCallback cb;
-
-    FileReadFunction reader;
-    bool read_pending = false;
-    std::uint64_t read_sequence = 0;
-    std::size_t read_size = 0;
-    std::size_t read_reservation = 0;
-  };
   void set_state(StateE s) {
     _state.store(s);
   }
@@ -162,10 +127,10 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   void handle_error();
   std::string state_to_string() const;
 
-  void send_in_loop(const void* data, size_t len);
-  void send_file_in_loop(PendingWrite task, int prepare_error);
-  void request_file_read();
-  void on_file_read(std::uint64_t sequence, std::error_code error, std::string data);
+  void send_in_loop(std::string data);
+  FileReadCompletion make_file_read_completion(std::uint64_t sequence);
+  void on_write_drained();
+  void on_write_high_water(std::size_t bytes);
 
   //
   // 异步落盘任务的独立的磁盘读取暂停
@@ -186,12 +151,7 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   std::unordered_set<std::uint64_t> _disk_read_pauses;
   TIME::Timestamp _last_receive_time;
 
-  void enable_write_event();
-  void complete_front();
-  void cancel_pending(int error);
   void fail_writes(int error);
-
-  void notify_file(PendingWrite task, int error);
 
   void shutdown_in_loop();
   // 这里的loop不是 baseloop
@@ -204,6 +164,7 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
 
   std::unique_ptr<Socket> _socket;
   std::unique_ptr<Channel> _channel;
+  std::unique_ptr<WriteScheduler> _write_scheduler;
 
   const InetAddress _local_addr;
   const InetAddress _peer_addr;
@@ -214,18 +175,8 @@ class TcpConnection : NoCopy, public std::enable_shared_from_this<TcpConnection>
   CloseCb _close_cb;
 
   HighWaterMarkCb _high_water_cb;
-  size_t _high_water_mark;
 
   Buffer _input_buffer;
-  std::deque<PendingWrite> _writes;
-  /* Buffer _output_buffer; */
-
-  // 普通任务持有的内存，加上异步文件任务预留的单块内存额度。
-  // 旧 send_file() 的文件内容不计入该值。
-  std::size_t _pending_memory_bytes = 0;
-  std::size_t _pending_files = 0;
-  // 连接级序列号，防止旧文件的迟到读取结果污染下一个文件。
-  std::uint64_t _next_read_sequence = 0;
 };
 }  // namespace TLSS::NET
 
