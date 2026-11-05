@@ -7,13 +7,21 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "observability/storage_metrics.h"
 
 namespace TLSS::FileStorage {
 class MetadataService {
  public:
   explicit MetadataService(BASE::DbConnectionPool& pool);
   MetadataService(BASE::DbConnectionPool& pool, std::shared_ptr<MetadataCache> cache);
+
+  // Configure before starting workers; metrics ownership outlives asynchronous operations.
+  void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
+    _metrics = std::move(metrics);
+  }
 
   MetadataService(const MetadataService&) = delete;
   MetadataService& operator=(const MetadataService&) = delete;
@@ -62,6 +70,7 @@ class MetadataService {
                         const std::string& directory, const std::string& file_name,
                         const std::string& hash);
 
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
   BASE::DbConnectionPool& _db_conn_pool;
 
   // 默认由本引擎创建；多个引擎需要协调时必须显式共享同一个实例。

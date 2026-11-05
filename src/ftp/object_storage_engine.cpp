@@ -219,6 +219,8 @@ void Receiver::publish(const fs::path& destination, bool reuse_existing,
     auto existing = open_source(destination, true);
 
     if (existing->size != total_ || hash_file(existing->file.fd) != actual_hash) {
+      if (metrics_)
+        metrics_->add(OBSERVABILITY::Metric::verification_failed);
       transfer_logger()->error("existing object is inconsistent");
       throw std::runtime_error("existing object is inconsistent");
     }
@@ -235,17 +237,29 @@ void Receiver::publish(const fs::path& destination, bool reuse_existing,
 
 namespace TLSS::FileStorage {
 ObjectStorageEngine::WriteHandle ObjectStorageEngine::create_temporary(std::uint64_t size) const {
-  return std::make_unique<Transfer::Receiver>(Transfer::object_root(), size);
+  auto writer = std::make_unique<Transfer::Receiver>(Transfer::object_root(), size);
+  writer->set_metrics(_metrics);
+  return writer;
 }
-ObjectInfo ObjectStorageEngine::publish(Transfer::Receiver& writer) const {
+ObjectInfo ObjectStorageEngine::publish(Transfer::Receiver& writer) const try {
   const std::string hash = writer.hash();
   writer.publish(Transfer::object_root() / hash, true, hash, 0444);
+  if (_metrics)
+    _metrics->add(OBSERVABILITY::Metric::object_published);
   return {hash, writer.size()};
+} catch (...) {
+  if (_metrics)
+    _metrics->add(OBSERVABILITY::Metric::object_publish_failed);
+  throw;
 }
-ObjectStorageEngine::ReadHandle ObjectStorageEngine::open_read(const std::string& hash) const {
+ObjectStorageEngine::ReadHandle ObjectStorageEngine::open_read(const std::string& hash) const try {
   if (!Transfer::valid_hash(hash))
     throw std::invalid_argument("invalid object hash");
   return Transfer::open_source(Transfer::object_root() / hash, true);
+} catch (...) {
+  if (_metrics)
+    _metrics->add(OBSERVABILITY::Metric::object_open_failed);
+  throw;
 }
 std::string ObjectStorageEngine::read(const ReadHandle& source, off_t offset, std::size_t count,
                                       const std::function<bool()>& cancelled) {

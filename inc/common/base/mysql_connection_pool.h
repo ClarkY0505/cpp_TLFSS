@@ -8,8 +8,11 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <utility>
 #include "common/NoCopy.h"
 #include "common/base/tlss_thread.h"
+
+#include "observability/storage_metrics.h"
 
 namespace TLSS::BASE {
 class DbConnection;
@@ -36,6 +39,21 @@ class DbConnectionPool : public NoCopy {
   // 停止新借用并等待后台线程与已借出的连接；超时返回 false，池继续存活。
   // 调用方须先停止业务线程；重复调用安全，成功后也不再重新开放借用。
   bool shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(30));
+
+  // Configure before starting workers; metrics ownership outlives asynchronous operations.
+  void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
+    _metrics = std::move(metrics);
+  }
+
+  struct Snapshot {
+    std::size_t total, idle, borrowed, waiters;
+  };
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    const int total = _connection_cnt.load(std::memory_order_relaxed);
+    return {total > 0 ? static_cast<std::size_t>(total) : 0, _connection_queue.size(),
+            _borrowed_count, _waiting_getters};
+  }
 
   // 禁止复制，避免复制线程、队列和连接所有权。
   /* DbConnectionPool(const DbConnectionPool&) = delete; */
@@ -84,13 +102,15 @@ class DbConnectionPool : public NoCopy {
   Thread _scanner_thread;
 
   std::queue<std::unique_ptr<DbConnection>> _connection_queue;  // 独占持有空闲连接。
-  std::mutex _mutex;              // 保护队列、关闭标志和下方两个生命周期计数。
+  mutable std::mutex _mutex;      // 保护队列、关闭标志和下方两个生命周期计数。
   std::condition_variable _cond;  // 用于获取、生产、扫描、重试和析构等待。
   std::mutex _shutdown_mutex;     // 串行化停止操作，防止重复 join 同一个线程。
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
   std::atomic<int> _connection_cnt;  // 总容量计数，生产失败时也会在锁外修改。
   bool _stopping;        // 在 _mutex 下访问；关闭后不再借出或归还入队。
   bool _threads_joined;  // 在 _shutdown_mutex 下访问；标记后台线程已完成 join。
   std::size_t _borrowed_count;  // 在 _mutex 下访问；包含取出后正在 ping 的连接。
+  std::size_t _waiting_getters = 0;
   std::size_t _active_getters;  // 在 _mutex 下访问；已登记且尚未退出的获取调用。
 };
 }  // namespace TLSS::BASE

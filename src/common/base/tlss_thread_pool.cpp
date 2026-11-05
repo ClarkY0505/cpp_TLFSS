@@ -206,6 +206,7 @@ ThreadPool::Task ThreadPool::take() {
     _waiters.pop_front();
 
     if (std::chrono::steady_clock::now() >= pending.deadline) {
+      ++_timeouts;
       if (pending.on_timeout) {
         expired_callbacks.push_back(std::move(pending.on_timeout));
       }
@@ -243,6 +244,7 @@ bool ThreadPool::run(Task task) {
   std::unique_lock<std::mutex> lock(_mutex);
   // 只有运行态接收新任务；未启动或停止后提交者收到 false。
   if (_state != State::k_running) {
+    ++_rejected;
     return false;
   }
   // 零线程模式在调用者线程同步执行，同时登记正在执行的任务供 stop() 等待。
@@ -263,6 +265,7 @@ bool ThreadPool::run(Task task) {
 
   // 工作线程不能等待只有自身才能释放的队列空位；满队列时拒绝嵌套提交。
   if (PoolExecution::contains(this) && is_full()) {
+    ++_rejected;
     return false;
   }
   // 外部提交者等待空位；停机也会唤醒它，以便返回 false。
@@ -271,6 +274,7 @@ bool ThreadPool::run(Task task) {
   });
   // 等待期间可能已停机，入队前必须再次检查状态。
   if (_state != State::k_running) {
+    ++_rejected;
     return false;
   }
   // 成功入队后唤醒一个等待任务的工作线程。
@@ -287,6 +291,7 @@ bool ThreadPool::try_run(Task task) {
   std::unique_lock<std::mutex> lock(_mutex);
 
   if (_state != State::k_running) {
+    ++_rejected;
     return false;
   }
 
@@ -309,6 +314,7 @@ bool ThreadPool::try_run(Task task) {
 
   // 与 run() 的区别：队列满时直接拒绝，不等待 _not_full。
   if (is_full()) {
+    ++_rejected;
     return false;
   }
 
@@ -401,6 +407,7 @@ bool ThreadPool::submit_async(Task task, std::chrono::steady_clock::time_point d
   std::lock_guard<std::mutex> lock(_mutex);
   if (_state != State::k_running || _threads.empty() ||
       std::chrono::steady_clock::now() >= deadline) {
+    ++_rejected;
     return false;
   }
 
@@ -411,6 +418,7 @@ bool ThreadPool::submit_async(Task task, std::chrono::steady_clock::time_point d
   }
 
   if (_waiters.size() >= _max_wait_queue_size) {
+    ++_rejected;
     return false;
   }
 
@@ -449,6 +457,7 @@ void ThreadPool::deadline_loop() {
         continue;
       }
 
+      ++_timeouts;
       timeout_callback = std::move(earliest->on_timeout);
       _waiters.erase(earliest);
     }

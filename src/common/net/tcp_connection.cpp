@@ -81,9 +81,15 @@ TcpConnection::TcpConnection(EventLoop* loop, const std::string& name, int sockf
     else if (!enabled && _channel->is_writing())
       _channel->disable_writing();
   };
-  hooks.high_water = [this](std::size_t bytes) { on_write_high_water(bytes); };
-  hooks.drained = [this] { on_write_drained(); };
-  hooks.failed = [this](int error) { fail_writes(error); };
+  hooks.high_water = [this](std::size_t bytes) {
+    on_write_high_water(bytes);
+  };
+  hooks.drained = [this] {
+    on_write_drained();
+  };
+  hooks.failed = [this](int error) {
+    fail_writes(error);
+  };
   hooks.make_read_completion = [this](std::uint64_t sequence) {
     return make_file_read_completion(sequence);
   };
@@ -187,8 +193,8 @@ void TcpConnection::set_high_water_mark(std::size_t bytes) {
 void TcpConnection::stop_read() {
   std::shared_ptr<TcpConnection> self = shared_from_this();
   EventLoop::Functor cb = [self] {
-    if (self->_state.load() != k_connected ||
-        self->_write_scheduler->pending_memory_bytes() < self->_write_scheduler->high_water_mark()) {
+    if (self->_state.load() != k_connected || self->_write_scheduler->pending_memory_bytes() <
+                                                  self->_write_scheduler->high_water_mark()) {
       return;
     }
 
@@ -325,7 +331,9 @@ void TcpConnection::on_write_drained() {
   if (_write_cb) {
     auto self = shared_from_this();
     auto callback = _write_cb;
-    _loop->queue_in_loop([self, callback] { callback(self); });
+    _loop->queue_in_loop([self, callback] {
+      callback(self);
+    });
   }
   if (_state.load() == k_disconnecting)
     shutdown_in_loop();
@@ -335,7 +343,9 @@ void TcpConnection::on_write_high_water(std::size_t bytes) {
   if (_high_water_cb) {
     auto self = shared_from_this();
     auto callback = _high_water_cb;
-    _loop->queue_in_loop([self, callback, bytes] { callback(self, bytes); });
+    _loop->queue_in_loop([self, callback, bytes] {
+      callback(self, bytes);
+    });
   }
 }
 

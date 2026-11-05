@@ -1,0 +1,10 @@
+add_library(storage_monitor_schema_lib storage_monitor_schema.cpp)
+target_link_libraries(storage_monitor_schema_lib PUBLIC monitor_lib)
+
+add_library(observability_lib system_resource_sampler.cpp storage_monitor_runtime.cpp)
+target_link_libraries(observability_lib PUBLIC storage_monitor_schema_lib Threads::Threads)
+
+add_executable(storage-monitor-collector collector_main.cpp)
+add_dependencies(storage-monitor-collector prepare_runtime_directories)
+target_link_libraries(storage-monitor-collector PRIVATE storage_monitor_schema_lib)
+install(TARGETS storage-monitor-collector RUNTIME DESTINATION bin)

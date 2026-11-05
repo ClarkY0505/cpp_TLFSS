@@ -32,9 +32,11 @@ UploadTask::~UploadTask() {
 
 void UploadTask::start() {
   auto conn = current_connection();
-  if (!conn || _started)
+  if (!conn || _started) {
     return;
+  }
   _started = true;
+  metrics_start(true);
   const auto weak = weak_from_this();
   auto* loop = conn->get_loop();
   auto* metadata = &_metadata;
@@ -47,28 +49,34 @@ void UploadTask::start() {
         StorageContext<std::string> parent;
         std::string error;
         try {
-          if (stopping->load())
+          if (stopping->load()) {
             error = "server is stopping";
-          else
+          } else {
             parent = metadata->prepare_upload(username, directory, name);
+          }
         } catch (const std::exception& exception) {
           error = exception.what();
         } catch (...) {
           error = "unexpected transfer failure";
         }
         loop->queue_in_loop([weak, parent = std::move(parent), error = std::move(error)]() mutable {
-          if (auto task = weak.lock())
+          if (auto task = weak.lock()) {
             task->on_prepared(std::move(parent), std::move(error));
+          }
         });
       });
-  if (!accepted)
+  if (!accepted) {
+    if (_context.metrics)
+      _context.metrics->add(OBSERVABILITY::Metric::commands_rejected);
     on_failed("server is busy");
+  }
 }
 
 void UploadTask::on_prepared(StorageContext<std::string> parent, std::string error) {
   auto conn = current_connection();
-  if (!conn || _phase != TransferPhase::preparing_upload)
+  if (!conn || _phase != TransferPhase::preparing_upload) {
     return;
+  }
   if (!error.empty() || !parent.success) {
     on_failed(error.empty() ? "directory unavailable or filename already exists"
                             : std::move(error));
@@ -84,27 +92,33 @@ void UploadTask::on_prepared(StorageContext<std::string> parent, std::string err
   // Preserve the existing disk-worker execution and publish-before-register ordering.
   // Only the upload coordinator knows both storage and metadata services.
   auto finalizer = [objects, metadata, username = _context.username, directory = _context.directory,
-                    name = _request.name, parent_id = _parent_id](Transfer::Receiver& receiver) {
+                    name = _request.name, parent_id = _parent_id,
+                    metrics = _context.metrics](Transfer::Receiver& receiver) {
     auto object = objects->publish(receiver);
     if (!metadata->commit_upload(username, parent_id, directory, name, object.hash)) {
       throw std::runtime_error("file stored but metadata registration failed");
     }
+    if (metrics)
+      metrics->add(OBSERVABILITY::Metric::upload_committed);
     return object.hash;
   };
   try {
     _writer = Transfer::AsyncReceiver::create(
         _disk, conn, _request.size, std::move(factory), std::move(finalizer),
         [weak] {
-          if (auto task = weak.lock())
+          if (auto task = weak.lock()) {
             task->on_ready();
+          }
         },
         [weak](std::string hash) {
-          if (auto task = weak.lock())
+          if (auto task = weak.lock()) {
             task->on_done(std::move(hash));
+          }
         },
         [weak](std::string reason) {
-          if (auto task = weak.lock())
+          if (auto task = weak.lock()) {
             task->on_failed(std::move(reason));
+          }
         });
   } catch (const std::exception& exception) {
     on_failed(exception.what());
@@ -112,8 +126,9 @@ void UploadTask::on_prepared(StorageContext<std::string> parent, std::string err
 }
 
 void UploadTask::on_ready() {
-  if (!current_connection() || _phase != TransferPhase::preparing_upload)
+  if (!current_connection() || _phase != TransferPhase::preparing_upload) {
     return;
+  }
   _phase = TransferPhase::receiving_upload;
   emit({TransferEvent::Kind::upload_ready, {}});
   if (_request.size == 0 && !_cancelled) {
@@ -134,24 +149,31 @@ void UploadTask::consume(NET::Buffer& buffer) {
 }
 
 void UploadTask::on_done(std::string hash) {
-  if (!current_connection() || _phase != TransferPhase::finalizing_upload)
+  if (!current_connection() || _phase != TransferPhase::finalizing_upload) {
     return;
+  }
+  metrics_finish(OBSERVABILITY::Metric::upload_committed);
   _phase = TransferPhase::idle;
   emit({TransferEvent::Kind::upload_complete, std::move(hash)});
 }
 
 void UploadTask::on_failed(std::string error) {
-  if (!current_connection())
+  metrics_finish(OBSERVABILITY::Metric::upload_failed);
+  if (!current_connection()) {
     return;
+  }
   const bool close = _phase == TransferPhase::receiving_upload;
-  if (close)
+  if (close) {
     service_logger()->error("upload disk write failed: {}", error);
+  }
   emit({TransferEvent::Kind::failed, std::move(error), 0, close});
 }
 
 void UploadTask::cancel() noexcept {
+  metrics_finish(OBSERVABILITY::Metric::upload_cancelled);
   _cancelled = true;
-  if (_writer)
+  if (_writer) {
     _writer->cancel();
+  }
 }
 }  // namespace TLSS::FileStorage

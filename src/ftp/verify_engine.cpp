@@ -65,6 +65,8 @@ const std::string& VerifyEngine::finish() {
 }
 void VerifyEngine::verify(const std::string& expected_hash) {
   if (!expected_hash.empty() && finish() != expected_hash) {
+    if (metrics_)
+      metrics_->add(OBSERVABILITY::Metric::verification_failed);
     Transfer::transfer_logger()->error("SHA-256 mismatch");
     throw std::runtime_error("SHA-256 mismatch");
   }

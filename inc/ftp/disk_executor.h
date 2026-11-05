@@ -25,6 +25,14 @@ class DiskExecutor : NoCopy {
   void start(int threads = 2);
   void begin_shutdown();
   void stop();
+  struct Snapshot {
+    std::size_t active;
+    std::uint64_t rejected;
+  };
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return {_receivers.size(), _rejected};
+  }
 
  private:
   friend class AsyncReceiver;
@@ -37,15 +45,18 @@ class DiskExecutor : NoCopy {
     std::lock_guard<std::mutex> lock(_mutex);
 
     if (_phase != Phase::running) {
+      ++_rejected;
       throw std::runtime_error("disk executor is not accepting transfers");
     }
 
     if (_receivers.size() >= kMaxReceivers) {
+      ++_rejected;
       throw std::runtime_error("too many active file transfers");
     }
 
     const std::uint64_t token = next_token.fetch_add(1, std::memory_order_relaxed);
     if (token == 0) {
+      ++_rejected;
       throw std::runtime_error("file transfer token space exhausted");
     }
 
@@ -65,7 +76,8 @@ class DiskExecutor : NoCopy {
   BASE::ThreadPool _pool;
 
   std::mutex _lifecycle_mutex;
-  std::mutex _mutex;
+  mutable std::mutex _mutex;
+  std::uint64_t _rejected = 0;
   std::condition_variable _drained;
 
   Phase _phase = Phase::created;

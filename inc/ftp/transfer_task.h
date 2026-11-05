@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "common/net/tcp_connection.h"
+#include "observability/storage_metrics.h"
 
 namespace TLSS::FileStorage {
 struct ConnectionSession;
@@ -31,6 +32,7 @@ struct TransferContext {
   std::uint64_t user_id = 0;
   std::string username;
   std::string directory;
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics;
 
   using Current = std::pair<NET::TcpConnectionPtr, std::shared_ptr<ConnectionSession>>;
   Current current() const;
@@ -75,12 +77,16 @@ class TransferTask {
 
   NET::TcpConnectionPtr current_connection() const;
   void emit(TransferEvent event);
+  void metrics_start(bool upload) noexcept;
+  void metrics_finish(OBSERVABILITY::Metric result) noexcept;
 
   TransferContext _context;
   const std::atomic<bool>& _stopping;
   Notify _notify;
   TransferPhase _phase;
   bool _cancelled = false;
+  bool _metric_active = false;
+  bool _metric_upload = false;
 };
 }  // namespace TLSS::FileStorage
 #endif

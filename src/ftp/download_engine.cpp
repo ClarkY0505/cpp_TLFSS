@@ -31,6 +31,7 @@ void DownloadTask::start() {
   if (!conn || _started)
     return;
   _started = true;
+  metrics_start(false);
   auto* metadata = &_metadata;
   auto* objects = &_objects;
   auto factory = [metadata, objects, username = _context.username, directory = _context.directory,
@@ -80,6 +81,7 @@ void DownloadTask::on_sent(std::error_code error) {
     return;
   _source.reset();
   if (error) {
+    metrics_finish(OBSERVABILITY::Metric::download_failed);
     emit({TransferEvent::Kind::failed, error.message(), 0, true});
     return;
   }
@@ -93,16 +95,19 @@ void DownloadTask::acknowledge() {
   if (_phase != TransferPhase::waiting_download_ack) {
     throw std::logic_error("download is not waiting for an acknowledgement");
   }
+  metrics_finish(OBSERVABILITY::Metric::download_completed);
   _phase = TransferPhase::idle;
   emit({TransferEvent::Kind::download_complete, {}});
 }
 
 void DownloadTask::on_failed(std::string error) {
+  metrics_finish(OBSERVABILITY::Metric::download_failed);
   emit({TransferEvent::Kind::failed, std::move(error), 0,
         _phase != TransferPhase::preparing_download});
 }
 
 void DownloadTask::cancel() noexcept {
+  metrics_finish(OBSERVABILITY::Metric::download_cancelled);
   _cancelled = true;
   if (_source)
     _source->cancel();

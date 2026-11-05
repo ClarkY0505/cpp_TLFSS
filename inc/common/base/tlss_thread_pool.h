@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -34,6 +35,14 @@ class ThreadPool : NoCopy {
   }
 
   size_t queue_size() const;
+  struct Snapshot {
+    std::size_t queued, waiting;
+    std::uint64_t rejected, timeouts;
+  };
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return {_queue.size(), _waiters.size(), _rejected, _timeouts};
+  }
 
   // 线程池未运行，或池内任务向已满的队列提交任务时，返回 false。
   // 外部调用者会等待队列空位。空任务会抛出 invalid_argument。
@@ -89,6 +98,8 @@ class ThreadPool : NoCopy {
   std::deque<PendingTask> _waiters;
   // 放在现有 _max_queue_size 之后，并按此顺序初始化
   size_t _max_wait_queue_size;
+  std::uint64_t _rejected = 0;
+  std::uint64_t _timeouts = 0;
 };
 }  // namespace TLSS::BASE
 #endif  // __INC_COMMON_BASE_TLSS_THREAD_POOL_H__

@@ -49,7 +49,7 @@ UdpPublisher::UdpPublisher(UdpPublisherConfig config)
     return;
   }
 
-  const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  const int socket_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (socket_fd < 0) {
     _impl->_setup_status = UdpPublishStatus::SOCKET_ERROR;
     _impl->_setup_error = errno;
@@ -97,9 +97,10 @@ UdpPublishResult UdpPublisher::send(const MonData::StoredRecord& record) const {
    * 不能按 TCP 的处理方式循环发送剩余字节，因为 UDP
    * 每次 sendto() 都代表一个独立数据报。
    */
-  const ssize_t sent = ::sendto(_impl->_socket, encoded._bytes.data(), encoded._bytes.size(), 0,
-                                reinterpret_cast<const sockaddr*>(&_impl->_destination),
-                                static_cast<socklen_t>(sizeof(_impl->_destination)));
+  const ssize_t sent =
+      ::sendto(_impl->_socket, encoded._bytes.data(), encoded._bytes.size(), MSG_DONTWAIT,
+               reinterpret_cast<const sockaddr*>(&_impl->_destination),
+               static_cast<socklen_t>(sizeof(_impl->_destination)));
 
   if (sent < 0) {
     const int send_error = errno;

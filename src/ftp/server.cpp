@@ -64,17 +64,25 @@ std::optional<HandleCommand> string_to_command(std::string_view command) {
 
 StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
                                const std::string& name, int subloop_size,
-                               int thread_pool_threads_num, int thread_pool_queue_max_size)
-    : _thread_pool_threads_num(thread_pool_threads_num)
+                               int thread_pool_threads_num, int thread_pool_queue_max_size,
+                               std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics,
+                               std::shared_ptr<MetadataCache> cache)
+    : _metrics(std::move(metrics))
+    , _thread_pool_threads_num(thread_pool_threads_num)
     , _loop(loop)
     , _tcp_server(_loop, addr, name)
     , _db_conn_pool(BASE::DbConnectionPool::get_connection_pool())
     , _th_pool("tlss_worker")
     , _user_repository(*_db_conn_pool)
     , _auth_service(_user_repository)
-    , _metadata_service(*_db_conn_pool)
+    , _metadata_service(*_db_conn_pool, std::move(cache))
     , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage, _stopping)
     , _download_engine(_disk_executor, _metadata_service, _object_storage, _stopping) {
+  _metadata_service.set_metrics(_metrics);
+  _object_storage.set_metrics(_metrics);
+  _db_conn_pool->set_metrics(_metrics);
+  if (_metrics)
+    _metrics->set(OBSERVABILITY::Metric::service_state, 1);
   _tcp_server.set_connection_cb(
       std::bind(&StorageService::on_connection, this, std::placeholders::_1));
 
@@ -99,6 +107,32 @@ StorageService::~StorageService() {
   }
 }
 
+void StorageService::sample_metrics() {
+  if (!_metrics)
+    return;
+  const auto workers = _th_pool.snapshot();
+  const auto database = _db_conn_pool->snapshot();
+  const auto disk = _disk_executor.snapshot();
+  const auto cache = _metadata_service.metadata_cache_stats();
+  using OBSERVABILITY::Metric;
+  _metrics->set(Metric::worker_queue, workers.queued);
+  _metrics->set(Metric::worker_waiting, workers.waiting);
+  _metrics->set(Metric::worker_rejected, workers.rejected);
+  _metrics->set(Metric::worker_timeouts, workers.timeouts);
+  _metrics->set(Metric::db_total, database.total);
+  _metrics->set(Metric::db_idle, database.idle);
+  _metrics->set(Metric::db_borrowed, database.borrowed);
+  _metrics->set(Metric::db_waiters, database.waiters);
+  _metrics->set(Metric::disk_active, disk.active);
+  _metrics->set(Metric::disk_rejected, disk.rejected);
+  _metrics->set(Metric::cache_requests, cache.directory_list.requests +
+                                            cache.download_hash.requests + cache.cd_path.requests);
+  _metrics->set(Metric::cache_hits,
+                cache.directory_list.hits + cache.download_hash.hits + cache.cd_path.hits);
+  _metrics->set(Metric::cache_loads,
+                cache.directory_list.loads + cache.download_hash.loads + cache.cd_path.loads);
+}
+
 void StorageService::start() {
   // 先准备业务线程，再开放监听；停机时按相反顺序回收资源。
   _th_pool.start(_thread_pool_threads_num);
@@ -108,6 +142,8 @@ void StorageService::start() {
   _disk_executor.start();
   _tcp_server.start();
   _started = true;
+  if (_metrics)
+    _metrics->set(OBSERVABILITY::Metric::service_state, 2);
 }
 
 bool StorageService::stop(std::chrono::milliseconds grace_period) {
@@ -131,6 +167,8 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
   }
   _stop_started = true;
   _stopping.store(true);
+  if (_metrics)
+    _metrics->set(OBSERVABILITY::Metric::service_state, 3);
   lock.unlock();
 
   // 关闭监听并暂停现有连接读取；屏障保证各 IO loop 已处理暂停请求。
@@ -166,6 +204,8 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
   lock.lock();
   _stop_succeeded = db_stopped;
   _stopped = true;
+  if (_metrics)
+    _metrics->set(OBSERVABILITY::Metric::service_state, 4);
   lock.unlock();
   _stop_done.notify_all();
   return db_stopped;
@@ -188,6 +228,8 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
       if (it != _sessions.end()) {
         session = std::move(it->second);
         _sessions.erase(it);
+        if (_metrics)
+          _metrics->subtract(OBSERVABILITY::Metric::connections);
       }
     }
 
@@ -209,7 +251,9 @@ void StorageService::on_connection(const NET::TcpConnectionPtr& conn) {
   auto session = std::make_shared<ConnectionSession>();
   {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
-    _sessions.emplace(conn.get(), session);
+    const bool inserted = _sessions.emplace(conn.get(), session).second;
+    if (inserted && _metrics)
+      _metrics->add(OBSERVABILITY::Metric::connections);
   }
   service_logger()->info("conn up : {}", conn->peer_addr().to_ip_port());
   conn->send("Welcome to TLSS.\r\n");
@@ -449,6 +493,8 @@ void StorageService::handle_cd(const NET::TcpConnectionPtr& conn,
     session->directory_change_pending = true;
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::commands_rejected);
       session->directory_change_pending = false;
       conn->send("Server busy. Please retry.\r\ntlss@" + session->name + ":" +
                  session->current_directory + ">");
@@ -489,6 +535,8 @@ void StorageService::handle_ls(const NET::TcpConnectionPtr& conn,
                           session->current_directory, connection);
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::commands_rejected);
       conn->send("Server busy. Please retry.\r\n");
       return;
     }
@@ -541,6 +589,8 @@ void StorageService::handle_mkdir(const NET::TcpConnectionPtr& conn,
                           session->current_directory, directory, connection);
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::commands_rejected);
       conn->send("Server busy. Please retry.\r\n");
       return;
     }
@@ -641,6 +691,14 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
   auto task = [this, original, connection, io_loop, attempt, request = std::move(request)] {
     // 数据库访问和密码计算都发生在业务线程。
     auto result = _auth_service.authenticate(request);
+    if (_metrics) {
+      const auto metric = result.status == AUTH::AuthStatus::k_authenticated
+                              ? OBSERVABILITY::Metric::login_success
+                          : result.status == AUTH::AuthStatus::k_invalid_credentials
+                              ? OBSERVABILITY::Metric::login_invalid
+                              : OBSERVABILITY::Metric::auth_backend_failures;
+      _metrics->add(metric);
+    }
 
     io_loop->queue_in_loop(
         [this, original, connection, attempt, result = std::move(result)]() mutable {
@@ -649,6 +707,8 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
   };
 
   auto on_timeout = [this, original, connection, io_loop, attempt] {
+    if (_metrics)
+      _metrics->add(OBSERVABILITY::Metric::auth_queue_timeouts);
     // submit_async 的超时回调不在连接 IO 线程中执行。
     io_loop->queue_in_loop([this, original, connection, attempt] {
       finish_authentication(original, connection, attempt, AUTH::AuthResult{});
@@ -661,6 +721,8 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
   const bool accepted = _th_pool.submit_async(std::move(task), deadline, std::move(on_timeout));
 
   if (!accepted) {
+    if (_metrics)
+      _metrics->add(OBSERVABILITY::Metric::commands_rejected);
     // 当前已经在该连接的 IO 线程，可以直接处理失败结果。
     finish_authentication(original, connection, attempt, AUTH::AuthResult{});
   }
@@ -708,12 +770,22 @@ void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
 
   auto task = [this, original, connection, io_loop, attempt, request = std::move(request)] {
     auto result = _auth_service.signup(request);
+    if (_metrics) {
+      _metrics->add(result.status == AUTH::SignupStatus::k_created
+                        ? OBSERVABILITY::Metric::signup_success
+                        : OBSERVABILITY::Metric::signup_failed);
+      if (result.status == AUTH::SignupStatus::k_backend_unavailable ||
+          result.status == AUTH::SignupStatus::k_outcome_unknown)
+        _metrics->add(OBSERVABILITY::Metric::auth_backend_failures);
+    }
     io_loop->queue_in_loop(
         [this, original, connection, attempt, result = std::move(result)]() mutable {
           finish_signup(original, connection, attempt, std::move(result));
         });
   };
   auto on_timeout = [this, original, connection, io_loop, attempt] {
+    if (_metrics)
+      _metrics->add(OBSERVABILITY::Metric::auth_queue_timeouts);
     io_loop->queue_in_loop([this, original, connection, attempt] {
       finish_signup(original, connection, attempt, {});
     });
@@ -721,6 +793,8 @@ void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
   // 只限制排队等待时间；已开始的注册不能通过超时回调宣告失败。
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   if (!_th_pool.submit_async(std::move(task), deadline, std::move(on_timeout))) {
+    if (_metrics)
+      _metrics->add(OBSERVABILITY::Metric::commands_rejected);
     finish_signup(original, connection, attempt, {});
   }
 }
@@ -850,13 +924,15 @@ TransferContext StorageService::transfer_context(
           ++session->transfer_generation,
           session->user_id,
           session->name,
-          session->current_directory};
+          session->current_directory,
+          _metrics};
 }
 
 void StorageService::on_transfer_event(const TransferContext& context, TransferEvent event) {
   auto [conn, session] = context.current();
-  if (!conn)
+  if (!conn) {
     return;
+  }
   if (_stopping.load() || event.close_connection) {
     conn->force_close();
     return;
@@ -947,25 +1023,28 @@ void StorageService::handle_transfer_control(const NET::TcpConnectionPtr& conn,
   }
   std::string args;
   std::getline(input >> std::ws, args);
-  if (verb == "UPLOAD")
+  if (verb == "UPLOAD") {
     handle_upload(conn, session, args);
-  else if (verb == "DOWNLOAD")
+  } else if (verb == "DOWNLOAD") {
     handle_download(conn, session, args);
-  else
+  } else {
     transfer_failed(conn, session, "unknown transfer command");
+  }
 }
 
 UploadRequest StorageService::parse_upload_request(const std::string& args) {
   std::istringstream input(args);
   std::string size_text;
-  if (!(input >> size_text))
+  if (!(input >> size_text)) {
     throw std::runtime_error("missing file size");
+  }
   UploadRequest request;
   request.size = Transfer::parse_size(size_text);
   request.name = Transfer::read_field(input);
   Transfer::require_end(input);
-  if (!Transfer::valid_name(request.name))
+  if (!Transfer::valid_name(request.name)) {
     throw std::runtime_error("invalid remote filename");
+  }
   return request;
 }
 

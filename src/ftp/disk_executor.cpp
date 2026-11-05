@@ -95,10 +95,14 @@ bool DiskExecutor::post(BASE::ThreadPool::Task task, bool cleanup) {
 
   /* if (_phase != Phase::running && !(cleanup && _phase == Phase::closing)) */
   if (_phase != Phase::running && (!cleanup || _phase != Phase::closing)) {
+    ++_rejected;
     return false;
   }
 
-  return _pool.try_run(std::move(task));
+  const bool accepted = _pool.try_run(std::move(task));
+  if (!accepted)
+    ++_rejected;
+  return accepted;
 }
 
 void DiskExecutor::release(std::uint64_t token) {

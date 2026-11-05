@@ -63,8 +63,10 @@ void collect_disk(const std::filesystem::path& root, DiskSnapshot& sample) {
   sample.used_percent_x100 = used_percentage(used, total);
   sample.readonly = (status.f_flag & ST_RDONLY) != 0;
   sample.inode_valid = status.f_files > 0 && status.f_ffree <= status.f_files;
-  sample.inode_used_percent_x100 =
-      sample.inode_valid ? used_percentage(status.f_files - status.f_ffree, status.f_files) : 0;
+  if (sample.inode_valid) {
+    sample.inode_used_percent_x100 =
+        used_percentage(status.f_files - status.f_ffree, status.f_files);
+  }
   sample.consecutive_failures = 0;
   sample.last_success = sample.last_attempt;
 }

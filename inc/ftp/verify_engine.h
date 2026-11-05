@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
+
+#include "observability/storage_metrics.h"
 
 namespace TLSS::FileStorage::Transfer {
 using Digest = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
@@ -19,11 +22,15 @@ namespace TLSS::FileStorage {
 class VerifyEngine {
  public:
   explicit VerifyEngine(std::uint64_t size);
+  void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
+    metrics_ = std::move(metrics);
+  }
   void append(const void* data, std::size_t size);
   const std::string& finish();
   void verify(const std::string& expected_hash);
 
  private:
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics_;
   std::uint64_t remaining_;
   Transfer::Digest digest_;
   std::string hash_;

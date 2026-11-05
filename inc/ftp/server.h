@@ -23,9 +23,12 @@ class StorageService {
  public:
   explicit StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
                           const std::string& name = "tlss_service", int subloop_size = 4,
-                          int thread_pool_threads_num = 8, int thread_pool_queue_max_size = 256);
+                          int thread_pool_threads_num = 8, int thread_pool_queue_max_size = 256,
+                          std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics = {},
+                          std::shared_ptr<MetadataCache> cache = {});
   ~StorageService();
   void start();
+  void sample_metrics();
   // 从主 EventLoop 线程以外调用；先排空任务和连接，再释放资源。
   // 重复调用等待同一次停机完成；返回数据库连接池是否在期限内关闭。
   bool stop(std::chrono::milliseconds grace_period = std::chrono::seconds(5));
@@ -88,6 +91,7 @@ class StorageService {
   // 异步线程超时处理
   void finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
                                     std::weak_ptr<NET::TcpConnection> connection);
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
   int _thread_pool_threads_num;
   NET::EventLoop* _loop;
   NET::TcpServer _tcp_server;

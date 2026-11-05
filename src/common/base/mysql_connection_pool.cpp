@@ -474,15 +474,22 @@ DbConnectionHandle DbConnectionPool::get_connection() {
   for (;;) {
     // 队列为空时释放锁等待；有空闲连接或关闭标志置位时重新持锁返回。
     // 谓词会重新检查状态，过滤虚假唤醒及其他用途的通知。
-    if (!_cond.wait_until(lock, deadline, [this]() {
-          return _stopping || !_connection_queue.empty();
-        })) {
+    ++_waiting_getters;
+    const bool ready = _cond.wait_until(lock, deadline, [this]() {
+      return _stopping || !_connection_queue.empty();
+    });
+    --_waiting_getters;
+    if (!ready) {
       // 截止点到达仍无可借用连接，返回空句柄；清理器负责注销调用。
       mysql_logger()->warn("get connection timeout");
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::db_failures);
       return {};
     }
     if (_stopping) {
       // 即使队列仍有连接，关闭后也不再借出。
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::db_failures);
       return {};
     }
 
@@ -518,6 +525,8 @@ DbConnectionHandle DbConnectionPool::get_connection() {
     _cond.notify_all();
     if (std::chrono::steady_clock::now() >= deadline) {
       mysql_logger()->warn("get connection timeout");
+      if (_metrics)
+        _metrics->add(OBSERVABILITY::Metric::db_failures);
       return {};
     }
   }

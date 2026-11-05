@@ -12,6 +12,31 @@
 #include "ftp/transfer_validation.h"
 
 namespace TLSS::FileStorage {
+namespace {
+bool metadata_succeeded(bool result) {
+  return result;
+}
+template <typename T>
+bool metadata_succeeded(const StorageContext<T>& result) {
+  return result.success;
+}
+
+template <typename Work>
+auto observe_metadata(const std::shared_ptr<OBSERVABILITY::StorageMetrics>& metrics,
+                      OBSERVABILITY::Metric failure, Work&& work) {
+  try {
+    auto result = work();
+    if (!metadata_succeeded(result) && metrics)
+      metrics->add(failure);
+    return result;
+  } catch (...) {
+    if (metrics)
+      metrics->add(failure);
+    throw;
+  }
+}
+}  // namespace
+
 MetadataService::MetadataService(BASE::DbConnectionPool& pool)
     : MetadataService(pool, std::make_shared<MetadataCache>()) {}
 
@@ -189,40 +214,45 @@ bool MetadataService::create_dir_db(const std::string& username,
 StorageContext<std::string> MetadataService::prepare_upload(const std::string& username,
                                                             const std::string& directory,
                                                             const std::string& file_name) {
-  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
-    return {false, {}};
-  }
+  return observe_metadata(
+      _metrics, OBSERVABILITY::Metric::metadata_queries_failed,
+      [&]() -> StorageContext<std::string> {
+        if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
+          return {false, {}};
+        }
 
-  const std::string path = directory == "/" ? directory + file_name : directory + "/" + file_name;
-  if (path.size() > 1024) {
-    return {false, {}};
-  }
+        const std::string path =
+            directory == "/" ? directory + file_name : directory + "/" + file_name;
+        if (path.size() > 1024) {
+          return {false, {}};
+        }
 
-  auto db = _db_conn_pool.get_connection();
-  if (!db) {
-    return {false, {}};
-  }
+        auto db = _db_conn_pool.get_connection();
+        if (!db) {
+          return {false, {}};
+        }
 
-  //
-  // 找到指定用户的指定父目录
-  // 并且确认该目录下还没有同名的文件或目录
-  // 满足条件时，返回父目录的 id
-  auto result = db->query_prepared(
-      "SELECT p.id FROM virtual_files p "
-      "WHERE p.username = ? AND p.path = ? "
-      "AND p.file_type = 'directory' "
-      "AND NOT EXISTS ("
-      " SELECT 1 FROM virtual_files f "
-      " WHERE f.username = p.username "
-      " AND f.parent_id = p.id AND f.file_name = ?"
-      ") LIMIT 1",
-      {username, directory, file_name});
+        //
+        // 找到指定用户的指定父目录
+        // 并且确认该目录下还没有同名的文件或目录
+        // 满足条件时，返回父目录的 id
+        auto result = db->query_prepared(
+            "SELECT p.id FROM virtual_files p "
+            "WHERE p.username = ? AND p.path = ? "
+            "AND p.file_type = 'directory' "
+            "AND NOT EXISTS ("
+            " SELECT 1 FROM virtual_files f "
+            " WHERE f.username = p.username "
+            " AND f.parent_id = p.id AND f.file_name = ?"
+            ") LIMIT 1",
+            {username, directory, file_name});
 
-  if (!result.success || result.rows.size() != 1 || result.rows[0].size() != 1 ||
-      !result.rows[0][0]) {
-    return {false, {}};
-  }
-  return {true, *result.rows[0][0]};
+        if (!result.success || result.rows.size() != 1 || result.rows[0].size() != 1 ||
+            !result.rows[0][0]) {
+          return {false, {}};
+        }
+        return {true, *result.rows[0][0]};
+      });
 }
 
 bool MetadataService::commit_upload_db(const std::string& username, const std::string& parent_id,
@@ -256,7 +286,8 @@ bool MetadataService::commit_upload_db(const std::string& username, const std::s
       "AND p.path = ? AND p.file_type = 'directory'",
       {file_name, path, hash, parent_id, username, directory});
 
-  return result.success && result.affected_rows == 1;
+  const bool success = result.success && result.affected_rows == 1;
+  return success;
 }
 
 StorageContext<std::string> MetadataService::find_download_hash_db(const std::string& username,
@@ -293,66 +324,83 @@ StorageContext<std::string> MetadataService::find_download_hash_db(const std::st
 
 StorageContext<std::vector<FileInfo>> MetadataService::find_file_by_current_dir(
     const std::string& username, const std::string& current_directory) {
-  if (username.empty() || current_directory.empty()) {
-    return {false, {}};
-  }
-  return _metadata_cache->list(username, current_directory, [this, &username, &current_directory] {
-    return find_file_by_current_dir_db(username, current_directory);
-  });
+  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_queries_failed,
+                          [&]() -> StorageContext<std::vector<FileInfo>> {
+                            if (username.empty() || current_directory.empty()) {
+                              return {false, {}};
+                            }
+                            return _metadata_cache->list(
+                                username, current_directory, [this, &username, &current_directory] {
+                                  return find_file_by_current_dir_db(username, current_directory);
+                                });
+                          });
 }
 
 StorageContext<std::string> MetadataService::move_dir_by_current_dir(
     const std::string& username, const std::string& current_directory,
     const std::string& dir_name) {
-  if (username.empty() || current_directory.empty() || dir_name.empty()) {
-    return {false, {}};
-  }
-  // 根目录返回上级无需访问缓存或数据库；会话更新仍由原 IO 线程负责。
-  if (current_directory == "/" && dir_name == "..") {
-    return {true, "/"};
-  }
-  return _metadata_cache->cd(
-      username, current_directory, dir_name, [this, &username, &current_directory, &dir_name] {
-        return move_dir_by_current_dir_db(username, current_directory, dir_name);
-      });
+  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_queries_failed,
+                          [&]() -> StorageContext<std::string> {
+                            if (username.empty() || current_directory.empty() || dir_name.empty()) {
+                              return {false, {}};
+                            }
+                            // 根目录返回上级无需访问缓存或数据库；会话更新仍由原 IO 线程负责。
+                            if (current_directory == "/" && dir_name == "..") {
+                              return {true, "/"};
+                            }
+                            return _metadata_cache->cd(
+                                username, current_directory, dir_name,
+                                [this, &username, &current_directory, &dir_name] {
+                                  return move_dir_by_current_dir_db(username, current_directory,
+                                                                    dir_name);
+                                });
+                          });
 }
 
 StorageContext<std::string> MetadataService::find_download_hash(const std::string& username,
                                                                 const std::string& directory,
                                                                 const std::string& file_name) {
-  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
-    return {false, {}};
-  }
-  // 只缓存经数据库验证的对象哈希，文件内容和句柄仍走原磁盘流程。
-  return _metadata_cache->download(username, directory, file_name,
-                                   [this, &username, &directory, &file_name] {
-                                     return find_download_hash_db(username, directory, file_name);
-                                   });
+  return observe_metadata(
+      _metrics, OBSERVABILITY::Metric::metadata_queries_failed,
+      [&]() -> StorageContext<std::string> {
+        if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
+          return {false, {}};
+        }
+        // 只缓存经数据库验证的对象哈希，文件内容和句柄仍走原磁盘流程。
+        return _metadata_cache->download(
+            username, directory, file_name, [this, &username, &directory, &file_name] {
+              return find_download_hash_db(username, directory, file_name);
+            });
+      });
 }
 
 bool MetadataService::create_dir(const std::string& username, const std::string& current_directory,
                                  const std::string& directory) {
-  if (username.empty() || current_directory.empty() || directory.empty()) {
-    return false;
-  }
-  return _metadata_cache->write(username, current_directory,
-                                [this, &username, &current_directory, &directory] {
-                                  return create_dir_db(username, current_directory, directory);
-                                });
+  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, [&]() -> bool {
+    if (username.empty() || current_directory.empty() || directory.empty()) {
+      return false;
+    }
+    return _metadata_cache->write(username, current_directory,
+                                  [this, &username, &current_directory, &directory] {
+                                    return create_dir_db(username, current_directory, directory);
+                                  });
+  });
 }
 
 bool MetadataService::commit_upload(const std::string& username, const std::string& parent_id,
                                     const std::string& directory, const std::string& file_name,
                                     const std::string& hash) {
-  if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
-      !Transfer::valid_hash(hash)) {
-    return false;
-  }
-  // 上传准备仍直接查数据库；最终登记通过协调锁与版本维护缓存一致性。
-  return _metadata_cache->write(
-      username, directory, [this, &username, &parent_id, &directory, &file_name, &hash] {
-        return commit_upload_db(username, parent_id, directory, file_name, hash);
-      });
+  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, [&]() -> bool {
+    if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
+        !Transfer::valid_hash(hash)) {
+      return false;
+    }
+    // 上传准备仍直接查数据库；最终登记通过协调锁与版本维护缓存一致性。
+    return _metadata_cache->write(
+        username, directory, [this, &username, &parent_id, &directory, &file_name, &hash] {
+          return commit_upload_db(username, parent_id, directory, file_name, hash);
+        });
+  });
 }
 
 MetadataCacheStats MetadataService::metadata_cache_stats() const {

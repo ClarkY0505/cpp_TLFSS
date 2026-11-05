@@ -9,8 +9,11 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "ftp/verify_engine.h"
+
+#include "observability/storage_metrics.h"
 
 namespace TLSS::NET {
 class Buffer;
@@ -50,6 +53,10 @@ void sync_directory(const fs::path& directory);
 class Receiver {
  public:
   Receiver(const fs::path& directory, std::uint64_t size);
+  void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
+    metrics_ = metrics;
+    verifier_.set_metrics(std::move(metrics));
+  }
   std::uint64_t remaining() const {
     return remaining_;
   }
@@ -63,6 +70,7 @@ class Receiver {
                mode_t mode);
 
  private:
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics_;
   std::uint64_t total_;
   std::uint64_t remaining_;
   File file_;
@@ -80,6 +88,11 @@ struct ObjectInfo {
 // This component has no database, connection or protocol state.
 class ObjectStorageEngine {
  public:
+  // Configure before starting workers; metrics ownership outlives asynchronous operations.
+  void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
+    _metrics = std::move(metrics);
+  }
+
   using WriteHandle = std::unique_ptr<Transfer::Receiver>;
   using ReadHandle = std::shared_ptr<Transfer::SourceFile>;
   WriteHandle create_temporary(std::uint64_t size) const;
@@ -87,6 +100,9 @@ class ObjectStorageEngine {
   ReadHandle open_read(const std::string& hash) const;
   static std::string read(const ReadHandle& source, off_t offset, std::size_t count,
                           const std::function<bool()>& cancelled = {});
+
+ private:
+  std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
 };
 }  // namespace TLSS::FileStorage
 #endif
