@@ -10,6 +10,7 @@
 #include "ftp/disk_executor.h"
 #include "ftp/download_engine.h"
 #include "ftp/metadata_service.h"
+#include "ftp/object_coordinator.h"
 #include "ftp/upload_engine.h"
 
 #include <atomic>
@@ -32,6 +33,8 @@ class StorageService {
   // 从主 EventLoop 线程以外调用；先排空任务和连接，再释放资源。
   // 重复调用等待同一次停机完成；返回数据库连接池是否在期限内关闭。
   bool stop(std::chrono::milliseconds grace_period = std::chrono::seconds(5));
+
+  bool prepare_storage();
 
  private:
   void on_connection(const NET::TcpConnectionPtr& conn);
@@ -111,6 +114,7 @@ class StorageService {
   AUTH::AuthService _auth_service;
   MetadataService _metadata_service;
   ObjectStorageEngine _object_storage;
+  ObjectCoordinator _object_coordinator;
   UploadEngine _upload_engine;
   DownloadEngine _download_engine;
 

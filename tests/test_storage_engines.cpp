@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <system_error>
 
 #include <filesystem>
 #include <fstream>
@@ -66,6 +67,7 @@ int main() {
     writer->append("abc", 3);
     const auto published = objects.publish(*writer);
     check(published.hash == abc_hash && published.size == 3, "object identity differs");
+    check(objects.verify_object(abc_hash), "valid object verification failed");
     auto reader = objects.open_read(abc_hash);
     check(reader->size == 3, "object length differs");
     check(ObjectStorageEngine::read(reader, 1, 2) == "bc", "offset read differs");
@@ -81,6 +83,7 @@ int main() {
     // An existing content-addressed object must be validated before reuse.
     std::filesystem::remove(directory / abc_hash);
     std::ofstream(directory / abc_hash) << "bad";
+    check(!objects.verify_object(abc_hash), "corrupt object accepted");
     auto inconsistent = objects.create_temporary(3);
     inconsistent->append("abc", 3);
     rejects(
@@ -95,6 +98,13 @@ int main() {
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
       check(entry.path().filename().string().find(".tlss-part-") != 0, "temporary object leaked");
     }
+    bool missing = false;
+    try {
+      objects.verify_object(std::string(64, '0'));
+    } catch (const std::system_error& error) {
+      missing = error.code() == std::errc::no_such_file_or_directory;
+    }
+    check(missing, "missing object did not preserve ENOENT");
     std::filesystem::remove_all(directory);
     std::cout << "PASS storage engines\n";
     return 0;

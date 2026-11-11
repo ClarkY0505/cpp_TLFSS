@@ -26,18 +26,21 @@ File::~File() {
   reset();
 }
 void File::reset(int value) {
-  if (fd >= 0)
+  if (fd >= 0) {
     ::close(fd);
+  }
   fd = value;
 }
 TemporaryPath::~TemporaryPath() {
-  if (!path.empty())
+  if (!path.empty()) {
     ::unlink(path.c_str());
+  }
 }
 void TemporaryPath::remove() {
   if (!path.empty()) {
-    if (::unlink(path.c_str()) == -1 && errno != ENOENT)
+    if (::unlink(path.c_str()) == -1 && errno != ENOENT) {
       system_failure("unlink temporary file");
+    }
     path.clear();
   }
 }
@@ -219,8 +222,9 @@ void Receiver::publish(const fs::path& destination, bool reuse_existing,
     auto existing = open_source(destination, true);
 
     if (existing->size != total_ || hash_file(existing->file.fd) != actual_hash) {
-      if (metrics_)
+      if (metrics_) {
         metrics_->add(OBSERVABILITY::Metric::verification_failed);
+      }
       transfer_logger()->error("existing object is inconsistent");
       throw std::runtime_error("existing object is inconsistent");
     }
@@ -244,21 +248,25 @@ ObjectStorageEngine::WriteHandle ObjectStorageEngine::create_temporary(std::uint
 ObjectInfo ObjectStorageEngine::publish(Transfer::Receiver& writer) const try {
   const std::string hash = writer.hash();
   writer.publish(Transfer::object_root() / hash, true, hash, 0444);
-  if (_metrics)
+  if (_metrics) {
     _metrics->add(OBSERVABILITY::Metric::object_published);
+  }
   return {hash, writer.size()};
 } catch (...) {
-  if (_metrics)
+  if (_metrics) {
     _metrics->add(OBSERVABILITY::Metric::object_publish_failed);
+  }
   throw;
 }
 ObjectStorageEngine::ReadHandle ObjectStorageEngine::open_read(const std::string& hash) const try {
-  if (!Transfer::valid_hash(hash))
+  if (!Transfer::valid_hash(hash)) {
     throw std::invalid_argument("invalid object hash");
+  }
   return Transfer::open_source(Transfer::object_root() / hash, true);
 } catch (...) {
-  if (_metrics)
+  if (_metrics) {
     _metrics->add(OBSERVABILITY::Metric::object_open_failed);
+  }
   throw;
 }
 std::string ObjectStorageEngine::read(const ReadHandle& source, off_t offset, std::size_t count,
@@ -274,13 +282,31 @@ std::string ObjectStorageEngine::read(const ReadHandle& source, off_t offset, st
       throw std::system_error(ECANCELED, std::generic_category(), "file read cancelled");
     }
     const ssize_t n = ::pread(source->file.fd, data.data() + done, count - done, offset + done);
-    if (n > 0)
+    if (n > 0) {
       done += static_cast<std::size_t>(n);
-    else if (n == -1 && errno == EINTR)
+
+    } else if (n == -1 && errno == EINTR) {
       continue;
-    else
+
+    } else {
       throw std::system_error(n == 0 ? EIO : errno, std::generic_category(), "pread");
+    }
   }
   return data;
 }
+
+bool ObjectStorageEngine::verify_object(const std::string& hash) const {
+  // 文件成功打开、摘要匹配：返回 true。
+  ObjectStorageEngine::ReadHandle source = open_read(hash);
+  // 文件成功读取，但摘要不匹配：返回 false。
+  /* if(hash != Transfer::hash_file(source->file.fd)){ */
+  /* return false; */
+  /* } */
+  // 文件打不开或读取失败：保留异常，交给上层区分“文件缺失”和其他错误。
+  /* if(source->file.fd < 0){ */
+  /* throw std::runtime_error("open file filed"); */
+  /* } */
+  return Transfer::hash_file(source->file.fd) == hash;
+}
+
 }  // namespace TLSS::FileStorage

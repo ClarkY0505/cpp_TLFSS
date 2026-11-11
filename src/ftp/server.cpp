@@ -1,9 +1,11 @@
-#include "ftp/server.h"
 #include "common/base/tlss_thread_pool.h"
 #include "common/net/callbacks.h"
 #include "common/net/event_loop.h"
 #include "common/net/tcp_connection.h"
 #include "ftp/context.h"
+#include "ftp/object_backfill.h"
+#include "ftp/object_repository.h"
+#include "ftp/server.h"
 #include "ftp/service_logger.h"
 #include "ftp/transfer_protocol.h"
 
@@ -76,7 +78,8 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _user_repository(*_db_conn_pool)
     , _auth_service(_user_repository)
     , _metadata_service(*_db_conn_pool, std::move(cache))
-    , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage, _stopping)
+    , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage,
+                     _object_coordinator, _stopping)
     , _download_engine(_disk_executor, _metadata_service, _object_storage, _stopping) {
   _metadata_service.set_metrics(_metrics);
   _object_storage.set_metrics(_metrics);
@@ -1079,6 +1082,22 @@ void StorageService::handle_upload(const NET::TcpConnectionPtr& conn,
   } catch (const std::exception& exception) {
     transfer_failed(conn, session, exception.what());
   }
+}
+
+bool StorageService::prepare_storage() {
+  if (_started) {
+    return false;
+  }
+
+  auto connection = _db_conn_pool->get_connection();
+  if (!connection) {
+    return false;
+  }
+
+  ObjectRepository repository(*connection);
+  ObjectBackfill backfill(repository, _object_storage, _object_coordinator);
+
+  return backfill.register_referenced_objects();
 }
 
 }  // namespace TLSS::FileStorage

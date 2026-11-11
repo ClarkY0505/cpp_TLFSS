@@ -101,6 +101,8 @@ class ObjectStorageEngine {
   static std::string read(const ReadHandle& source, off_t offset, std::size_t count,
                           const std::function<bool()>& cancelled = {});
 
+  bool verify_object(const std::string& hash) const;
+
  private:
   std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
 };

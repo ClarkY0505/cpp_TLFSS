@@ -55,6 +55,8 @@ add_executable(test_ftp_transfer
     ${PROJECT_SOURCE_DIR}/src/ftp/server.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/client.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_backfill.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
 )
 add_dependencies(test_ftp_transfer prepare_runtime_directories)
 target_compile_options(test_ftp_transfer PRIVATE -fno-access-control)
@@ -123,6 +125,17 @@ set_tests_properties(system_resource_sampler_test PROPERTIES TIMEOUT 15)
 add_executable(test_storage_monitor_runtime test_storage_monitor_runtime.cpp)
 target_link_libraries(test_storage_monitor_runtime PRIVATE observability_lib)
 add_dependencies(test_storage_monitor_runtime prepare_runtime_directories)
+
+add_executable(test_object_backfill
+    test_object_backfill.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_backfill.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_object_backfill prepare_runtime_directories)
+target_link_libraries(test_object_backfill PRIVATE transfer_lib)
+add_test(NAME object_backfill_test COMMAND test_object_backfill)
+set_tests_properties(object_backfill_test PROPERTIES TIMEOUT 15)
+
 foreach(scenario IN ITEMS thresholds schema lifecycle resources transport configuration self_stop)
     add_test(NAME storage_monitor_${scenario} COMMAND test_storage_monitor_runtime ${scenario})
     set_tests_properties(storage_monitor_${scenario} PROPERTIES TIMEOUT 15)

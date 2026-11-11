@@ -80,34 +80,46 @@ int main() {
     TLSS::NET::InetAddress address(9000);
     TLSS::FileStorage::StorageService server(&loop, address, "tlss_service", 4, 8, 256, metrics,
                                              cache);
-    // Declared after server: its callback is stopped and destroyed before server is destroyed.
-    StorageMonitorRuntime monitor(monitor_config, metrics, sampler, [&server] {
-      server.sample_metrics();
-    });
-    if (monitoring) {
-      if (!sampler->start()) {
-        TLSSLOG::Logger::get("storage_service")->error("Resource sampler failed to start");
+    bool storage_ready = false;
+    try {
+      storage_ready = server.prepare_storage();
+      if (!storage_ready) {
+        TLSSLOG::Logger::get("storage_service")->error("prepare_storage failed");
       }
-      if (!monitor.start()) {
-        TLSSLOG::Logger::get("storage_service")
-            ->error("Monitoring disabled: {}", monitor.status().error);
-        sampler->finish_and_stop();
-      }
+    } catch (const std::exception& error) {
+      TLSSLOG::Logger::get("storage_service")
+          ->error("server storage preapare disabled: {}", error.what());
     }
-    server.start();
-    TLSS::BASE::Thread control(
-        [&] {
-          int signal_number = 0;
-          if (sigwait(&shutdown_signals, &signal_number) == 0) {
-            stopped = server.stop();
-            sampler->finish_and_stop();
-            monitor.finish_and_stop();
-          }
-        },
-        "mainLoop_shutdown_thread");
-    control.start();
-    loop.loop();
-    control.join();
+
+    if (storage_ready) {
+      StorageMonitorRuntime monitor(monitor_config, metrics, sampler, [&server] {
+        server.sample_metrics();
+      });
+      if (monitoring) {
+        if (!sampler->start()) {
+          TLSSLOG::Logger::get("storage_service")->error("Resource sampler failed to start");
+        }
+        if (!monitor.start()) {
+          TLSSLOG::Logger::get("storage_service")
+              ->error("Monitoring disabled: {}", monitor.status().error);
+          sampler->finish_and_stop();
+        }
+      }
+      server.start();
+      TLSS::BASE::Thread control(
+          [&] {
+            int signal_number = 0;
+            if (sigwait(&shutdown_signals, &signal_number) == 0) {
+              stopped = server.stop();
+              sampler->finish_and_stop();
+              monitor.finish_and_stop();
+            }
+          },
+          "mainLoop_shutdown_thread");
+      control.start();
+      loop.loop();
+      control.join();
+    }
   }
   TLSSLOG::Logger::shutdown();
   return stopped ? 0 : 1;

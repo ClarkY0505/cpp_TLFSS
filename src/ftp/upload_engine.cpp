@@ -1,6 +1,7 @@
 #include "ftp/upload_engine.h"
 
 #include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -11,20 +12,21 @@ namespace TLSS::FileStorage {
 std::shared_ptr<UploadTask> UploadEngine::create(TransferContext context, UploadRequest request,
                                                  TransferTask::Notify notify) const {
   return std::shared_ptr<UploadTask>(new UploadTask(std::move(context), std::move(request),
-                                                    _workers, _disk, _metadata, _objects, _stopping,
-                                                    std::move(notify)));
+                                                    _workers, _disk, _metadata, _objects,
+                                                    _coordinator, _stopping, std::move(notify)));
 }
 
 UploadTask::UploadTask(TransferContext context, UploadRequest request, BASE::ThreadPool& workers,
                        Transfer::DiskExecutor& disk, MetadataService& metadata,
-                       ObjectStorageEngine& objects, const std::atomic<bool>& stopping,
-                       Notify notify)
+                       ObjectStorageEngine& objects, ObjectCoordinator& coordinator,
+                       const std::atomic<bool>& stopping, Notify notify)
     : TransferTask(std::move(context), stopping, std::move(notify), TransferPhase::preparing_upload)
     , _request(std::move(request))
     , _workers(workers)
     , _disk(disk)
     , _metadata(metadata)
-    , _objects(objects) {}
+    , _objects(objects)
+    , _coordinator(coordinator) {}
 
 UploadTask::~UploadTask() {
   cancel();
@@ -85,21 +87,24 @@ void UploadTask::on_prepared(StorageContext<std::string> parent, std::string err
   _parent_id = std::move(parent.result);
   const auto weak = weak_from_this();
   auto* objects = &_objects;
+  auto* coordinator = &_coordinator;
   auto* metadata = &_metadata;
   auto factory = [objects, size = _request.size] {
     return objects->create_temporary(size);
   };
-  // Preserve the existing disk-worker execution and publish-before-register ordering.
-  // Only the upload coordinator knows both storage and metadata services.
-  auto finalizer = [objects, metadata, username = _context.username, directory = _context.directory,
-                    name = _request.name, parent_id = _parent_id,
+
+  auto finalizer = [objects, coordinator, metadata, username = _context.username,
+                    directory = _context.directory, name = _request.name, parent_id = _parent_id,
                     metrics = _context.metrics](Transfer::Receiver& receiver) {
+    const auto object_hash = receiver.hash();
+    std::lock_guard<std::mutex> lock(coordinator->mutex_for(object_hash));
     auto object = objects->publish(receiver);
     if (!metadata->commit_upload(username, parent_id, directory, name, object.hash)) {
       throw std::runtime_error("file stored but metadata registration failed");
     }
-    if (metrics)
+    if (metrics) {
       metrics->add(OBSERVABILITY::Metric::upload_committed);
+    }
     return object.hash;
   };
   try {

@@ -1,4 +1,5 @@
 add_library(transfer_lib
+    object_coordinator.cpp
     verify_engine.cpp
     object_storage_engine.cpp
     disk_executor.cpp
@@ -7,10 +8,14 @@ add_library(transfer_lib
 )
 target_link_libraries(transfer_lib PUBLIC common_lib OpenSSL::Crypto)
 
-add_library(metadata_lib metadata_service.cpp metadata_root.cpp)
+add_library(metadata_lib 
+    metadata_service.cpp 
+    metadata_root.cpp 
+    object_repository.cpp)
 target_link_libraries(metadata_lib PUBLIC common_lib)
 
 add_library(ftp_lib
+    object_backfill.cpp
     transfer_task.cpp
     upload_engine.cpp
     download_engine.cpp

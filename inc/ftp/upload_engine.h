@@ -4,6 +4,7 @@
 #include "common/base/tlss_thread_pool.h"
 #include "ftp/async_file_receiver.h"
 #include "ftp/metadata_service.h"
+#include "ftp/object_coordinator.h"
 #include "ftp/object_storage_engine.h"
 #include "ftp/transfer_task.h"
 
@@ -24,7 +25,7 @@ class UploadTask final : public TransferTask, public std::enable_shared_from_thi
   friend class UploadEngine;
   UploadTask(TransferContext context, UploadRequest request, BASE::ThreadPool& workers,
              Transfer::DiskExecutor& disk, MetadataService& metadata, ObjectStorageEngine& objects,
-             const std::atomic<bool>& stopping, Notify notify);
+             ObjectCoordinator& coordinator, const std::atomic<bool>& stopping, Notify notify);
   void on_prepared(StorageContext<std::string> parent, std::string error);
   void on_ready();
   void on_done(std::string hash);
@@ -35,6 +36,7 @@ class UploadTask final : public TransferTask, public std::enable_shared_from_thi
   Transfer::DiskExecutor& _disk;
   MetadataService& _metadata;
   ObjectStorageEngine& _objects;
+  ObjectCoordinator& _coordinator;
   std::string _parent_id;
   std::shared_ptr<Transfer::AsyncReceiver> _writer;
   bool _started = false;
@@ -43,11 +45,13 @@ class UploadTask final : public TransferTask, public std::enable_shared_from_thi
 class UploadEngine {
  public:
   UploadEngine(BASE::ThreadPool& workers, Transfer::DiskExecutor& disk, MetadataService& metadata,
-               ObjectStorageEngine& objects, const std::atomic<bool>& stopping)
+               ObjectStorageEngine& objects, ObjectCoordinator& coordinator,
+               const std::atomic<bool>& stopping)
       : _workers(workers)
       , _disk(disk)
       , _metadata(metadata)
       , _objects(objects)
+      , _coordinator(coordinator)
       , _stopping(stopping) {}
   std::shared_ptr<UploadTask> create(TransferContext context, UploadRequest request,
                                      TransferTask::Notify notify) const;
@@ -57,6 +61,7 @@ class UploadEngine {
   Transfer::DiskExecutor& _disk;
   MetadataService& _metadata;
   ObjectStorageEngine& _objects;
+  ObjectCoordinator& _coordinator;
   const std::atomic<bool>& _stopping;
 };
 }  // namespace TLSS::FileStorage
