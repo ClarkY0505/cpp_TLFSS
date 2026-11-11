@@ -102,6 +102,9 @@ class ObjectStorageEngine {
                           const std::function<bool()>& cancelled = {});
 
   bool verify_object(const std::string& hash) const;
+  // 调用者须持有对应哈希锁，并已确认 DELETING 状态提交成功。
+  // 对象不存在时仍同步目录；其他删除或同步错误继续向上传播。
+  void remove_object(const std::string& hash) const;
 
  private:
   std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;

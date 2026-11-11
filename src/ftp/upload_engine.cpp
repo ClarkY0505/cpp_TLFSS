@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "common/net/event_loop.h"
+#include "ftp/metadata_types.h"
 #include "ftp/service_logger.h"
 
 namespace TLSS::FileStorage {
@@ -99,7 +100,12 @@ void UploadTask::on_prepared(StorageContext<std::string> parent, std::string err
     const auto object_hash = receiver.hash();
     std::lock_guard<std::mutex> lock(coordinator->mutex_for(object_hash));
     auto object = objects->publish(receiver);
-    if (!metadata->commit_upload(username, parent_id, directory, name, object.hash)) {
+    const UploadCommitResult commit_res =
+        metadata->commit_upload(username, parent_id, directory, name, object.hash);
+    if (commit_res == UploadCommitResult::outcome_unknown) {
+      throw std::runtime_error("upload commit outcome unknown");
+    }
+    if (commit_res != UploadCommitResult::committed) {
       throw std::runtime_error("file stored but metadata registration failed");
     }
     if (metrics) {

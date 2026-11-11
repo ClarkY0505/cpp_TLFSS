@@ -15,5 +15,11 @@ struct FileInfo {
   std::string update_at;
 };
 
+enum class UploadCommitResult{
+    committed,
+    failed,
+    outcome_unknown
+};
+
 }  // namespace TLSS::FileStorage
 #endif

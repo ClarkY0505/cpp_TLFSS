@@ -39,9 +39,9 @@ class MetadataService {
                                              const std::string& directory,
                                              const std::string& file_name);
 
-  bool commit_upload(const std::string& username, const std::string& parent_id,
-                     const std::string& directory, const std::string& file_name,
-                     const std::string& hash);
+  UploadCommitResult commit_upload(const std::string& username, const std::string& parent_id,
+                                   const std::string& directory, const std::string& file_name,
+                                   const std::string& hash);
 
   StorageContext<std::string> find_download_hash(const std::string& username,
                                                  const std::string& directory,
@@ -66,7 +66,7 @@ class MetadataService {
                                                     const std::string& file_name);
   bool create_dir_db(const std::string& username, const std::string& current_directory,
                      const std::string& directory);
-  bool commit_upload_db(const std::string& username, const std::string& parent_id,
+  UploadCommitResult commit_upload_db(const std::string& username, const std::string& parent_id,
                         const std::string& directory, const std::string& file_name,
                         const std::string& hash);
 

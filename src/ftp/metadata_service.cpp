@@ -1,4 +1,3 @@
-#include "ftp/metadata_service.h"
 #include <openssl/asn1.h>
 #include <charconv>
 #include <cstring>
@@ -9,7 +8,10 @@
 #include "common/base/base_logger.h"
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
+#include "ftp/metadata_service.h"
+#include "ftp/metadata_types.h"
 #include "ftp/transfer_validation.h"
+#include "ftp/upload_registration.h"
 
 namespace TLSS::FileStorage {
 namespace {
@@ -255,39 +257,43 @@ StorageContext<std::string> MetadataService::prepare_upload(const std::string& u
       });
 }
 
-bool MetadataService::commit_upload_db(const std::string& username, const std::string& parent_id,
-                                       const std::string& directory, const std::string& file_name,
-                                       const std::string& hash) {
+UploadCommitResult MetadataService::commit_upload_db(const std::string& username,
+                                                     const std::string& parent_id,
+                                                     const std::string& directory,
+                                                     const std::string& file_name,
+                                                     const std::string& hash) {
   if (!Transfer::valid_name(file_name) || !Transfer::valid_hash(hash)) {
-    return false;
+    return UploadCommitResult::failed;
   }
 
   const std::string path = directory == "/" ? directory + file_name : directory + "/" + file_name;
   if (path.size() > 1024) {
-    return false;
+    return UploadCommitResult::failed;
   }
 
   auto db = _db_conn_pool.get_connection();
   if (!db) {
-    return false;
+    return UploadCommitResult::failed;
   }
 
+  // 移入commit_upload_transaction中提交
+  // 此次移入是为了限制对象gc的范围
   // 再次验证父目录属于当前用户
   // 唯一索引负责拦截并发同名上传
   // 先查询父目录，再利用查询结果插入一条文件记录
   // 父目录满足条件才会插入
-  const auto result = db->execute_prepared(
-      "INSERT INTO virtual_files "
-      "(file_name, username, parent_id, path, "
-      " file_type, object_hash) "
-      "SELECT ?, p.username, p.id, ?, 'file', ? "
-      "FROM virtual_files p "
-      "WHERE p.id = ? AND p.username = ? "
-      "AND p.path = ? AND p.file_type = 'directory'",
-      {file_name, path, hash, parent_id, username, directory});
+  /* const auto result = db->execute_prepared( */
+  /* "INSERT INTO virtual_files " */
+  /* "(file_name, username, parent_id, path, " */
+  /* " file_type, object_hash) " */
+  /* "SELECT ?, p.username, p.id, ?, 'file', ? " */
+  /* "FROM virtual_files p " */
+  /* "WHERE p.id = ? AND p.username = ? " */
+  /* "AND p.path = ? AND p.file_type = 'directory'", */
+  /* {file_name, path, hash, parent_id, username, directory}); */
 
-  const bool success = result.success && result.affected_rows == 1;
-  return success;
+  /* const bool success = result.success && result.affected_rows == 1; */
+  return commit_upload_transaction(*db, username, parent_id, directory, file_name, hash);
 }
 
 StorageContext<std::string> MetadataService::find_download_hash_db(const std::string& username,
@@ -387,20 +393,26 @@ bool MetadataService::create_dir(const std::string& username, const std::string&
   });
 }
 
-bool MetadataService::commit_upload(const std::string& username, const std::string& parent_id,
-                                    const std::string& directory, const std::string& file_name,
-                                    const std::string& hash) {
-  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, [&]() -> bool {
+UploadCommitResult MetadataService::commit_upload(const std::string& username,
+                                                  const std::string& parent_id,
+                                                  const std::string& directory,
+                                                  const std::string& file_name,
+                                                  const std::string& hash) {
+  UploadCommitResult outcome = UploadCommitResult::failed;
+  auto work = [&]() -> bool {
     if (username.empty() || directory.empty() || !Transfer::valid_name(file_name) ||
         !Transfer::valid_hash(hash)) {
       return false;
     }
     // 上传准备仍直接查数据库；最终登记通过协调锁与版本维护缓存一致性。
-    return _metadata_cache->write(
-        username, directory, [this, &username, &parent_id, &directory, &file_name, &hash] {
-          return commit_upload_db(username, parent_id, directory, file_name, hash);
-        });
-  });
+    auto writer = [this, &username, &parent_id, &directory, &file_name, &hash, &outcome] {
+      outcome = commit_upload_db(username, parent_id, directory, file_name, hash);
+      return outcome == UploadCommitResult::committed;
+    };
+    return _metadata_cache->write(username, directory, writer);
+  };
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+  return outcome;
 }
 
 MetadataCacheStats MetadataService::metadata_cache_stats() const {

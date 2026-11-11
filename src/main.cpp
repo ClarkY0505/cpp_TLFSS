@@ -1,5 +1,6 @@
 #include "common/base/tlss_thread.h"
 #include "ftp/server.h"
+#include "ftp/storage_root_lock.h"
 #include "logger/logger.h"
 #include "observability/storage_monitor_runtime.h"
 
@@ -46,7 +47,7 @@ int main() {
     return 1;
   logger_init();
   bool stopped = false;
-  {
+  try {
     using namespace TLSS::OBSERVABILITY;
     auto metrics = std::make_shared<StorageMetrics>();
     auto cache = std::make_shared<TLSS::FileStorage::MetadataCache>();
@@ -74,6 +75,7 @@ int main() {
     const auto storage_root = std::filesystem::absolute(
         configured_root && *configured_root ? std::filesystem::path(configured_root)
                                             : std::filesystem::path("./data/objects"));
+    TLSS::FileStorage::StorageRootLock root_lock(storage_root);
     auto sampler = std::make_shared<SystemResourceSampler>(
         SystemResourceSamplerConfig{storage_root, interval, "/proc"});
     TLSS::NET::EventLoop loop;
@@ -120,6 +122,8 @@ int main() {
       loop.loop();
       control.join();
     }
+  } catch (const std::exception& error) {
+    TLSSLOG::Logger::get("storage_service")->error("Storage service failed: {}", error.what());
   }
   TLSSLOG::Logger::shutdown();
   return stopped ? 0 : 1;

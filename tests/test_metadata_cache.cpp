@@ -26,6 +26,8 @@ struct Database {
   std::atomic<bool> fail_query{false};
   std::atomic<bool> fail_write{false};
   std::atomic<bool> throw_write{false};
+  // 模拟写入已完成，但 COMMIT 确认响应丢失。
+  std::atomic<bool> unknown_commit{false};
   std::atomic<bool> created_missing{false};
   std::function<void(const std::string&)> list_ready;
 } database;
@@ -44,6 +46,14 @@ DbQueryResult query(const std::string& sql, const std::vector<DbValue>& params) 
   ++database.queries;
   if (database.fail_query.exchange(false)) {
     return {};
+  }
+
+  // 上传登记事务中的用户锁和对象查找。
+  if (sql.find("SELECT id FROM users ") == 0) {
+    return {true, {{"1"}}};
+  }
+  if (sql.find("SELECT state, unreferenced_at") == 0) {
+    return {true, {}};
   }
 
   if (sql.find("select file_name") != std::string::npos) {
@@ -135,18 +145,64 @@ void DbConnectionDeleter::operator()(DbConnection* connection) const noexcept {
   delete connection;
 }
 DbConnection::DbConnection()
-    : _conn(nullptr) {}
+    : _conn(nullptr)
+    , _connected(false)
+    , _transaction_active(false) {}
 DbConnection::~DbConnection() = default;
 DbQueryResult DbConnection::query_prepared(const std::string& sql,
                                            const std::vector<DbValue>& params) {
+  if (sql.find("FOR UPDATE") != std::string::npos) {
+    check(_transaction_active, "locking query ran outside transaction");
+  }
   return ::query(sql, params);
 }
 bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue>&) {
   return write();
 }
-DbExecuteResult DbConnection::execute_prepared(const std::string&, const std::vector<DbValue>&) {
-  const bool success = write();
-  return {success, success ? 0U : 1U, success ? 1U : 0U, 1};
+DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
+                                               const std::vector<DbValue>&) {
+  check(_transaction_active, "upload write ran outside transaction");
+  // 对象表写入不改变目录内容，不能增加虚拟目录的数据版本。
+  if (sql.find("INSERT INTO storage_objects ") == 0 ||
+      sql.find("UPDATE storage_objects ") == 0) {
+    return {true, 0, 1, 0};
+  }
+  if (sql.find("INSERT INTO virtual_files ") == 0) {
+    const bool success = write();
+    return {success, success ? 0U : 1U, success ? 1U : 0U, 1};
+  }
+  throw std::runtime_error("unexpected upload write: " + sql);
+}
+
+// 此替代层关注缓存行为，事务原子性由独立上传登记测试覆盖。
+DbTransaction::DbTransaction(DbConnection& connection) noexcept
+    : connection_(connection)
+    , active_(!connection._transaction_active) {
+  if (active_) {
+    connection_._transaction_active = true;
+  }
+}
+
+DbTransaction::~DbTransaction() noexcept {
+  rollback();
+}
+
+DbCommitStatus DbTransaction::commit() noexcept {
+  if (!active_) {
+    return DbCommitStatus::k_not_active;
+  }
+  connection_._transaction_active = false;
+  active_ = false;
+  return database.unknown_commit.exchange(false) ? DbCommitStatus::k_outcome_unknown
+                                                : DbCommitStatus::k_committed;
+}
+
+bool DbTransaction::rollback() noexcept {
+  if (active_) {
+    connection_._transaction_active = false;
+    active_ = false;
+  }
+  return true;
 }
 }  // namespace TLSS::BASE
 
@@ -246,7 +302,8 @@ void test_writes(StorageEngine& engine) {
   engine.move_dir_by_current_dir("alice", "/", "docs");
   check(database.queries.load() == before, "mkdir invalidated hot cd paths");
 
-  check(engine.commit_upload("alice", "42", "/", "new.txt", std::string(64, 'a')),
+  check(engine.commit_upload("alice", "42", "/", "new.txt", std::string(64, 'a')) ==
+            UploadCommitResult::committed,
         "upload commit failed");
   check(engine.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#2",
         "upload did not invalidate listing");
@@ -261,6 +318,49 @@ void test_writes(StorageEngine& engine) {
   engine.prepare_upload("alice", "/", "another.txt");
   engine.prepare_upload("alice", "/", "another.txt");
   check(database.queries.load() == before + 2, "upload preflight must still query MySQL");
+}
+
+void test_unknown_commit(StorageEngine& engine) {
+  // 先填充缓存，并确认后续读取不会再次查询数据库。
+  const auto original_list = engine.find_file_by_current_dir("alice", "/");
+  const auto original_hash = engine.find_download_hash("alice", "/", "a.txt");
+  check(original_list.success && !original_list.result.empty(),
+        "initial directory listing failed");
+  check(original_hash.success, "initial download lookup failed");
+
+  int before = database.queries.load();
+  engine.find_file_by_current_dir("alice", "/");
+  engine.find_download_hash("alice", "/", "a.txt");
+  check(database.queries.load() == before, "initial metadata was not cached");
+
+  // 目录内容已变化，但提交响应未知，不能把三态结果压缩成失败或成功。
+  database.unknown_commit.store(true);
+  const auto outcome =
+      engine.commit_upload("alice", "42", "/", "uncertain.txt", std::string(64, 'a'));
+  check(outcome == UploadCommitResult::outcome_unknown, "unknown commit outcome was lost");
+  check(database.revision.load() == 1, "unknown commit retried or skipped the file write");
+
+  // 目录列表必须失效，重新查询目录 ID 和列表，共两次 SQL。
+  before = database.queries.load();
+  const auto refreshed_list = engine.find_file_by_current_dir("alice", "/");
+  check(refreshed_list.success && !refreshed_list.result.empty() &&
+            refreshed_list.result.front().file_name == "alice@/#1",
+        "unknown commit left a stale directory listing");
+  check(database.queries.load() == before + 2,
+        "unknown commit did not reload the directory listing");
+
+  // 同目录已有的下载映射也必须重新加载。
+  before = database.queries.load();
+  const auto refreshed_hash = engine.find_download_hash("alice", "/", "a.txt");
+  check(refreshed_hash.success, "download lookup failed after unknown commit");
+  check(database.queries.load() == before + 1,
+        "unknown commit left a stale download cache");
+
+  // 重新加载后仍然可以正常命中缓存。
+  before = database.queries.load();
+  engine.find_file_by_current_dir("alice", "/");
+  engine.find_download_hash("alice", "/", "a.txt");
+  check(database.queries.load() == before, "refreshed metadata was not cached");
 }
 
 void test_failed_write(StorageEngine& engine) {
@@ -524,6 +624,8 @@ int main(int argc, char** argv) {
       test_writes(engine);
     else if (scenario == "failed_write")
       test_failed_write(engine);
+    else if (scenario == "unknown_commit")
+      test_unknown_commit(engine);
     else if (scenario == "concurrent")
       test_concurrent(engine);
     else if (scenario == "stale_fill")

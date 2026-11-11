@@ -78,14 +78,16 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _user_repository(*_db_conn_pool)
     , _auth_service(_user_repository)
     , _metadata_service(*_db_conn_pool, std::move(cache))
+    , _object_gc(*_db_conn_pool, _object_storage, _object_coordinator)
     , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage,
                      _object_coordinator, _stopping)
     , _download_engine(_disk_executor, _metadata_service, _object_storage, _stopping) {
   _metadata_service.set_metrics(_metrics);
   _object_storage.set_metrics(_metrics);
   _db_conn_pool->set_metrics(_metrics);
-  if (_metrics)
+  if (_metrics) {
     _metrics->set(OBSERVABILITY::Metric::service_state, 1);
+  }
   _tcp_server.set_connection_cb(
       std::bind(&StorageService::on_connection, this, std::placeholders::_1));
 
@@ -1088,16 +1090,27 @@ bool StorageService::prepare_storage() {
   if (_started) {
     return false;
   }
+  // 这里借用连接池的连接之后，短暂持有连接
+  // 用作用域提前归还
+  {
+    // 1. 借用连接、创建 ObjectRepository
+    auto connection = _db_conn_pool->get_connection();
+    if (!connection) {
+      return false;
+    }
+    ObjectRepository repository(*connection);
 
-  auto connection = _db_conn_pool->get_connection();
-  if (!connection) {
-    return false;
+    // 2. 调用 repository.check_object_table()
+    if (!repository.check_object_table()) {
+      return false;
+    }
+    ObjectBackfill backfill(repository, _object_storage, _object_coordinator);
+
+    if (!backfill.register_referenced_objects()) {
+      return false;
+    }
   }
-
-  ObjectRepository repository(*connection);
-  ObjectBackfill backfill(repository, _object_storage, _object_coordinator);
-
-  return backfill.register_referenced_objects();
+  return _object_gc.recover_deleting(std::chrono::minutes{10});
 }
 
 }  // namespace TLSS::FileStorage

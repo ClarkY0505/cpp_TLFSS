@@ -309,4 +309,34 @@ bool ObjectStorageEngine::verify_object(const std::string& hash) const {
   return Transfer::hash_file(source->file.fd) == hash;
 }
 
+void ObjectStorageEngine::remove_object(const std::string& hash) const {
+  if (!Transfer::valid_hash(hash)) {
+    throw std::invalid_argument("invalid object hash");
+  }
+
+  const auto root = Transfer::object_root();
+  const auto path = root / hash;
+  // 调用 ::unlink(path.c_str())：
+  // - 返回 0：删除成功。
+  // - 返回 -1 且 errno == EINTR：重试。
+  // - 返回 -1 且 errno == ENOENT：对象已经不存在，继续执行。
+  // - 其他错误：调用 Transfer::system_failure("unlink object") 抛出异常
+  // 删除对象，被信号中断时重试。
+  int result;
+  do {
+    result = ::unlink(path.c_str());
+  } while (result == -1 && errno == EINTR);
+
+  // 对象已经不存在时允许继续；其他错误抛出异常。
+  if (result == -1 && errno != ENOENT) {
+    Transfer::system_failure("unlink object");
+  }
+
+  // 无论本次删除成功，还是对象已经不存在，都同步目录。
+  Transfer::sync_directory(root);
+
+  // 执行到函数末尾，正常返回。
+  // 任一步抛出异常，调用者都不能继续清理数据库对象记录。
+}
+
 }  // namespace TLSS::FileStorage

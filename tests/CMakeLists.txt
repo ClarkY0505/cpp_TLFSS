@@ -6,6 +6,31 @@ add_dependencies(test_storage_engines prepare_runtime_directories)
 target_link_libraries(test_storage_engines PRIVATE transfer_lib)
 add_test(NAME storage_engines_test COMMAND test_storage_engines)
 
+# 真实文件系统操作；使用链接器包装注入 unlink/fsync 错误。
+add_executable(test_object_removal test_object_removal.cpp)
+add_dependencies(test_object_removal prepare_runtime_directories)
+target_link_libraries(test_object_removal PRIVATE transfer_lib)
+target_link_options(test_object_removal PRIVATE
+    "-Wl,--wrap=unlink"
+    "-Wl,--wrap=fsync"
+)
+# 每个场景独立进程，避免 object_root() 的静态缓存影响目录配置。
+foreach(scenario IN ITEMS normal missing invalid_hash directory symlink
+        unlink_retry unlink_error sync_retry sync_error)
+    add_test(NAME object_removal_${scenario} COMMAND test_object_removal ${scenario})
+    set_tests_properties(object_removal_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 使用真实目录和文件锁验证独占访问，不启动存储服务或连接数据库。
+add_executable(test_storage_root_lock test_storage_root_lock.cpp)
+add_dependencies(test_storage_root_lock prepare_runtime_directories)
+target_link_libraries(test_storage_root_lock PRIVATE transfer_lib)
+foreach(scenario IN ITEMS exclusive independent exception invalid_root symlink invalid_lock
+        process_exclusive process_exit)
+    add_test(NAME storage_root_lock_${scenario} COMMAND test_storage_root_lock ${scenario})
+    set_tests_properties(storage_root_lock_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
 add_executable(test_signup_transaction_boundary
     test_signup_transaction_boundary.cpp
     ${PROJECT_SOURCE_DIR}/src/auth/user_repository.cpp
@@ -36,10 +61,13 @@ set_tests_properties(thread_pool_async_test PROPERTIES TIMEOUT 15)
 add_executable(test_metadata_cache
     test_metadata_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
+    # 元数据登记现在依赖对象仓储与显式上传事务。
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
 )
 add_dependencies(test_metadata_cache prepare_runtime_directories)
 target_link_libraries(test_metadata_cache PRIVATE common_lib OpenSSL::Crypto)
-foreach(scenario IN ITEMS list cd download failures writes failed_write concurrent stale_fill
+foreach(scenario IN ITEMS list cd download failures writes failed_write unknown_commit concurrent stale_fill
         local_invalidation partition_concurrency ttl large statistics disabled arc shared config)
     add_test(NAME metadata_cache_${scenario} COMMAND test_metadata_cache ${scenario})
     set_tests_properties(metadata_cache_${scenario} PROPERTIES TIMEOUT 15)
@@ -57,6 +85,10 @@ add_executable(test_ftp_transfer
     ${PROJECT_SOURCE_DIR}/src/ftp/client.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_backfill.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+    # 文件登记与对象登记现在共同调用上传事务实现。
+    ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_garbage_collector.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_transaction.cpp
 )
 add_dependencies(test_ftp_transfer prepare_runtime_directories)
 target_compile_options(test_ftp_transfer PRIVATE -fno-access-control)
@@ -65,8 +97,12 @@ foreach(scenario IN ITEMS
         commit_hash upload download error_frame busy_reply receive_error
         control_limit source_type source_fifo upload_chunked client_download shutdown_wait
         cold_send source_cancel stale_read source_eof client_upload empty_send reader_error legacy_send
-        metadata_failure stale_prepare upload_cancel task_isolation
-        metrics_auth metrics_snapshots metrics_stale_commit metrics_pool metrics_storage)
+        metadata_failure metadata_unknown stale_prepare upload_cancel task_isolation
+        metrics_auth metrics_snapshots metrics_stale_commit metrics_pool metrics_storage
+        # 启动准备：对象表缺失，以及表存在但历史清单为空。
+        prepare_missing_table prepare_empty_list
+        prepare_recovery_query_failure prepare_recovery_invalid_hash prepare_recovery_skip
+        prepare_recovery_resume prepare_recovery_referenced prepare_recovery_unknown)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
@@ -135,6 +171,71 @@ add_dependencies(test_object_backfill prepare_runtime_directories)
 target_link_libraries(test_object_backfill PRIVATE transfer_lib)
 add_test(NAME object_backfill_test COMMAND test_object_backfill)
 set_tests_properties(object_backfill_test PROPERTIES TIMEOUT 15)
+
+# 使用真实仓储；测试文件替代连接和事务，不访问真实 MySQL。
+add_executable(test_object_reference
+    test_object_reference.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_object_reference prepare_runtime_directories)
+target_link_libraries(test_object_reference PRIVATE common_lib)
+add_test(NAME object_reference_test COMMAND test_object_reference)
+set_tests_properties(object_reference_test PROPERTIES TIMEOUT 15)
+
+# 使用真实对象仓储和模拟数据库边界，不连接 MySQL。
+add_executable(test_object_gc_repository
+    test_object_gc_repository.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_object_gc_repository prepare_runtime_directories)
+target_link_libraries(test_object_gc_repository PRIVATE common_lib)
+add_test(NAME object_gc_repository_test COMMAND test_object_gc_repository)
+set_tests_properties(object_gc_repository_test PROPERTIES TIMEOUT 15)
+
+# 使用真实 GC 准备、收尾事务及仓储，替换数据库连接和事务边界。
+add_executable(test_object_gc_transaction
+    test_object_gc_transaction.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_transaction.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_object_gc_transaction prepare_runtime_directories)
+target_link_libraries(test_object_gc_transaction PRIVATE common_lib)
+foreach(scenario IN ITEMS invalid_arguments begin_and_lookup malformed_results references
+        unreferenced write_failures commit_results exceptions
+        finalize_invalid_arguments finalize_lookup finalize_malformed_results finalize_states
+        finalize_references finalize_delete_failures finalize_commit_results finalize_exceptions)
+    add_test(NAME object_gc_transaction_${scenario} COMMAND test_object_gc_transaction ${scenario})
+    set_tests_properties(object_gc_transaction_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 单对象 GC 编排使用真实调用流程和协调器，边界替代实现不访问 MySQL 或磁盘。
+# 不链接 ftp_lib/transfer_lib，避免替代事务、存储函数与生产定义重复。
+add_executable(test_object_garbage_collector
+    test_object_garbage_collector.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_garbage_collector.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_object_garbage_collector prepare_runtime_directories)
+target_link_libraries(test_object_garbage_collector PRIVATE common_lib Threads::Threads)
+foreach(scenario IN ITEMS invalid_arguments connection_failure prepare_results finalize_results
+        exceptions hash_lock recovery_invalid_arguments recovery_listing recovery_malformed
+        recovery_multiple recovery_collection_failure recovery_unknown recovery_exceptions)
+    add_test(NAME object_garbage_collector_${scenario}
+        COMMAND test_object_garbage_collector ${scenario})
+    set_tests_properties(object_garbage_collector_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 使用真实登记事务和对象仓储，数据库连接及事务边界由测试替代。
+add_executable(test_upload_registration
+    test_upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_upload_registration prepare_runtime_directories)
+target_link_libraries(test_upload_registration PRIVATE common_lib)
+add_test(NAME upload_registration_test COMMAND test_upload_registration)
+set_tests_properties(upload_registration_test PROPERTIES TIMEOUT 15)
 
 foreach(scenario IN ITEMS thresholds schema lifecycle resources transport configuration self_stop)
     add_test(NAME storage_monitor_${scenario} COMMAND test_storage_monitor_runtime ${scenario})

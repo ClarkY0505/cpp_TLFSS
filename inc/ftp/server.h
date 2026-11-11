@@ -12,6 +12,7 @@
 #include "ftp/metadata_service.h"
 #include "ftp/object_coordinator.h"
 #include "ftp/upload_engine.h"
+#include "ftp/object_garbage_collector.h"
 
 #include <atomic>
 #include <chrono>
@@ -115,6 +116,7 @@ class StorageService {
   MetadataService _metadata_service;
   ObjectStorageEngine _object_storage;
   ObjectCoordinator _object_coordinator;
+  ObjectGarbageCollector _object_gc;
   UploadEngine _upload_engine;
   DownloadEngine _download_engine;
 

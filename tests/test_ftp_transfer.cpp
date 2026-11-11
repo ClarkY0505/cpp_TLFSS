@@ -64,6 +64,23 @@ namespace {
 std::atomic<int> inserts{0};
 std::atomic<int> auth_status{2};
 std::atomic<int> signup_status{4};
+// 上传事务测试：模拟提交响应丢失，并检查没有重试或补发回滚。
+std::atomic<bool> upload_outcome_unknown{false};
+std::atomic<int> upload_commits{0};
+std::atomic<int> upload_rollbacks{0};
+// 启动准备测试的数据库预检结果及查询计数。
+std::atomic<bool> object_table_available{true};
+std::atomic<int> object_table_checks{0};
+std::atomic<int> referenced_list_queries{0};
+// 恢复入口模拟：0 为空清单，1 为查询失败，2 为非法哈希，3 为单个候选。
+std::atomic<int> deleting_list_mode{0};
+std::atomic<int> deleting_list_queries{0};
+std::atomic<bool> startup_deleting_record{false};
+std::atomic<bool> startup_object_referenced{false};
+std::atomic<int> startup_object_deletes{0};
+std::atomic<bool> single_connection_only{false};
+std::atomic<int> borrowed_connections{0};
+std::atomic<int> peak_borrowed_connections{0};
 struct CommitGate {
   std::mutex mutex;
   std::condition_variable changed;
@@ -119,7 +136,15 @@ DbConnectionPool* DbConnectionPool::get_connection_pool() {
   return &pool;
 }
 DbConnectionHandle DbConnectionPool::get_connection() {
-  return DbConnectionHandle(new DbConnection, DbConnectionDeleter{});
+  // 启动测试模拟只有一条连接：作用域未归还连接时，后续借用立即失败。
+  if (single_connection_only.load() && borrowed_connections.load() != 0)
+    return DbConnectionHandle(nullptr, DbConnectionDeleter{});
+  auto* connection = new DbConnection;
+  const int borrowed = borrowed_connections.fetch_add(1) + 1;
+  int peak = peak_borrowed_connections.load();
+  while (peak < borrowed && !peak_borrowed_connections.compare_exchange_weak(peak, borrowed)) {
+  }
+  return DbConnectionHandle(connection, DbConnectionDeleter{});
 }
 bool DbConnectionPool::shutdown(std::chrono::milliseconds) {
   if (finalizer_active.load())
@@ -128,12 +153,58 @@ bool DbConnectionPool::shutdown(std::chrono::milliseconds) {
   return true;
 }
 void DbConnectionDeleter::operator()(DbConnection* connection) const noexcept {
+  if (connection)
+    --borrowed_connections;
   delete connection;
 }
 DbConnection::DbConnection()
-    : _conn(nullptr) {}
+    : _conn(nullptr)
+    , _connected(false)
+    , _transaction_active(false) {}
 DbConnection::~DbConnection() = default;
 DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::vector<DbValue>&) {
+  // LIMIT 0 预检成功时没有结果行，不能据此判断对象表不可用。
+  if (sql.find("SELECT object_hash, state, unreferenced_at") == 0) {
+    ++object_table_checks;
+    return {object_table_available.load(), {}};
+  }
+  // 模拟没有任何历史文件引用，避免访问真实 MySQL。
+  if (sql.find("SELECT DISTINCT object_hash") == 0) {
+    ++referenced_list_queries;
+    return {true, {}};
+  }
+  if (sql.find("SELECT object_hash FROM storage_objects ") == 0) {
+    ++deleting_list_queries;
+    check(referenced_list_queries.load() == 1,
+          "deleting recovery ran before historical backfill");
+    check(borrowed_connections.load() == 1,
+          "deleting list query retained a previous connection");
+    const int mode = deleting_list_mode.load();
+    if (mode == 1)
+      return {false, {}};
+    if (mode == 2)
+      return {true, {{"invalid"}}};
+    if (mode == 3)
+      return {true, {{abc_hash}}};
+    return {true, {}};
+  }
+  // 新上传登记先锁用户，再在同一事务中准备对象记录。
+  if (sql.find("SELECT id FROM users ") == 0) {
+    check(_transaction_active, "user lookup ran outside transaction");
+    return {true, {{"1"}}};
+  }
+  if (sql.find("SELECT state, unreferenced_at") == 0) {
+    check(_transaction_active, "object lookup ran outside transaction");
+    if (startup_deleting_record.load())
+      return {true, {{"DELETING", "2026-11-11 10:00:00.000000"}}};
+    return {true, {}};
+  }
+  if (sql.find("SELECT id FROM virtual_files WHERE object_hash = ? ") == 0) {
+    check(_transaction_active, "reference lookup ran outside transaction");
+    if (startup_object_referenced.load())
+      return {true, {{"42"}}};
+    return {true, {}};
+  }
   if (sql.find("f.object_hash") != std::string::npos) {
     return {true, {{abc_hash}}};
   }
@@ -142,12 +213,62 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
 bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue>&) {
   return true;
 }
-DbExecuteResult DbConnection::execute_prepared(const std::string&, const std::vector<DbValue>&) {
-  ++inserts;
-  commit_gate.wait();
-  if (fail_metadata_insert.load())
-    return {};
-  return {true, 0, 1, 1};
+DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
+                                               const std::vector<DbValue>&) {
+  check(_transaction_active, "upload write ran outside transaction");
+
+  // 保留 inserts 的原有含义：只统计文件登记，不混入对象表写入。
+  if (sql.find("INSERT INTO storage_objects ") == 0 ||
+      sql.find("UPDATE storage_objects ") == 0) {
+    return {true, 0, 1, 0};
+  }
+  if (sql.find("INSERT INTO virtual_files ") == 0) {
+    ++inserts;
+    commit_gate.wait();
+    if (fail_metadata_insert.load())
+      return {};
+    return {true, 0, 1, 1};
+  }
+  if (sql.find("DELETE FROM storage_objects ") == 0) {
+    check(startup_deleting_record.load(), "recovery deleted an absent object record");
+    ++startup_object_deletes;
+    startup_deleting_record.store(false);
+    return {true, 0, 1, 0};
+  }
+  throw std::runtime_error("unexpected upload write: " + sql);
+}
+
+// 每条借用连接独立维护事务状态，兼容并发传输场景。
+DbTransaction::DbTransaction(DbConnection& connection) noexcept
+    : connection_(connection)
+    , active_(!connection._transaction_active) {
+  if (active_)
+    connection_._transaction_active = true;
+}
+
+DbTransaction::~DbTransaction() noexcept {
+  rollback();
+}
+
+DbCommitStatus DbTransaction::commit() noexcept {
+  if (!active_)
+    return DbCommitStatus::k_not_active;
+
+  ++upload_commits;
+  connection_._transaction_active = false;
+  active_ = false;
+  // 未知结果仍结束客户端事务句柄，不能误报回滚已经撤销提交。
+  return upload_outcome_unknown.load() ? DbCommitStatus::k_outcome_unknown
+                                       : DbCommitStatus::k_committed;
+}
+
+bool DbTransaction::rollback() noexcept {
+  if (active_) {
+    ++upload_rollbacks;
+    connection_._transaction_active = false;
+    active_ = false;
+  }
+  return true;
 }
 }  // namespace TLSS::BASE
 
@@ -733,6 +854,78 @@ void check_shutdown_waits(const std::string& directory) {
 }
 
 void run(const std::string& scenario, const std::string& directory) {
+  if (scenario.find("prepare_") == 0) {
+    check(scenario == "prepare_missing_table" || scenario == "prepare_empty_list" ||
+              scenario == "prepare_recovery_query_failure" ||
+              scenario == "prepare_recovery_invalid_hash" || scenario == "prepare_recovery_skip" ||
+              scenario == "prepare_recovery_resume" || scenario == "prepare_recovery_referenced" ||
+              scenario == "prepare_recovery_unknown",
+          "unknown preparation scenario");
+    const bool table_exists = scenario != "prepare_missing_table";
+    const bool resume = scenario == "prepare_recovery_resume";
+    const bool referenced = scenario == "prepare_recovery_referenced";
+    const bool unknown = scenario == "prepare_recovery_unknown";
+    const bool has_record = resume || referenced || unknown;
+    const bool expected_ready = table_exists &&
+        scenario != "prepare_recovery_query_failure" &&
+        scenario != "prepare_recovery_invalid_hash" && !referenced && !unknown;
+
+    object_table_available.store(table_exists);
+    object_table_checks.store(0);
+    referenced_list_queries.store(0);
+    deleting_list_queries.store(0);
+    deleting_list_mode.store(scenario == "prepare_recovery_query_failure" ? 1 :
+        scenario == "prepare_recovery_invalid_hash" ? 2 :
+        (has_record || scenario == "prepare_recovery_skip") ? 3 : 0);
+    startup_deleting_record.store(has_record);
+    startup_object_referenced.store(referenced);
+    startup_object_deletes.store(0);
+    upload_outcome_unknown.store(unknown);
+    upload_commits.store(0);
+    single_connection_only.store(true);
+    peak_borrowed_connections.store(0);
+    inserts.store(0);
+
+    if (has_record) {
+      std::ofstream output(directory + "/" + abc_hash);
+      output << "abc";
+      output.close();
+      check(output.good(), "create recovery object failed");
+    }
+
+    // 只执行准备阶段，不启动服务；端口 0 避免占用固定业务端口。
+    EventLoop loop;
+    StorageService service(&loop, InetAddress(0), "prepare-regression", 0, 0, 32);
+    const bool ready = service.prepare_storage();
+
+    check(ready == expected_ready,
+          "storage preparation ignored a backfill or recovery result");
+    check(object_table_checks.load() == 1,
+          "object table was not checked exactly once");
+
+    // 表缺失时立即停止；表存在时允许成功查询到空清单。
+    check(referenced_list_queries.load() == (table_exists ? 1 : 0),
+          "historical list query ran at the wrong preparation stage");
+    check(deleting_list_queries.load() == (table_exists ? 1 : 0),
+          "deleting list query ran at the wrong preparation stage");
+    check(borrowed_connections.load() == 0 && peak_borrowed_connections.load() == 1,
+          "preparation leaked a connection or borrowed before returning the previous one");
+    check(inserts.load() == 0,
+          "empty-list preparation unexpectedly wrote metadata");
+    check(startup_object_deletes.load() == (resume ? 1 : 0),
+          "startup recovery performed an unexpected catalog deletion");
+    if (has_record) {
+      check(std::filesystem::exists(directory + "/" + abc_hash) == !resume,
+            "startup recovery removed or retained the wrong disk object");
+      check(startup_deleting_record.load() == !resume,
+            "startup recovery changed the wrong catalog state");
+      check(upload_commits.load() == (resume ? 2 : unknown ? 1 : 0),
+            "startup recovery committed or retried unexpectedly");
+    }
+    check(!service._started,
+          "storage preparation unexpectedly started the service");
+    return;
+  }
   if (scenario == "metrics_pool") {
     BASE::ThreadPool pool("metrics-regression");
     pool.set_max_queue_size(1);
@@ -834,10 +1027,12 @@ void run(const std::string& scenario, const std::string& directory) {
   }
   if (scenario == "commit_hash") {
     StorageEngine engine(*BASE::DbConnectionPool::get_connection_pool());
-    check(engine.commit_upload("test_user", "42", "/", "file.bin", abc_hash),
+    check(engine.commit_upload("test_user", "42", "/", "file.bin", abc_hash) ==
+              UploadCommitResult::committed,
           "valid SHA-256 rejected before INSERT");
     check(inserts == 1, "valid metadata did not reach INSERT");
-    check(!engine.commit_upload("test_user", "42", "/", "bad.bin", "bad"),
+    check(engine.commit_upload("test_user", "42", "/", "bad.bin", "bad") ==
+              UploadCommitResult::failed,
           "invalid SHA-256 accepted");
     check(inserts == 1, "invalid metadata reached INSERT");
     return;
@@ -987,6 +1182,28 @@ void run(const std::string& scenario, const std::string& directory) {
     std::ifstream stored(directory + "/" + abc_hash, std::ios::binary);
     std::string bytes((std::istreambuf_iterator<char>(stored)), {});
     check(bytes == "abc", "published object content differs");
+  } else if (scenario == "metadata_unknown") {
+    // 验证三态结果经过缓存包装和真实上传回调后，仍不会误报成功。
+    upload_outcome_unknown.store(true);
+    upload_commits.store(0);
+    upload_rollbacks.store(0);
+
+    fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
+    fixture.await_wire("\n@TLSS UREADY\n");
+    fixture.receive("abc");
+    const auto response = fixture.await_wire("upload commit outcome unknown");
+
+    check(response.find("UOK") == std::string::npos && !fixture.session->transfer,
+          "unknown commit outcome completed the upload");
+    check(std::filesystem::exists(directory + "/" + abc_hash),
+          "unknown commit outcome deleted the object");
+    check(inserts == 1 && upload_commits.load() == 1,
+          "unknown commit outcome retried registration");
+    check(upload_rollbacks.load() == 0,
+          "unknown commit outcome attempted rollback");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::upload_committed) == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0,
+          "unknown commit outcome was counted as committed or remained active");
   } else if (scenario == "metadata_failure") {
     fail_metadata_insert.store(true);
     fixture.receive("@TLSS UPLOAD 3 \"file.bin\"\n");
