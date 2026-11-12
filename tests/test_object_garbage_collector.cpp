@@ -36,6 +36,7 @@ struct Configuration {
     Stage throw_at = Stage::none;
     std::string throw_hash;
     DbQueryResult deleting_result{true, {}};
+    DbQueryResult candidate_result{true, {}};
     ObjectGcPrepareResult prepare_result = ObjectGcPrepareResult::ready_to_delete;
     ObjectGcFinalizeResult finalize_result = ObjectGcFinalizeResult::completed;
     std::map<std::string, ObjectGcPrepareResult> prepare_overrides;
@@ -51,6 +52,8 @@ struct State {
     ObjectCoordinator* coordinator = nullptr;
     DbConnection* borrowed_connection = nullptr;
     bool recovering = false;
+    bool batching = false;
+    std::string expected_cursor;
     bool listing_connection = false;
     bool list_returned = false;
     std::vector<std::string> expected_hashes;
@@ -182,11 +185,11 @@ DbConnectionHandle DbConnectionPool::get_connection() {
     // 模拟仅有一条可借用连接，第二次借用前必须先归还上一条。
     check(state.borrowed_connection == nullptr, "collector borrowed multiple connections");
     ++state.borrow_attempts;
-    state.listing_connection = state.recovering && !state.list_returned;
+    state.listing_connection = (state.recovering || state.batching) && !state.list_returned;
     if (state.listing_connection) {
         enter_listing_stage(Stage::borrow, "list_borrow");
     } else {
-        if (state.recovering) {
+        if (state.recovering || state.batching) {
             check(state.next_hash < state.expected_hashes.size(),
                   "recovery attempted an unexpected candidate");
             state.expected_hash = state.expected_hashes[state.next_hash++];
@@ -236,19 +239,31 @@ DbConnection::~DbConnection() {
     ++state.destroyed;
 }
 
-// 使用真实 ObjectRepository 构造候选查询，替代连接只接受恢复清单 SQL。
+// 使用真实 ObjectRepository 构造恢复或分批候选查询。
 DbQueryResult DbConnection::query_prepared(
     const std::string& sql, const std::vector<DbValue>& params) {
     check_connection(*this);
     check(state.listing_connection, "candidate query used an object-processing connection");
-    check(params.empty(), "candidate query unexpectedly bound parameters");
     check(sql.find("SELECT object_hash FROM storage_objects ") == 0 &&
-              sql.find("WHERE state = 'DELETING' ") != std::string::npos &&
               sql.find("ORDER BY object_hash") != std::string::npos &&
               sql.find("FOR UPDATE") == std::string::npos,
           "invalid candidate query or unexpected locking read");
+    if (state.batching) {
+        check(params == std::vector<DbValue>{state.expected_cursor},
+              "batch query bound the wrong cursor");
+        check(sql.find("WHERE object_hash > ? ") != std::string::npos &&
+                  sql.find("LIMIT 128") != std::string::npos &&
+                  sql.find("WHERE state") == std::string::npos &&
+                  sql.find("AND state") == std::string::npos,
+              "batch query omitted cursor/limit or excluded retryable object states");
+    } else {
+        check(params.empty(), "recovery query unexpectedly bound parameters");
+        check(sql.find("WHERE state = 'DELETING' ") != std::string::npos,
+              "recovery query did not restrict deletion state");
+    }
     enter_listing_stage(Stage::listing, "list");
-    return state.configuration.deleting_result;
+    return state.batching ? state.configuration.candidate_result
+                          : state.configuration.deleting_result;
 }
 
 DbExecuteResult DbConnection::execute_prepared(
@@ -600,6 +615,238 @@ void test_recovery_exceptions() {
     }
 }
 
+// 批处理复用恢复测试的单连接替代池：列清单的连接未归还就再次借用会直接失败。
+// 记录输入游标和输出游标，验证每种退出路径的进度语义。
+void run_batch(const std::string& name, Configuration configuration, bool expected_result,
+               const std::string& initial_cursor, const std::string& expected_cursor,
+               const std::vector<std::string>& expected_events,
+               const std::vector<std::string>& expected_hashes = {},
+               bool expect_exception = false, Seconds grace_period = Seconds{600}) {
+    ObjectStorageEngine objects;
+    ObjectCoordinator coordinator;
+    auto* pool = DbConnectionPool::get_connection_pool();
+    state = {};
+    state.configuration = configuration;
+    state.pool = pool;
+    state.objects = &objects;
+    state.coordinator = &coordinator;
+    state.batching = true;
+    state.expected_hash = object_hash;
+    state.expected_hashes = expected_hashes;
+    state.expected_cursor = initial_cursor;
+    state.expected_grace = grace_period;
+
+    ObjectGarbageCollector collector(*pool, objects, coordinator);
+    std::string cursor = initial_cursor;
+    bool result = false;
+    bool caught = false;
+    try {
+        result = collector.collect_batch(cursor, grace_period);
+    } catch (const InjectedFailure&) {
+        caught = true;
+    }
+    check(caught == expect_exception, name + ": batch exception was swallowed or unexpected");
+    if (!expect_exception)
+        check(result == expected_result, name + ": unexpected batch result");
+    check(cursor == expected_cursor, name + ": cursor advanced or reset at the wrong point");
+    check(state.events == expected_events, name + ": batch stage order or stop point changed");
+    check(!state.cleanup_failed && state.created == state.returned &&
+              state.created == state.destroyed && state.borrowed_connection == nullptr,
+          name + ": batch leaked a connection or released it in the wrong order");
+    for (const auto& hash : expected_hashes) {
+        check(available_from_another_thread(coordinator.mutex_for(hash)),
+              name + ": batch retained an object hash lock");
+    }
+}
+
+std::string numbered_hash(unsigned int value) {
+    const std::string digits = "0123456789abcdef";
+    std::string hash(64, '0');
+    for (std::size_t position = hash.size(); position > 0 && value != 0; value >>= 4)
+        hash[--position] = digits[value & 15];
+    return hash;
+}
+
+void test_batch_invalid_arguments() {
+    for (const auto& cursor : {std::string("invalid"), std::string(63, 'a'),
+                               std::string(65, 'a'), std::string(64, 'A')}) {
+        run_batch("invalid batch cursor", {}, false, cursor, cursor, {});
+    }
+    for (const auto grace : {Seconds{0}, Seconds{-1}})
+        run_batch("invalid batch grace period", {}, false, object_hash, object_hash,
+                  {}, {}, false, grace);
+}
+
+void test_batch_listing() {
+    // 到达表尾时，即使输入游标非空，也应清空游标供下轮从头扫描。
+    run_batch("empty first batch", {}, true, "", "", recovery_events({}));
+    run_batch("batch reached table end", {}, true, object_hash, "", recovery_events({}));
+
+    Configuration configuration;
+    configuration.no_connection = true;
+    run_batch("missing batch connection", configuration, false,
+              object_hash, object_hash, {"list_borrow"});
+
+    configuration = {};
+    configuration.candidate_result.success = false;
+    run_batch("failed batch query", configuration, false,
+              object_hash, object_hash, recovery_events({}));
+
+    // 查询失败即使附带行数据，也不能处理对象或重置游标。
+    configuration.candidate_result.rows = {{second_hash}};
+    run_batch("failed query with rows", configuration, false,
+              object_hash, object_hash, recovery_events({}));
+}
+
+void test_batch_malformed() {
+    const std::vector<DbQueryResult> replies{
+        {true, {{}}},
+        {true, {{std::nullopt}}},
+        {true, {{"invalid"}}},
+        {true, {{std::string(64, 'A')}}},
+        {true, {{object_hash, "extra"}}},
+        {true, {{object_hash}, {object_hash}}},
+        {true, {{second_hash}, {object_hash}}},
+        {true, {{object_hash}, {"invalid"}}},
+    };
+    for (const auto& reply : replies) {
+        Configuration configuration;
+        configuration.candidate_result = reply;
+        // 后一行错误时，前一行也不能提前进入 collect。
+        run_batch("malformed batch", configuration, false, "", "", recovery_events({}));
+    }
+    for (const auto& hash : {numbered_hash(0), object_hash}) {
+        Configuration configuration;
+        configuration.candidate_result = {true, {{hash}}};
+        run_batch("candidate did not advance cursor", configuration, false,
+                  object_hash, object_hash, recovery_events({}));
+    }
+
+    Configuration configuration;
+    configuration.candidate_result = {true, {}};
+    for (unsigned int value = 0; value < 129; ++value)
+        configuration.candidate_result.rows.push_back({numbered_hash(value)});
+    run_batch("oversized batch", configuration, false, "", "", recovery_events({}));
+}
+
+void test_batch_progress() {
+    Configuration configuration;
+    configuration.candidate_result = {true, {{object_hash}, {second_hash}, {third_hash}}};
+    configuration.prepare_overrides[second_hash] = ObjectGcPrepareResult::skipped;
+    run_batch("mixed successful batch", configuration, true, "", third_hash,
+              recovery_events({collected_events, preparation_stop_events, collected_events}),
+              {object_hash, second_hash, third_hash});
+    check(state.finalized_hashes == std::vector<std::string>{object_hash, third_hash},
+          "batch skipped a valid object or finalized a skipped one");
+}
+
+void test_batch_failure() {
+    Configuration configuration;
+    configuration.candidate_result = {true, {{object_hash}, {second_hash}, {third_hash}}};
+    configuration.prepare_overrides[second_hash] = ObjectGcPrepareResult::failed;
+    run_batch("preparation failure advances attempted cursor", configuration, false, "", second_hash,
+              recovery_events({collected_events, preparation_stop_events}),
+              {object_hash, second_hash, third_hash});
+    check(state.finalized_hashes == std::vector<std::string>{object_hash},
+          "batch lost prior progress or processed an object after failure");
+
+    // 后续调用从失败对象之后继续，避免永久故障阻塞整个对象表。
+    configuration = {};
+    configuration.candidate_result = {true, {{third_hash}}};
+    run_batch("continue beyond failed object", configuration, true, second_hash, third_hash,
+              recovery_events({collected_events}), {third_hash});
+    run_batch("wrap at table end", {}, true, third_hash, "", recovery_events({}));
+    configuration.candidate_result = {true, {{second_hash}}};
+    run_batch("retry failed object in next round", configuration, true, "", second_hash,
+              recovery_events({collected_events}), {second_hash});
+
+    configuration = {};
+    configuration.candidate_result = {true, {{object_hash}}};
+    configuration.no_connection_at = 2;
+    run_batch("missing object connection retains attempted cursor", configuration, false,
+              "", object_hash, recovery_events({{"borrow"}}), {object_hash});
+
+    configuration = {};
+    configuration.candidate_result = {true, {{object_hash}, {second_hash}, {third_hash}}};
+    configuration.finalize_overrides[second_hash] = ObjectGcFinalizeResult::failed;
+    run_batch("finalization failure advances attempted cursor", configuration, false, "", second_hash,
+              recovery_events({collected_events, collected_events}),
+              {object_hash, second_hash, third_hash});
+}
+
+void test_batch_unknown() {
+    for (const bool preparation : {true, false}) {
+        for (const bool unrecognized : {false, true}) {
+            Configuration configuration;
+            configuration.candidate_result = {true, {{object_hash}, {second_hash}, {third_hash}}};
+            if (preparation) {
+                configuration.prepare_overrides[second_hash] = unrecognized
+                    ? static_cast<ObjectGcPrepareResult>(99)
+                    : ObjectGcPrepareResult::outcome_unknown;
+            } else {
+                configuration.finalize_overrides[second_hash] = unrecognized
+                    ? static_cast<ObjectGcFinalizeResult>(99)
+                    : ObjectGcFinalizeResult::outcome_unknown;
+            }
+            run_batch("unknown outcome stops batch", configuration, false, "", second_hash,
+                      recovery_events({collected_events,
+                          preparation ? preparation_stop_events : collected_events}),
+                      {object_hash, second_hash, third_hash});
+            check(state.finalized_hashes == std::vector<std::string>{object_hash},
+                  "unknown batch outcome was reported as completed");
+            const std::vector<std::string> expected_removed = preparation
+                ? std::vector<std::string>{object_hash}
+                : std::vector<std::string>{object_hash, second_hash};
+            check(state.removed_hashes == expected_removed,
+                  "batch removed an object after unknown preparation");
+        }
+    }
+}
+
+void test_batch_exceptions() {
+    for (const auto stage : {Stage::borrow, Stage::listing}) {
+        Configuration configuration;
+        configuration.throw_at = stage;
+        run_batch("batch enumeration exception", configuration, false, object_hash, object_hash,
+                  stage == Stage::borrow ? std::vector<std::string>{"list_borrow"}
+                                         : recovery_events({}), {}, true);
+    }
+    for (const auto stage : {Stage::borrow, Stage::prepare, Stage::remove, Stage::finalize}) {
+        Configuration configuration;
+        configuration.candidate_result = {true, {{object_hash}, {second_hash}, {third_hash}}};
+        configuration.throw_at = stage;
+        configuration.throw_hash = second_hash;
+        std::vector<std::string> second_events{"borrow"};
+        if (stage != Stage::borrow)
+            second_events.push_back("prepare");
+        if (stage == Stage::remove || stage == Stage::finalize)
+            second_events.push_back("remove");
+        if (stage == Stage::finalize)
+            second_events.push_back("finalize");
+        if (stage != Stage::borrow)
+            second_events.push_back("return");
+        run_batch("object exception retains attempted cursor", configuration, false, "", second_hash,
+                  recovery_events({collected_events, second_events}),
+                  {object_hash, second_hash, third_hash}, true);
+    }
+}
+
+void test_batch_limit() {
+    Configuration configuration;
+    configuration.prepare_result = ObjectGcPrepareResult::skipped;
+    std::vector<std::string> hashes;
+    auto events = recovery_events({});
+    for (unsigned int value = 0; value < 128; ++value) {
+        const auto hash = numbered_hash(value);
+        configuration.candidate_result.rows.push_back({hash});
+        hashes.push_back(hash);
+        events.insert(events.end(), preparation_stop_events.begin(), preparation_stop_events.end());
+    }
+    run_batch("full batch of 128 objects", configuration, true, "", hashes.back(), events, hashes);
+    check(state.next_hash == 128 && state.created == 129,
+          "full batch was truncated or retained the enumeration connection");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -632,6 +879,22 @@ int main(int argc, char** argv) {
             test_recovery_unknown();
         else if (scenario == "recovery_exceptions")
             test_recovery_exceptions();
+        else if (scenario == "batch_invalid_arguments")
+            test_batch_invalid_arguments();
+        else if (scenario == "batch_listing")
+            test_batch_listing();
+        else if (scenario == "batch_malformed")
+            test_batch_malformed();
+        else if (scenario == "batch_progress")
+            test_batch_progress();
+        else if (scenario == "batch_failure")
+            test_batch_failure();
+        else if (scenario == "batch_unknown")
+            test_batch_unknown();
+        else if (scenario == "batch_exceptions")
+            test_batch_exceptions();
+        else if (scenario == "batch_limit")
+            test_batch_limit();
         else
             throw std::invalid_argument("unknown scenario: " + scenario);
         std::cout << "PASS object garbage collector " << scenario << '\n';

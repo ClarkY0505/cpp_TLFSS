@@ -19,6 +19,7 @@ add_library(metadata_lib
 target_link_libraries(metadata_lib PUBLIC common_lib)
 
 add_library(ftp_lib
+    object_gc_worker.cpp
     object_garbage_collector.cpp
     object_backfill.cpp
     transfer_task.cpp

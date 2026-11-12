@@ -1,6 +1,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <vector>
 #include "ftp/object_backfill.h"
 #include "ftp/transfer_validation.h"
 
@@ -86,6 +87,17 @@ bool ObjectBackfill::register_referenced_objects() {
     }
   }
   // 5. 全部处理成功后返回 true，空清单也返回 true。
+  return true;
+}
+
+bool ObjectBackfill::register_disk_objects() {
+  std::vector<std::string> hashes = _objects.list_object_hashes();
+  for (auto& hash : hashes) {
+    if (!register_if_absent(hash)) {
+      return false;
+    }
+  }
+
   return true;
 }
 

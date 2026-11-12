@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "ftp/verify_engine.h"
 
@@ -105,6 +106,16 @@ class ObjectStorageEngine {
   // 调用者须持有对应哈希锁，并已确认 DELETING 状态提交成功。
   // 对象不存在时仍同步目录；其他删除或同步错误继续向上传播。
   void remove_object(const std::string& hash) const;
+  // 仅在持有对象目录独占锁、且没有活动传输的启动阶段调用。
+  // 返回本次实际删除的临时文件数量；零表示没有文件被删除。
+  // 删除结束后同步目录；扫描、删除或同步失败时抛出异常。
+  // 中途失败不撤销之前已完成的删除，可在下次启动时重试。
+  std::size_t cleanup_temporary_files() const;
+  // 启动阶段持有目录独占锁、没有活动传输时调用。
+  // 返回按哈希排序的普通文件名；空清单是正常结果。
+  // 不跟随符号链接、不递归、不验证文件内容。
+  // 扫描失败时抛出异常，不把失败转换为空清单。
+  std::vector<std::string> list_object_hashes() const;
 
  private:
   std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;

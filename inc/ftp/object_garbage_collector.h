@@ -33,6 +33,13 @@ class ObjectGarbageCollector {
   // 异常继续向上传播；中途失败不撤销之前已完成的回收
   bool recover_deleting(std::chrono::seconds grace_period);
 
+  // 每次最多处理一批，after_hash 由调用线程独占维护。
+  // true：本批处理成功，或到达表尾并已将游标清空。
+  // false：校验、连接、查询失败，或某个对象处理失败/提交结果未知。
+  // 游标保留最后尝试的位置；部分成功结果不回滚。
+  // 异常继续向上传播，异常发生时游标也可能已经前移。
+  bool collect_batch(std::string& after_hash, std::chrono::seconds grace_period);
+
  private:
   BASE::DbConnectionPool& _pool;
   ObjectStorageEngine& _objects;

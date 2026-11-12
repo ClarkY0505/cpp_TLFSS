@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -79,6 +80,7 @@ StorageService::StorageService(NET::EventLoop* loop, const NET::InetAddress& add
     , _auth_service(_user_repository)
     , _metadata_service(*_db_conn_pool, std::move(cache))
     , _object_gc(*_db_conn_pool, _object_storage, _object_coordinator)
+    , _object_gc_worker(_object_gc)
     , _upload_engine(_th_pool, _disk_executor, _metadata_service, _object_storage,
                      _object_coordinator, _stopping)
     , _download_engine(_disk_executor, _metadata_service, _object_storage, _stopping) {
@@ -108,6 +110,7 @@ StorageService::~StorageService() {
     // 构造完成但未启动时，仍需释放已初始化的线程池和数据库资源。
     _th_pool.stop();
     _disk_executor.stop();
+    _object_gc_worker.stop();
     _db_conn_pool->shutdown();
   }
 }
@@ -145,6 +148,9 @@ void StorageService::start() {
   // _disk_executor.start(4);
   // 默认为2
   _disk_executor.start();
+  if (!_object_gc_worker.start()) {
+    throw std::runtime_error("Failed to start object GC worker");
+  }
   _tcp_server.start();
   _started = true;
   if (_metrics)
@@ -152,7 +158,7 @@ void StorageService::start() {
 }
 
 bool StorageService::stop(std::chrono::milliseconds grace_period) {
-  // 停机过程等待主循环回调，因此不能在主循环线程内阻塞调用。
+  // 停机过程等待主循环回调，因此不能在主循环线程内阻塞调用
   if (_loop->is_in_loop_thread()) {
     service_logger()->error("StorageService::stop must run outside the base EventLoop thread");
     std::abort();
@@ -163,7 +169,7 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
   }
 
   std::unique_lock<std::mutex> lock(_stop_mutex);
-  // 多个调用者只执行一次停机，其余调用者等待并共享最终结果。
+  // 多个调用者只执行一次停机，其余调用者等待并共享最终结果
   if (_stop_started) {
     _stop_done.wait(lock, [this] {
       return _stopped;
@@ -176,7 +182,7 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
     _metrics->set(OBSERVABILITY::Metric::service_state, 3);
   lock.unlock();
 
-  // 关闭监听并暂停现有连接读取；屏障保证各 IO loop 已处理暂停请求。
+  // 关闭监听并暂停现有连接读取；屏障保证各 IO loop 已处理暂停请求
   auto paused = std::make_shared<std::promise<void>>();
   auto paused_future = paused->get_future();
   _tcp_server.stop_accepting([paused] {
@@ -184,10 +190,12 @@ bool StorageService::stop(std::chrono::milliseconds grace_period) {
   });
   paused_future.wait();
 
-  // 所有 IO 线程已越过停机屏障，现有任务仍能使用网络及数据库资源。
+  // 所有 IO 线程已越过停机屏障，现有任务仍能使用网络及数据库资源
   _th_pool.stop();
-  // 磁盘任务仍可能访问数据库和向 IO loop 投递结果，必须先取消并等待收尾。
+  // 磁盘任务仍可能访问数据库和向 IO loop 投递结果，必须先取消并等待收尾
   _disk_executor.stop();
+  // 等待 GC 当前批次结束，后续不再访问数据库或对象目录
+  _object_gc_worker.stop();
 
   // 任务结束后半关闭连接写端，等待对端关闭；超时则强制清理剩余连接。
   auto drained = std::make_shared<std::promise<void>>();
@@ -1086,10 +1094,24 @@ void StorageService::handle_upload(const NET::TcpConnectionPtr& conn,
   }
 }
 
+/*
+ * 清理临时文件
+ * -检查对象表
+ * -回填历史引用
+ * -登记磁盘对象
+ * -归还连接
+ * -恢复 DELETING 对象
+ * */
 bool StorageService::prepare_storage() {
   if (_started) {
     return false;
   }
+
+  // 清理临时文件
+  // 清理崩溃遗留的临时文件，并同步对象目录。
+  // 失败时异常向上传播，停止后续启动准备。
+  _object_storage.cleanup_temporary_files();
+
   // 这里借用连接池的连接之后，短暂持有连接
   // 用作用域提前归还
   {
@@ -1100,16 +1122,25 @@ bool StorageService::prepare_storage() {
     }
     ObjectRepository repository(*connection);
 
+    // 检查对象表
     // 2. 调用 repository.check_object_table()
     if (!repository.check_object_table()) {
       return false;
     }
     ObjectBackfill backfill(repository, _object_storage, _object_coordinator);
 
+    // 回填历史引用
     if (!backfill.register_referenced_objects()) {
       return false;
     }
+
+    // 登记磁盘上尚未进入对象表的对象。
+    if (!backfill.register_disk_objects()) {
+      return false;
+    }
   }
+  // 归还连接
+  // 恢复 DELETING 对象
   return _object_gc.recover_deleting(std::chrono::minutes{10});
 }
 

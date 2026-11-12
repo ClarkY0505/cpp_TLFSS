@@ -335,6 +335,50 @@ void test_invalid_arguments() {
     }
 }
 
+void test_gc_candidates() {
+    const std::vector<DbQueryResult> replies{
+        {true, {{std::string(64, 'b')}}}, {true, {}}, {false, {}},
+    };
+    for (const auto& cursor : {std::string{}, valid_hash}) {
+        for (const auto& expected : replies) {
+            in_transaction([&](ObjectRepository& repository) {
+                database.query_result = expected;
+                const auto result = repository.list_gc_candidates(cursor);
+                check(result.success == expected.success && result.rows == expected.rows,
+                      "candidate query changed the database result");
+                check(database.queries == 1 && database.writes == 0 &&
+                          database.query_params == std::vector<DbValue>{cursor},
+                      "candidate query used the wrong cursor or extra operations");
+                contains(database.query_sql, "WHERE object_hash > ? ");
+                contains(database.query_sql, "ORDER BY object_hash ");
+                contains(database.query_sql, "LIMIT 128");
+                check(database.query_sql.find("FOR UPDATE") == std::string::npos &&
+                          database.query_sql.find("WHERE state") == std::string::npos &&
+                          database.query_sql.find("AND state") == std::string::npos,
+                      "candidate enumeration locked rows or excluded object states");
+            });
+        }
+    }
+    for (const auto& cursor : {std::string("invalid"), std::string(64, 'A')}) {
+        in_transaction([&](ObjectRepository& repository) {
+            check(!repository.list_gc_candidates(cursor).success,
+                  "candidate query accepted an invalid cursor");
+            check_no_access();
+        });
+    }
+    in_transaction([](ObjectRepository& repository) {
+        database.throw_query = true;
+        bool caught = false;
+        try {
+            repository.list_gc_candidates("");
+        } catch (const DatabaseError&) {
+            caught = true;
+        }
+        check(caught && database.queries == 1 && database.writes == 0,
+              "candidate query swallowed an exception or retried");
+    });
+}
+
 void test_exception_propagation() {
     // 给四个方法分别注入数据库异常，要求异常向上传播且不结束事务。
     for (int method = 0; method != 4; ++method) {
@@ -374,6 +418,7 @@ int main() {
         test_mark_deleting();
         test_write_results();
         test_invalid_arguments();
+        test_gc_candidates();
         test_exception_propagation();
 
         std::cout << "PASS object GC repository\n";

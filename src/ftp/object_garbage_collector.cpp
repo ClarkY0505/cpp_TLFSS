@@ -107,10 +107,74 @@ bool ObjectGarbageCollector::recover_deleting(std::chrono::seconds grace_period)
     // - collected 或 skipped：继续。
     // - 其他结果：立即返回 false。
     ObjectGcCollectResult gc_res = collect(hash, grace_period);
-    if(gc_res != ObjectGcCollectResult::collected && gc_res != ObjectGcCollectResult::skipped){
-        return false;
+    if (gc_res != ObjectGcCollectResult::collected && gc_res != ObjectGcCollectResult::skipped) {
+      return false;
     }
   }
+  return true;
+}
+
+bool ObjectGarbageCollector::collect_batch(std::string& after_hash,
+                                           std::chrono::seconds grace_period) {
+  // 1. 校验宽限期为正数，以及游标为空或为合法哈希
+  if (grace_period.count() <= 0 || (!after_hash.empty() && !Transfer::valid_hash(after_hash))) {
+    return false;
+  }
+  BASE::DbQueryResult candidate_res;
+  {
+    auto db = _pool.get_connection();
+    if (!db) {
+      return false;
+    }
+    ObjectRepository repository(*db);
+    candidate_res = repository.list_gc_candidates(after_hash);
+  }
+
+  if (!candidate_res.success || candidate_res.rows.size() > 128) {
+    return false;
+  }
+
+  if (candidate_res.success && candidate_res.rows.empty()) {
+    after_hash.clear();
+    return true;
+  }
+
+  // 先校验整批结果，暂不调用 GC：
+  //  - 每行恰好一列且不是 NULL。
+  //  - 每个值是合法哈希。
+  //  - 哈希严格递增，且第一条大于传入游标。
+  std::string previous_hash = after_hash;
+
+  for (const auto& row : candidate_res.rows) {
+    if (row.size() != 1 || !row[0].has_value()) {
+      return false;
+    }
+
+    const std::string& hash = *row[0];
+
+    // 同时要求合法、严格递增，并大于查询时的游标
+    if (!Transfer::valid_hash(hash) || hash <= previous_hash) {
+      return false;
+    }
+
+    previous_hash = hash;
+  }
+
+  // 整批校验通过后，逐个处理对象
+  for (const auto& row : candidate_res.rows) {
+    const std::string& hash = *row[0];
+
+    // 先记录本次尝试的位置，失败时也保留进度
+    after_hash = hash;
+
+    const ObjectGcCollectResult gc_res = collect(hash, grace_period);
+
+    if (gc_res != ObjectGcCollectResult::collected && gc_res != ObjectGcCollectResult::skipped) {
+      return false;
+    }
+  }
+
+  // 所有对象均已回收或无需处理
   return true;
 }
 

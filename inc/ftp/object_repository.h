@@ -100,7 +100,14 @@ class ObjectRepository {
   // 清单不构成删除许可，处理每个哈希时仍须重新加锁、检查状态和引用
   BASE::DbQueryResult list_deleting_hashes();
 
-  // true：对对象表所需三列的 LIMIT 0 查询成功，表为空也返回 true 
+  // after_hash 为空表示从头扫描，否则须为合法对象哈希。
+  // success == false：游标非法或查询失败。
+  // success == true：每行一列哈希，按升序返回，最多 128 行。
+  // rows 为空表示当前游标之后没有记录。
+  // 清单包含所有对象状态，不构成删除许可；实际处理时仍须调用 collect()。
+  BASE::DbQueryResult list_gc_candidates(const std::string& after_hash);
+
+  // true：对对象表所需三列的 LIMIT 0 查询成功，表为空也返回 true
   // false：查询失败，例如表或列缺失、权限不足或连接异常
   // 本方法不创建表，也不校验完整表结构、索引、约束或存储引擎
   bool check_object_table();

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -67,7 +68,7 @@ std::shared_ptr<SourceFile> open_source(const fs::path& path, bool no_followd) {
   } while (fd == -1 && errno == EINTR);
 
   if (fd == -1) {
-    system_failure("open source");
+    system_failure("an object backfilling check performed during startup; it failed because the source file could not be opened");
   }
   source->file.reset(fd);
 
@@ -240,6 +241,32 @@ void Receiver::publish(const fs::path& destination, bool reuse_existing,
 }  // namespace TLSS::FileStorage::Transfer
 
 namespace TLSS::FileStorage {
+namespace {
+
+// 只接受 .tlss-part- 加六位 ASCII 字母或数字。
+bool is_temporary_object_name(const std::string& name) {
+  const std::string prefix = ".tlss-part-";
+
+  if (name.size() != prefix.size() + 6 || name.compare(0, prefix.size(), prefix) != 0) {
+    return false;
+  }
+
+  for (std::size_t i = prefix.size(); i < name.size(); ++i) {
+    const char ch = name[i];
+
+    const bool lowercase = ch >= 'a' && ch <= 'z';
+    const bool uppercase = ch >= 'A' && ch <= 'Z';
+    const bool digit = ch >= '0' && ch <= '9';
+
+    if (!lowercase && !uppercase && !digit) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+}  // namespace
 ObjectStorageEngine::WriteHandle ObjectStorageEngine::create_temporary(std::uint64_t size) const {
   auto writer = std::make_unique<Transfer::Receiver>(Transfer::object_root(), size);
   writer->set_metrics(_metrics);
@@ -337,6 +364,71 @@ void ObjectStorageEngine::remove_object(const std::string& hash) const {
 
   // 执行到函数末尾，正常返回。
   // 任一步抛出异常，调用者都不能继续清理数据库对象记录。
+}
+
+std::size_t ObjectStorageEngine::cleanup_temporary_files() const {
+  const auto root = Transfer::object_root();
+  std::size_t removed = 0;
+
+  // 只扫描对象根目录，不进入子目录
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    const std::string name = entry.path().filename().string();
+    if (!is_temporary_object_name(name)) {
+      continue;
+    }
+
+    // symlink_status 检查目录项自身，不跟随符号链接。
+    if (!std::filesystem::is_regular_file(entry.symlink_status())) {
+      continue;
+    }
+
+    int result;
+    do {
+      result = ::unlink(entry.path().c_str());
+    } while (result == -1 && errno == EINTR);
+
+    if (result == 0) {
+      ++removed;
+    } else if (errno != ENOENT) {
+      // 只有文件已不存在时允许继续；其他错误向上传播。
+      Transfer::system_failure("unlink temporary object");
+    }
+  }
+
+  // 即使没有删除文件，也完成目录同步。
+  Transfer::sync_directory(root);
+  return removed;
+}
+
+std::vector<std::string> ObjectStorageEngine::list_object_hashes() const {
+  // 1. 获取 Transfer::object_root()，创建结果容器：
+  const auto root = Transfer::object_root();
+  std::vector<std::string> hashes;
+  // 2. 使用 std::filesystem::directory_iterator(root) 遍历根目录。
+  // 只扫描对象根目录，不进入子目录。
+  for (const auto& entry : std::filesystem::directory_iterator(root)) {
+    const std::string name = entry.path().filename().string();
+
+    // 3. 对每个目录项取得文件名，用 Transfer::valid_hash(name) 校验，不合法则跳过
+    // 排除临时文件、锁文件及其他不符合哈希格式的名字
+    if (!Transfer::valid_hash(name)) {
+      continue;
+    }
+
+    // 4. 使用下面的判断，只保留普通文件：
+    // 检查目录项自身，跳过目录、符号链接和特殊文件
+    //   目录、符号链接和其他类型都跳过
+    if (!std::filesystem::is_regular_file(entry.symlink_status())) {
+      continue;
+    }
+
+    // 5. 将符合条件的文件名加入 hashes。
+    hashes.push_back(name);
+  }
+
+  // 6. 排序并返回：
+  std::sort(hashes.begin(), hashes.end());
+  return hashes;
 }
 
 }  // namespace TLSS::FileStorage

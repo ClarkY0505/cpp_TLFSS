@@ -11,8 +11,9 @@
 #include "ftp/download_engine.h"
 #include "ftp/metadata_service.h"
 #include "ftp/object_coordinator.h"
-#include "ftp/upload_engine.h"
 #include "ftp/object_garbage_collector.h"
+#include "ftp/object_gc_worker.h"
+#include "ftp/upload_engine.h"
 
 #include <atomic>
 #include <chrono>
@@ -35,6 +36,9 @@ class StorageService {
   // 重复调用等待同一次停机完成；返回数据库连接池是否在期限内关闭。
   bool stop(std::chrono::milliseconds grace_period = std::chrono::seconds(5));
 
+  // 调用者须持有对象目录独占锁，且当前没有活动传输。
+  // true：所有启动准备完成；false：状态检查或数据库准备失败。
+  // 文件系统等操作抛出的异常继续向上传播，调用者应停止启动。
   bool prepare_storage();
 
  private:
@@ -117,6 +121,7 @@ class StorageService {
   ObjectStorageEngine _object_storage;
   ObjectCoordinator _object_coordinator;
   ObjectGarbageCollector _object_gc;
+  ObjectGcWorker _object_gc_worker;
   UploadEngine _upload_engine;
   DownloadEngine _download_engine;
 

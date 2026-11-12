@@ -209,4 +209,21 @@ BASE::DbQueryResult ObjectRepository::list_deleting_hashes() {
   return res;
 }
 
+BASE::DbQueryResult ObjectRepository::list_gc_candidates(const std::string& after_hash) {
+  // 1. 校验游标
+  if (!after_hash.empty() && !Transfer::valid_hash(after_hash)) {
+    return {false, {}};
+  }
+
+  std::string sql =
+      "SELECT object_hash "
+      "FROM storage_objects "
+      "WHERE object_hash > ? "
+      "ORDER BY object_hash "
+      "LIMIT 128;";
+  BASE::DbQueryResult res;
+  res = _connection.query_prepared(sql, {after_hash});
+  return res;
+}
+
 }  // namespace TLSS::FileStorage

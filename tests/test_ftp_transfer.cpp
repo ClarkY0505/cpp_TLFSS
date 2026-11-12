@@ -4,6 +4,7 @@
 #include "ftp/client.h"
 #include "ftp/server.h"
 #include "ftp/service_engine.h"
+#include "ftp/storage_root_lock.h"
 
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -11,12 +12,14 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <system_error>
 #include <thread>
 
 // Deterministically model a cold-file wait without changing system page caches.
@@ -78,9 +81,18 @@ std::atomic<int> deleting_list_queries{0};
 std::atomic<bool> startup_deleting_record{false};
 std::atomic<bool> startup_object_referenced{false};
 std::atomic<int> startup_object_deletes{0};
+std::atomic<int> startup_disk_lookups{0};
+std::atomic<int> startup_object_registrations{0};
+std::atomic<bool> startup_registered_record{false};
+// 0 正常，1 磁盘对象查询失败，2 磁盘对象登记失败。
+std::atomic<int> startup_backfill_mode{0};
+std::string startup_registered_state;
 std::atomic<bool> single_connection_only{false};
 std::atomic<int> borrowed_connections{0};
 std::atomic<int> peak_borrowed_connections{0};
+std::atomic<bool> fail_startup_sync{false};
+std::atomic<int> startup_sync_calls{0};
+std::string startup_temporary_path;
 struct CommitGate {
   std::mutex mutex;
   std::condition_variable changed;
@@ -112,12 +124,27 @@ std::atomic<bool> fail_metadata_insert{false};
 std::atomic<bool> database_shutdown_called{false};
 std::atomic<bool> finalizer_active{false};
 std::atomic<bool> shutdown_during_finalize{false};
+// 服务生命周期测试：在关闭数据库的边界检查 GC 已退出并归还连接。
+TLSS::BASE::Thread* watched_gc_thread = nullptr;
+std::atomic<bool> gc_callback_active{false};
+std::atomic<bool> shutdown_before_gc_finished{false};
 const std::string abc_hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 void check(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
 }
 }  // namespace
+
+extern "C" int __real_fsync(int fd);
+extern "C" int __wrap_fsync(int fd) {
+  if (single_connection_only.load())
+    ++startup_sync_calls;
+  if (fail_startup_sync.load()) {
+    errno = EIO;
+    return -1;
+  }
+  return __real_fsync(fd);
+}
 
 namespace TLSS::BASE {
 DbConnectionPool::DbConnectionPool()
@@ -136,6 +163,12 @@ DbConnectionPool* DbConnectionPool::get_connection_pool() {
   return &pool;
 }
 DbConnectionHandle DbConnectionPool::get_connection() {
+  if (single_connection_only.load()) {
+    check(startup_temporary_path.empty() || !std::filesystem::exists(startup_temporary_path),
+          "startup borrowed a database connection before cleaning temporary files");
+    check(startup_sync_calls.load() > 0,
+          "startup borrowed a database connection before directory synchronization");
+  }
   // 启动测试模拟只有一条连接：作用域未归还连接时，后续借用立即失败。
   if (single_connection_only.load() && borrowed_connections.load() != 0)
     return DbConnectionHandle(nullptr, DbConnectionDeleter{});
@@ -149,6 +182,10 @@ DbConnectionHandle DbConnectionPool::get_connection() {
 bool DbConnectionPool::shutdown(std::chrono::milliseconds) {
   if (finalizer_active.load())
     shutdown_during_finalize.store(true);
+  if (watched_gc_thread &&
+      ((watched_gc_thread->started() && !watched_gc_thread->_joined) ||
+       gc_callback_active.load() || borrowed_connections.load() != 0))
+    shutdown_before_gc_finished.store(true);
   database_shutdown_called.store(true);
   return true;
 }
@@ -194,9 +231,21 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
     return {true, {{"1"}}};
   }
   if (sql.find("SELECT state, unreferenced_at") == 0) {
-    check(_transaction_active, "object lookup ran outside transaction");
+    if (sql.find("FOR UPDATE") != std::string::npos) {
+      check(_transaction_active, "locking object lookup ran outside transaction");
+    } else {
+      check(single_connection_only.load() && !_transaction_active,
+            "unexpected non-locking object lookup");
+      ++startup_disk_lookups;
+      check(referenced_list_queries.load() == 1 && deleting_list_queries.load() == 0,
+            "disk registration ran before historical backfill or after deletion recovery");
+      if (startup_backfill_mode.load() == 1)
+        return {false, {}};
+    }
     if (startup_deleting_record.load())
       return {true, {{"DELETING", "2026-11-11 10:00:00.000000"}}};
+    if (startup_registered_record.load())
+      return {true, {{startup_registered_state, std::nullopt}}};
     return {true, {}};
   }
   if (sql.find("SELECT id FROM virtual_files WHERE object_hash = ? ") == 0) {
@@ -214,7 +263,22 @@ bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue
   return true;
 }
 DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
-                                               const std::vector<DbValue>&) {
+                                               const std::vector<DbValue>& params) {
+  // 启动回填使用普通 INSERT；上传登记则在显式事务中执行。
+  if (!_transaction_active && single_connection_only.load() &&
+      sql.find("INSERT INTO storage_objects ") == 0) {
+    check(params.size() == 2 && params[0].has_value() && params[1].has_value() &&
+              *params[0] == abc_hash,
+          "unexpected startup object registration parameters");
+    check(!startup_deleting_record.load() && !startup_registered_record.load(),
+          "startup registration overwrote an existing object record");
+    ++startup_object_registrations;
+    if (startup_backfill_mode.load() == 2)
+      return {false, 1213, 0, 0};
+    startup_registered_record.store(true);
+    startup_registered_state = *params[1];
+    return {true, 0, 1, 0};
+  }
   check(_transaction_active, "upload write ran outside transaction");
 
   // 保留 inserts 的原有含义：只统计文件登记，不混入对象表写入。
@@ -853,22 +917,167 @@ void check_shutdown_waits(const std::string& directory) {
         "database was shut down before the active disk finalizer finished");
 }
 
+void check_gc_startup_cleanup(const std::string& scenario) {
+  EventLoop loop;
+  database_shutdown_called.store(false);
+  shutdown_before_gc_finished.store(false);
+  bool rejected = false;
+  bool listener_closed = false;
+  bool gc_was_started = false;
+  bool service_was_started = false;
+  {
+    StorageService service(&loop, InetAddress(0), "gc-startup-regression", 0, 0, 32);
+    watched_gc_thread = &service._object_gc_worker._thread;
+
+    if (scenario == "gc_start_failure") {
+      // 确定性地令 GC start() 返回 false，验证服务会向上传播启动失败。
+      // 真正的线程创建失败及重试已由 object_gc_worker_creation_failure 覆盖。
+      service._object_gc_worker.stop();
+    } else if (scenario == "gc_late_start_failure") {
+      // 零个 IO 子线程时，该回调由启动者同步执行，可以安全注入 TCP 启动异常。
+      service._tcp_server.set_thread_init_cb([](EventLoop*) {
+        throw std::runtime_error("injected TCP startup failure");
+      });
+    }
+
+    if (scenario != "gc_unstarted_cleanup") {
+      try {
+        service.start();
+      } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()) ==
+            (scenario == "gc_start_failure" ? "Failed to start object GC worker"
+                                             : "injected TCP startup failure");
+      }
+    }
+    listener_closed = !service._tcp_server._acceptor->listenning();
+    gc_was_started = service._object_gc_worker._thread.started();
+    service_was_started = service._started;
+    // 离开作用域走未启动完成的析构路径，主事件循环始终没有运行。
+  }
+  watched_gc_thread = nullptr;
+  check(!service_was_started && listener_closed,
+        "failed or omitted startup marked service running or opened its listener");
+  check(rejected == (scenario != "gc_unstarted_cleanup"),
+        "startup failure was swallowed or the wrong exception escaped");
+  check(gc_was_started == (scenario == "gc_late_start_failure"),
+        "GC started at the wrong point in service startup");
+  check(database_shutdown_called.load() && !shutdown_before_gc_finished.load(),
+        "startup cleanup closed the database before joining GC or leaked resources");
+}
+
+void check_gc_shutdown(bool active) {
+  EventLoop loop;
+  CommitGate gate;
+  gate.enabled = true;
+  database_shutdown_called.store(false);
+  shutdown_before_gc_finished.store(false);
+  bool entered = !active;
+  bool stopped = false;
+  bool stopped_again = false;
+  bool joined = false;
+  bool requested_before_release = !active;
+  bool database_closed_while_blocked = false;
+  {
+    StorageService service(&loop, InetAddress(0), "gc-stop-regression", 0, 0, 32);
+    watched_gc_thread = &service._object_gc_worker._thread;
+    if (active) {
+      // 只替换线程回调，保留真实的 Worker start/stop、BASE::Thread 和服务停机流程。
+      // 定时批处理本身由 object_gc_worker_* 覆盖；这里确定性模拟持有连接的 GC 工作。
+      service._object_gc_worker._thread._func = [&] {
+        auto connection = service._db_conn_pool->get_connection();
+        gc_callback_active.store(true);
+        gate.wait();
+        connection.reset();
+        gc_callback_active.store(false);
+      };
+    }
+    service.start();
+    if (active) {
+      std::unique_lock<std::mutex> lock(gate.mutex);
+      entered = gate.changed.wait_for(lock, std::chrono::seconds(3), [&] {
+        return gate.entered;
+      });
+    }
+
+    std::thread stopper([&] {
+      stopped = service.stop();
+      stopped_again = service.stop();  // 服务层重复停机也应复用结果。
+    });
+    std::thread unblock;
+    if (active) {
+      unblock = std::thread([&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        for (;;) {
+          {
+            std::lock_guard<std::mutex> lock(service._object_gc_worker._mutex);
+            requested_before_release = service._object_gc_worker._stop_requested;
+          }
+          if (requested_before_release || database_shutdown_called.load() ||
+              std::chrono::steady_clock::now() >= deadline)
+            break;
+          std::this_thread::yield();
+        }
+        // 观察到停止请求后才放行，验证 stop 不能跳过正在执行的 GC 工作。
+        database_closed_while_blocked = database_shutdown_called.load();
+        gate.release();
+      });
+    }
+    loop.loop();
+    stopper.join();
+    if (unblock.joinable())
+      unblock.join();
+    joined = service._object_gc_worker._thread.started() &&
+             service._object_gc_worker._thread._joined &&
+             service._object_gc_worker._phase == ObjectGcWorker::Phase::stopped;
+  }
+  watched_gc_thread = nullptr;
+  check(entered && requested_before_release, "service did not stop the active GC worker");
+  check(stopped && stopped_again && joined, "service stop did not join GC or was not repeatable");
+  check(!database_closed_while_blocked && !shutdown_before_gc_finished.load() &&
+            !gc_callback_active.load() && borrowed_connections.load() == 0 &&
+            database_shutdown_called.load(),
+        "service closed the database before GC finished and returned its connection");
+}
+
 void run(const std::string& scenario, const std::string& directory) {
+  if (scenario == "gc_start_failure" || scenario == "gc_late_start_failure" ||
+      scenario == "gc_unstarted_cleanup") {
+    check_gc_startup_cleanup(scenario);
+    return;
+  }
+  if (scenario == "gc_shutdown_idle" || scenario == "gc_shutdown_wait") {
+    check_gc_shutdown(scenario == "gc_shutdown_wait");
+    return;
+  }
   if (scenario.find("prepare_") == 0) {
     check(scenario == "prepare_missing_table" || scenario == "prepare_empty_list" ||
               scenario == "prepare_recovery_query_failure" ||
               scenario == "prepare_recovery_invalid_hash" || scenario == "prepare_recovery_skip" ||
               scenario == "prepare_recovery_resume" || scenario == "prepare_recovery_referenced" ||
-              scenario == "prepare_recovery_unknown",
+              scenario == "prepare_recovery_unknown" ||
+              scenario == "prepare_cleanup_sync_failure" || scenario == "prepare_cleanup_started" ||
+              scenario == "prepare_orphan_valid" || scenario == "prepare_orphan_corrupt" ||
+              scenario == "prepare_orphan_existing" || scenario == "prepare_orphan_lookup_failure" ||
+              scenario == "prepare_orphan_insert_failure",
           "unknown preparation scenario");
     const bool table_exists = scenario != "prepare_missing_table";
     const bool resume = scenario == "prepare_recovery_resume";
     const bool referenced = scenario == "prepare_recovery_referenced";
     const bool unknown = scenario == "prepare_recovery_unknown";
+    const bool cleanup_failure = scenario == "prepare_cleanup_sync_failure";
+    const bool already_started = scenario == "prepare_cleanup_started";
+    const bool orphan = scenario.find("prepare_orphan_") == 0;
+    const bool orphan_corrupt = scenario == "prepare_orphan_corrupt";
+    const bool orphan_existing = scenario == "prepare_orphan_existing";
+    const bool lookup_failure = scenario == "prepare_orphan_lookup_failure";
+    const bool insert_failure = scenario == "prepare_orphan_insert_failure";
+    const bool backfill_failure = lookup_failure || insert_failure;
     const bool has_record = resume || referenced || unknown;
+    const bool has_disk_object = has_record || orphan;
     const bool expected_ready = table_exists &&
         scenario != "prepare_recovery_query_failure" &&
-        scenario != "prepare_recovery_invalid_hash" && !referenced && !unknown;
+        scenario != "prepare_recovery_invalid_hash" && !referenced && !unknown &&
+        !cleanup_failure && !already_started && !backfill_failure;
 
     object_table_available.store(table_exists);
     object_table_checks.store(0);
@@ -880,15 +1089,32 @@ void run(const std::string& scenario, const std::string& directory) {
     startup_deleting_record.store(has_record);
     startup_object_referenced.store(referenced);
     startup_object_deletes.store(0);
+    startup_disk_lookups.store(0);
+    startup_object_registrations.store(0);
+    startup_registered_record.store(orphan_existing);
+    startup_registered_state = orphan_existing ? "UNAVAILABLE" : "";
+    startup_backfill_mode.store(lookup_failure ? 1 : insert_failure ? 2 : 0);
     upload_outcome_unknown.store(unknown);
     upload_commits.store(0);
     single_connection_only.store(true);
     peak_borrowed_connections.store(0);
+    fail_startup_sync.store(cleanup_failure);
+    startup_sync_calls.store(0);
     inserts.store(0);
 
-    if (has_record) {
+    // 与正式入口一样，先独占对象目录，再运行启动准备。
+    StorageRootLock root_lock(directory);
+    startup_temporary_path = directory + "/.tlss-part-Ab12c3";
+    {
+      std::ofstream output(startup_temporary_path);
+      output << "interrupted upload";
+      output.close();
+      check(output.good(), "create startup temporary file failed");
+    }
+
+    if (has_disk_object) {
       std::ofstream output(directory + "/" + abc_hash);
-      output << "abc";
+      output << (orphan_corrupt ? "bad" : "abc");
       output.close();
       check(output.good(), "create recovery object failed");
     }
@@ -896,31 +1122,84 @@ void run(const std::string& scenario, const std::string& directory) {
     // 只执行准备阶段，不启动服务；端口 0 避免占用固定业务端口。
     EventLoop loop;
     StorageService service(&loop, InetAddress(0), "prepare-regression", 0, 0, 32);
-    const bool ready = service.prepare_storage();
+    // 只设置标志验证启动后的防护，不实际启动监听或业务线程。
+    service._started = already_started;
+    bool ready = false;
+    bool cleanup_threw = false;
+    try {
+      ready = service.prepare_storage();
+      check(service._started == already_started,
+            "storage preparation unexpectedly changed the started flag");
+    } catch (const std::system_error& error) {
+      service._started = false;
+      fail_startup_sync.store(false);
+      if (!cleanup_failure)
+        throw;
+      check(error.code().value() == EIO, "startup cleanup lost the synchronization error");
+      cleanup_threw = true;
+    } catch (...) {
+      service._started = false;
+      fail_startup_sync.store(false);
+      throw;
+    }
+    service._started = false;
+    fail_startup_sync.store(false);
+
+    check(cleanup_threw == cleanup_failure, "startup cleanup exception was swallowed or unexpected");
+    check(std::filesystem::is_regular_file(directory + "/.tlss.lock"),
+          "startup cleanup removed the directory lock file");
+    if (cleanup_failure || already_started) {
+      check(!ready && object_table_checks.load() == 0 && referenced_list_queries.load() == 0 &&
+                deleting_list_queries.load() == 0 && borrowed_connections.load() == 0 &&
+                peak_borrowed_connections.load() == 0 && startup_object_deletes.load() == 0,
+            "startup continued after failed cleanup or an already-started guard");
+      check(std::filesystem::exists(startup_temporary_path) == already_started,
+            "startup guard or cleanup failure changed the wrong temporary file state");
+      check(startup_sync_calls.load() == (already_started ? 0 : 1),
+            "startup guard or cleanup failure performed extra synchronization");
+      return;
+    }
 
     check(ready == expected_ready,
           "storage preparation ignored a backfill or recovery result");
     check(object_table_checks.load() == 1,
           "object table was not checked exactly once");
+    check(!std::filesystem::exists(startup_temporary_path),
+          "startup did not clean the interrupted upload before database preparation");
 
     // 表缺失时立即停止；表存在时允许成功查询到空清单。
     check(referenced_list_queries.load() == (table_exists ? 1 : 0),
           "historical list query ran at the wrong preparation stage");
-    check(deleting_list_queries.load() == (table_exists ? 1 : 0),
+    check(deleting_list_queries.load() == (table_exists && !backfill_failure ? 1 : 0),
           "deleting list query ran at the wrong preparation stage");
+    check(startup_disk_lookups.load() == (has_disk_object && table_exists ? 1 : 0),
+          "startup did not enumerate disk objects before recovering deletions");
+    check(startup_object_registrations.load() ==
+              (orphan && !orphan_existing && !lookup_failure ? 1 : 0),
+          "startup registered an existing object or skipped a disk orphan");
     check(borrowed_connections.load() == 0 && peak_borrowed_connections.load() == 1,
           "preparation leaked a connection or borrowed before returning the previous one");
     check(inserts.load() == 0,
           "empty-list preparation unexpectedly wrote metadata");
     check(startup_object_deletes.load() == (resume ? 1 : 0),
           "startup recovery performed an unexpected catalog deletion");
-    if (has_record) {
+    if (has_disk_object) {
       check(std::filesystem::exists(directory + "/" + abc_hash) == !resume,
             "startup recovery removed or retained the wrong disk object");
-      check(startup_deleting_record.load() == !resume,
+      check(startup_deleting_record.load() == (has_record && !resume),
             "startup recovery changed the wrong catalog state");
       check(upload_commits.load() == (resume ? 2 : unknown ? 1 : 0),
             "startup recovery committed or retried unexpectedly");
+    }
+    if (orphan) {
+      check(startup_registered_record.load() == !backfill_failure,
+            "startup ignored an orphan registration result");
+      if (!backfill_failure) {
+        check(startup_registered_state == (orphan_corrupt || orphan_existing ? "UNAVAILABLE" : "LIVE"),
+              "startup changed the wrong orphan or existing object state");
+      }
+      check(upload_commits.load() == 0 && startup_object_deletes.load() == 0,
+            "startup immediately reclaimed a newly registered orphan");
     }
     check(!service._started,
           "storage preparation unexpectedly started the service");

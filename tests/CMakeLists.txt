@@ -21,6 +21,20 @@ foreach(scenario IN ITEMS normal missing invalid_hash directory symlink
     set_tests_properties(object_removal_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
 
+# 复用删除测试的系统调用注入，验证启动时临时文件清理及恢复。
+foreach(scenario IN ITEMS empty matching ignored types hard_link unlink_retry missing unlink_error
+        partial_failure sync_retry sync_error crash)
+    add_test(NAME object_temporary_cleanup_${scenario}
+        COMMAND test_object_removal cleanup_${scenario})
+    set_tests_properties(object_temporary_cleanup_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 只读枚举磁盘候选：验证排序、命名过滤、类型过滤及扫描失败传播。
+foreach(scenario IN ITEMS empty sorted ignored types failure)
+    add_test(NAME object_disk_scan_${scenario} COMMAND test_object_removal scan_${scenario})
+    set_tests_properties(object_disk_scan_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
 # 使用真实目录和文件锁验证独占访问，不启动存储服务或连接数据库。
 add_executable(test_storage_root_lock test_storage_root_lock.cpp)
 add_dependencies(test_storage_root_lock prepare_runtime_directories)
@@ -89,10 +103,12 @@ add_executable(test_ftp_transfer
     ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_garbage_collector.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_transaction.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_worker.cpp
 )
 add_dependencies(test_ftp_transfer prepare_runtime_directories)
 target_compile_options(test_ftp_transfer PRIVATE -fno-access-control)
 target_link_libraries(test_ftp_transfer PRIVATE transfer_lib common_lib OpenSSL::Crypto)
+target_link_options(test_ftp_transfer PRIVATE "-Wl,--wrap=fsync")
 foreach(scenario IN ITEMS
         commit_hash upload download error_frame busy_reply receive_error
         control_limit source_type source_fifo upload_chunked client_download shutdown_wait
@@ -102,7 +118,12 @@ foreach(scenario IN ITEMS
         # 启动准备：对象表缺失，以及表存在但历史清单为空。
         prepare_missing_table prepare_empty_list
         prepare_recovery_query_failure prepare_recovery_invalid_hash prepare_recovery_skip
-        prepare_recovery_resume prepare_recovery_referenced prepare_recovery_unknown)
+        prepare_recovery_resume prepare_recovery_referenced prepare_recovery_unknown
+        prepare_cleanup_sync_failure prepare_cleanup_started
+        prepare_orphan_valid prepare_orphan_corrupt prepare_orphan_existing
+        prepare_orphan_lookup_failure prepare_orphan_insert_failure
+        gc_start_failure gc_late_start_failure gc_shutdown_idle gc_shutdown_wait
+        gc_unstarted_cleanup)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
@@ -220,10 +241,27 @@ add_dependencies(test_object_garbage_collector prepare_runtime_directories)
 target_link_libraries(test_object_garbage_collector PRIVATE common_lib Threads::Threads)
 foreach(scenario IN ITEMS invalid_arguments connection_failure prepare_results finalize_results
         exceptions hash_lock recovery_invalid_arguments recovery_listing recovery_malformed
-        recovery_multiple recovery_collection_failure recovery_unknown recovery_exceptions)
+        recovery_multiple recovery_collection_failure recovery_unknown recovery_exceptions
+        batch_invalid_arguments batch_listing batch_malformed batch_progress batch_failure
+        batch_unknown batch_exceptions batch_limit)
     add_test(NAME object_garbage_collector_${scenario}
         COMMAND test_object_garbage_collector ${scenario})
     set_tests_properties(object_garbage_collector_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 使用真实 GC 调度线程，批处理与连接池由测试替代，不访问数据库或对象目录。
+add_executable(test_object_gc_worker
+    test_object_gc_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_worker.cpp
+)
+add_dependencies(test_object_gc_worker prepare_runtime_directories)
+# 仅测试目标可只读探测停止标志，并注入条件变量通知。
+target_compile_options(test_object_gc_worker PRIVATE -fno-access-control)
+target_link_libraries(test_object_gc_worker PRIVATE common_lib Threads::Threads ${CMAKE_DL_LIBS})
+foreach(scenario IN ITEMS configuration lifecycle stop_before_start interval progress failures
+        creation_failure destructor concurrent_stop logging_failure)
+    add_test(NAME object_gc_worker_${scenario} COMMAND test_object_gc_worker ${scenario})
+    set_tests_properties(object_gc_worker_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
 
 # 使用真实登记事务和对象仓储，数据库连接及事务边界由测试替代。
