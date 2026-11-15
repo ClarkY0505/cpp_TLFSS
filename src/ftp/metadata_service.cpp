@@ -1,3 +1,14 @@
+#include "common/base/base_logger.h"
+#include "common/base/mysql_connection.h"
+#include "common/base/mysql_connection_pool.h"
+#include "ftp/directory_creation.h"
+#include "ftp/directory_deletion.h"
+#include "ftp/file_deletion.h"
+#include "ftp/metadata_service.h"
+#include "ftp/metadata_types.h"
+#include "ftp/transfer_validation.h"
+#include "ftp/upload_registration.h"
+
 #include <openssl/asn1.h>
 #include <charconv>
 #include <cstring>
@@ -5,13 +16,6 @@
 #include <mutex>
 #include <string>
 #include <utility>
-#include "common/base/base_logger.h"
-#include "common/base/mysql_connection.h"
-#include "common/base/mysql_connection_pool.h"
-#include "ftp/metadata_service.h"
-#include "ftp/metadata_types.h"
-#include "ftp/transfer_validation.h"
-#include "ftp/upload_registration.h"
 
 namespace TLSS::FileStorage {
 namespace {
@@ -168,49 +172,16 @@ StorageContext<std::string> MetadataService::move_dir_by_current_dir_db(
   return {true, *row[0]};
 }
 
-bool MetadataService::create_dir_db(const std::string& username,
-                                    const std::string& current_directory,
-                                    const std::string& directory) {
-  if (username.empty() || current_directory.empty() || directory.empty()) {
-    return false;
-  }
-
+CreateDirectoryResult MetadataService::create_dir_db(const std::string& username,
+                                                     const std::string& current_directory,
+                                                     const std::string& directory) {
   auto db_conn = _db_conn_pool.get_connection();
   if (!db_conn) {
     BASE::mysql_logger()->error("storage engine get connection failed");
-    return false;
+    return CreateDirectoryResult::failed;
   }
 
-  auto result = db_conn->query_prepared(
-      "SELECT id FROM virtual_files "
-      "WHERE path = ? AND username = ?;",
-      {current_directory, username});
-
-  if (!result.success) {
-    BASE::mysql_logger()->error("storage engine query failed");
-    return false;
-  }
-  if (result.rows.empty()) {
-    return false;
-  }
-
-  const auto& row = result.rows.front();
-  if (row.size() != 1 || !row[0]) {
-    BASE::mysql_logger()->error("storage engine received invalid user data");
-    return false;
-  }
-
-  std::string id = *row[0];
-  // 根目录本身已包含分隔符；嵌套目录才需要追加一个 '/'.
-  const std::string new_dir_path =
-      (current_directory == "/" ? current_directory : current_directory + "/") + directory;
-  bool res = db_conn->update_prepared(
-      "INSERT INTO virtual_files"
-      "(file_name, username, parent_id, path, file_type, object_hash)"
-      "VALUES(? , ? , ? , ? ,'directory',NULL);",
-      {directory, username, id, new_dir_path});
-
-  return res;
+  return create_directory_transaction(*db_conn, username, current_directory, directory);
 }
 
 StorageContext<std::string> MetadataService::prepare_upload(const std::string& username,
@@ -380,17 +351,27 @@ StorageContext<std::string> MetadataService::find_download_hash(const std::strin
       });
 }
 
-bool MetadataService::create_dir(const std::string& username, const std::string& current_directory,
-                                 const std::string& directory) {
-  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, [&]() -> bool {
-    if (username.empty() || current_directory.empty() || directory.empty()) {
+CreateDirectoryResult MetadataService::create_dir(const std::string& username,
+                                                  const std::string& current_directory,
+                                                  const std::string& directory) {
+  CreateDirectoryResult outcome = CreateDirectoryResult::failed;
+
+  auto work = [&]() -> bool {
+    if (username.empty() || current_directory.empty() || !Transfer::valid_name(directory)) {
       return false;
     }
-    return _metadata_cache->write(username, current_directory,
-                                  [this, &username, &current_directory, &directory] {
-                                    return create_dir_db(username, current_directory, directory);
-                                  });
-  });
+
+    auto writer = [&]() -> bool {
+      outcome = create_dir_db(username, current_directory, directory);
+      return outcome == CreateDirectoryResult::committed;
+    };
+
+    return _metadata_cache->write(username, current_directory, writer);
+  };
+
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+
+  return outcome;
 }
 
 UploadCommitResult MetadataService::commit_upload(const std::string& username,
@@ -417,6 +398,84 @@ UploadCommitResult MetadataService::commit_upload(const std::string& username,
 
 MetadataCacheStats MetadataService::metadata_cache_stats() const {
   return _metadata_cache->stats();
+}
+
+DeleteFileResult MetadataService::delete_file_db(const std::string& username,
+                                                 const std::string& directory,
+                                                 const std::string& file_name) {
+  auto connection = _db_conn_pool.get_connection();
+  if (!connection) {
+    return DeleteFileResult::failed;
+  }
+
+  return delete_file_transaction(*connection, username, directory, file_name);
+}
+
+DeleteFileResult MetadataService::delete_file(const std::string& username,
+                                              const std::string& directory,
+                                              const std::string& file_name) {
+  DeleteFileResult outcome = DeleteFileResult::failed;
+
+  auto work = [&]() -> bool {
+    if (username.empty() || directory.empty() || !Transfer::valid_name(file_name)) {
+      return false;
+    }
+
+    auto writer = [&]() -> bool {
+      outcome = delete_file_db(username, directory, file_name);
+      return outcome == DeleteFileResult::committed;
+    };
+
+    return _metadata_cache->write(username, directory, writer);
+  };
+
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+
+  return outcome;
+}
+
+DeleteDirectoryResult MetadataService::delete_empty_directory_db(
+    const std::string& username, const std::string& current_directory,
+    const std::string& directory_name) {
+  auto connection = _db_conn_pool.get_connection();
+  if (!connection) {
+    BASE::mysql_logger()->error("delete empty dir failed");
+    return DeleteDirectoryResult::failed;
+  }
+
+  return delete_empty_directory_transaction(*connection, username, current_directory,
+                                            directory_name);
+}
+
+DeleteDirectoryResult MetadataService::delete_empty_directory(const std::string& username,
+                                                              const std::string& current_directory,
+                                                              const std::string& directory_name) {
+  DeleteDirectoryResult outcome = DeleteDirectoryResult::failed;
+
+  auto work = [&]() -> bool {
+    if (username.empty() || current_directory.empty() || !Transfer::valid_name(directory_name)) {
+      return false;
+    }
+
+    const std::string target_path = current_directory == "/"
+                                        ? current_directory + directory_name
+                                        : current_directory + "/" + directory_name;
+
+    if (target_path.size() > 1024) {
+      return false;
+    }
+
+    auto writer = [&]() -> bool {
+      outcome = delete_empty_directory_db(username, current_directory, directory_name);
+      return outcome == DeleteDirectoryResult::committed;
+    };
+
+    return _metadata_cache->write_two_directories(username, current_directory, target_path, writer);
+  };
+
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+
+  return outcome;
 }
 
 }  // namespace TLSS::FileStorage

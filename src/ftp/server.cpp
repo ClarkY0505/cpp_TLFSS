@@ -8,8 +8,10 @@
 #include "ftp/server.h"
 #include "ftp/service_logger.h"
 #include "ftp/transfer_protocol.h"
+#include "ftp/transfer_validation.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -27,7 +29,7 @@
 namespace TLSS::FileStorage {
 
 namespace {
-enum HandleCommand { login, signup, cd, ls, pwd, mkdir, download, upload, unknown };
+enum HandleCommand { login, signup, cd, ls, pwd, mkdir, rmdir, rm, download, upload, unknown };
 
 void transfer_prompt(const NET::TcpConnectionPtr& conn,
                      const std::shared_ptr<ConnectionSession>& session) {
@@ -52,6 +54,12 @@ std::optional<HandleCommand> string_to_command(std::string_view command) {
   }
   if (command == "mkdir") {
     return HandleCommand::mkdir;
+  }
+  if (command == "rmdir") {
+    return HandleCommand::rmdir;
+  }
+  if (command == "rm") {
+    return HandleCommand::rm;
   }
   if (command == "download") {
     return HandleCommand::download;
@@ -444,8 +452,8 @@ bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
   }
 
   if (command == "help" || command == "h") {
-    conn->send("Commands : ls pwd cd mkdir upload or download\r\ntlss@" + session->name + ":" +
-               session->current_directory + ">");
+    conn->send("Commands : ls pwd cd rm mkdir rmdir upload or download\r\ntlss@" + session->name +
+               ":" + session->current_directory + ">");
     return true;
   }
 
@@ -474,8 +482,16 @@ bool StorageService::dispatch_task(const NET::TcpConnectionPtr& conn,
       handle_pwd(conn, session);
       break;
 
+    case HandleCommand::rm:
+      handle_rm(conn, session, args);
+      break;
+
     case HandleCommand::mkdir:
       handle_mkdir(conn, session, args);
+      break;
+
+    case HandleCommand::rmdir:
+      handle_rmdir(conn, session, args);
       break;
 
     case HandleCommand::download:
@@ -603,7 +619,9 @@ void StorageService::handle_mkdir(const NET::TcpConnectionPtr& conn,
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
       if (_metrics)
+      {
         _metrics->add(OBSERVABILITY::Metric::commands_rejected);
+      }
       conn->send("Server busy. Please retry.\r\n");
       return;
     }
@@ -613,15 +631,37 @@ void StorageService::handle_mkdir(const NET::TcpConnectionPtr& conn,
 void StorageService::create_dir(const std::string& username, const std::string& current_directory,
                                 const std::string& directory,
                                 std::weak_ptr<NET::TcpConnection>& connection) {
-  bool res = _metadata_service.create_dir(username, current_directory, directory);
+  CreateDirectoryResult outcome = CreateDirectoryResult::failed;
+
+  try {
+    outcome = _metadata_service.create_dir(username, current_directory, directory);
+  } catch (...) {
+    // 元数据服务已统计失败；避免异常逃出业务任务。
+    outcome = CreateDirectoryResult::failed;
+  }
+
   auto conn = connection.lock();
   if (!conn || !conn->connected()) {
     return;
   }
-  if (!res) {
-    conn->send("create dir failed\r\n");
-    return;
+
+  switch (outcome) {
+    case CreateDirectoryResult::committed:
+      conn->send("Directory created.\r\n");
+      break;
+
+    case CreateDirectoryResult::failed:
+      conn->send("Cannot create directory.\r\n");
+      break;
+
+    case CreateDirectoryResult::outcome_unknown:
+    default:
+      conn->send(
+          "Directory creation result is unknown. "
+          "Check the directory state.\r\n");
+      break;
   }
+
   conn->send("tlss@" + username + ":" + current_directory + ">");
 }
 
@@ -721,7 +761,9 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
 
   auto on_timeout = [this, original, connection, io_loop, attempt] {
     if (_metrics)
+    {
       _metrics->add(OBSERVABILITY::Metric::auth_queue_timeouts);
+    }
     // submit_async 的超时回调不在连接 IO 线程中执行。
     io_loop->queue_in_loop([this, original, connection, attempt] {
       finish_authentication(original, connection, attempt, AUTH::AuthResult{});
@@ -735,7 +777,9 @@ bool StorageService::handle_auth_command(const NET::TcpConnectionPtr& conn,
 
   if (!accepted) {
     if (_metrics)
+    {
       _metrics->add(OBSERVABILITY::Metric::commands_rejected);
+    }
     // 当前已经在该连接的 IO 线程，可以直接处理失败结果。
     finish_authentication(original, connection, attempt, AUTH::AuthResult{});
   }
@@ -789,7 +833,9 @@ void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
                         : OBSERVABILITY::Metric::signup_failed);
       if (result.status == AUTH::SignupStatus::k_backend_unavailable ||
           result.status == AUTH::SignupStatus::k_outcome_unknown)
+      {
         _metrics->add(OBSERVABILITY::Metric::auth_backend_failures);
+      }
     }
     io_loop->queue_in_loop(
         [this, original, connection, attempt, result = std::move(result)]() mutable {
@@ -798,7 +844,9 @@ void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
   };
   auto on_timeout = [this, original, connection, io_loop, attempt] {
     if (_metrics)
+    {
       _metrics->add(OBSERVABILITY::Metric::auth_queue_timeouts);
+    }
     io_loop->queue_in_loop([this, original, connection, attempt] {
       finish_signup(original, connection, attempt, {});
     });
@@ -807,7 +855,9 @@ void StorageService::handle_signup_command(const NET::TcpConnectionPtr& conn,
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   if (!_th_pool.submit_async(std::move(task), deadline, std::move(on_timeout))) {
     if (_metrics)
+    {
       _metrics->add(OBSERVABILITY::Metric::commands_rejected);
+    }
     finish_signup(original, connection, attempt, {});
   }
 }
@@ -923,7 +973,9 @@ void StorageService::transfer_failed(const NET::TcpConnectionPtr& conn,
                                      const std::shared_ptr<ConnectionSession>& session,
                                      const std::string& error) {
   if (session->transfer)
+  {
     session->transfer->cancel();
+  }
   ++session->transfer_generation;
   session->transfer.reset();
   Transfer::send_control(conn, "ERROR " + Transfer::quote(Transfer::safe_error(error)));
@@ -1142,6 +1194,276 @@ bool StorageService::prepare_storage() {
   // 归还连接
   // 恢复 DELETING 对象
   return _object_gc.recover_deleting(std::chrono::minutes{10});
+}
+
+void StorageService::handle_rm(const NET::TcpConnectionPtr& conn,
+                               const std::shared_ptr<ConnectionSession>& session,
+                               const std::string& args) {
+  // 1. _stopping 为真：关闭连接并返回
+  if (_stopping.load()) {
+    conn->force_close();
+    return;
+  }
+  // 2. 用户未认证：发送 "Login required.\r\n" 并返回
+  if (session->login_state != LoginState::k_authenticated) {
+    conn->send("Login required.\r\n");
+    return;
+  }
+  // 3. 存在 session->transfer，或 directory_change_pending 为真：发送 "Please wait.\r\n" 并返回
+  if (session->transfer || session->directory_change_pending) {
+    conn->send("Please wait.\r\n");
+    return;
+  }
+
+  std::string file_name;
+  // 4. 解析恰好一个文件名
+  try {
+    std::istringstream input(args);
+    file_name = Transfer::read_field(input);
+    Transfer::require_end(input);
+    if (!Transfer::valid_name(file_name)) {
+      conn->send("Invalid filename.\r\n");
+      transfer_prompt(conn, session);
+      return;
+    }
+
+  } catch (const std::exception& exception) {
+    conn->send("Usage: rm \"filename\"\r\n");
+    transfer_prompt(conn, session);
+    return;
+  }
+  auto original = std::weak_ptr<ConnectionSession>(session);
+  auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+
+  auto task =
+      std::bind(&StorageService::remove_file_by_current_dir, this, session->name,
+                session->current_directory, file_name, original, connection, conn->get_loop());
+
+  // 暂时复用此标志，阻止删除期间继续提交普通命令。
+  session->directory_change_pending = true;
+
+  bool accepted = false;
+  try {
+    accepted = _th_pool.try_run(std::move(task));
+  } catch (...) {
+    session->directory_change_pending = false;
+    throw;
+  }
+
+  if (!accepted) {
+    session->directory_change_pending = false;
+    if (_metrics) {
+      _metrics->add(OBSERVABILITY::Metric::commands_rejected);
+    }
+    conn->send("Server busy. Please retry.\r\n");
+    transfer_prompt(conn, session);
+    return;
+  }
+}
+
+void StorageService::remove_file_by_current_dir(const std::string& username,
+                                                const std::string& directory,
+                                                const std::string& file_name,
+                                                const std::weak_ptr<ConnectionSession>& original,
+                                                const std::weak_ptr<NET::TcpConnection>& connection,
+                                                NET::EventLoop* io_loop) {
+  DeleteFileResult outcome = DeleteFileResult::failed;
+  // 业务线程：执行数据库删除，不访问会话字段
+  try {
+    outcome = _metadata_service.delete_file(username, directory, file_name);
+  } catch (...) {
+    // MetadataService 已记录失败指标。
+    // 在任务入口处理异常，避免异常逃出业务线程。
+    outcome = DeleteFileResult::failed;
+  }
+
+  // IO 线程：检查会话、恢复状态并发送结果
+  auto check_task = [this, original, connection, username, directory, outcome] {
+    auto session = original.lock();
+    auto conn = connection.lock();
+
+    if (!session || !conn || !conn->connected()) {
+      return;
+    }
+
+    // 确认连接仍然对应提交任务时的会话。
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      auto it = _sessions.find(conn.get());
+
+      if (it == _sessions.end() || it->second != session) {
+        return;
+      }
+    }
+
+    // 丢弃已经不适用于当前会话状态的结果。
+    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+        session->current_directory != directory || !session->directory_change_pending) {
+      return;
+    }
+
+    session->directory_change_pending = false;
+
+    if (_stopping.load()) {
+      conn->force_close();
+      return;
+    }
+
+    switch (outcome) {
+      case DeleteFileResult::committed:
+        conn->send("File removed.\r\n");
+        break;
+
+      case DeleteFileResult::failed:
+        conn->send("Cannot remove file.\r\n");
+        break;
+
+      case DeleteFileResult::outcome_unknown:
+      default:
+        conn->send(
+            "Delete result is unknown. "
+            "Check the directory state.\r\n");
+        break;
+    }
+
+    transfer_prompt(conn, session);
+  };
+
+  // 将检查会话，恢复结果的任务交给io线程去做
+  io_loop->queue_in_loop(std::move(check_task));
+}
+
+void StorageService::handle_rmdir(const NET::TcpConnectionPtr& conn,
+                                  const std::shared_ptr<ConnectionSession>& session,
+                                  const std::string& args) {
+  if (_stopping.load()) {
+    conn->force_close();
+    return;
+  }
+
+  if (session->login_state != LoginState::k_authenticated) {
+    conn->send("Login required.\r\n");
+    return;
+  }
+
+  if (session->transfer || session->directory_change_pending) {
+    conn->send("Please wait.\r\n");
+    return;
+  }
+
+  std::string directory_name;
+  try {
+    std::istringstream input(args);
+    directory_name = Transfer::read_field(input);
+    Transfer::require_end(input);
+    if (!Transfer::valid_name(directory_name)) {
+      conn->send("Invalid directory name.\r\n");
+      transfer_prompt(conn, session);
+      return;
+    }
+  } catch (const std::exception&) {
+    conn->send("Usage: rmdir \"directory\"\r\n");
+    transfer_prompt(conn, session);
+    return;
+  }
+
+  auto original = std::weak_ptr<ConnectionSession>(session);
+  auto connection = std::weak_ptr<NET::TcpConnection>(conn);
+
+  auto task =
+      std::bind(&StorageService::remove_empty_directory_by_current_dir, this, session->name,
+                session->current_directory, directory_name, original, connection, conn->get_loop());
+  session->directory_change_pending = true;
+
+  bool accepted = false;
+  try {
+    accepted = _th_pool.try_run(std::move(task));
+  } catch (...) {
+    session->directory_change_pending = false;
+    throw;
+  }
+
+  if (!accepted) {
+    session->directory_change_pending = false;
+    if (_metrics) {
+      _metrics->add(OBSERVABILITY::Metric::commands_rejected);
+    }
+    conn->send("Server busy. Please retry.\r\n");
+    transfer_prompt(conn, session);
+    return;
+  }
+}
+
+void StorageService::remove_empty_directory_by_current_dir(
+    const std::string& username, const std::string& directory, const std::string& directory_name,
+    const std::weak_ptr<ConnectionSession>& original,
+    const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop) {
+  DeleteDirectoryResult outcome = DeleteDirectoryResult::failed;
+
+  try {
+    outcome = _metadata_service.delete_empty_directory(username, directory, directory_name);
+  } catch (...) {
+    // MetadataService 已记录失败指标。
+    // 在任务入口捕获异常，避免异常逃出业务线程。
+    outcome = DeleteDirectoryResult::failed;
+  }
+  auto check_task = [this, original, connection, username, directory, outcome] {
+    auto session = original.lock();
+    auto conn = connection.lock();
+
+    if (!session || !conn || !conn->connected()) {
+      return;
+    }
+
+    // 确认连接仍然对应提交任务时的会话。
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      auto it = _sessions.find(conn.get());
+
+      if (it == _sessions.end() || it->second != session) {
+        return;
+      }
+    }
+
+    // 丢弃已经不适用于当前会话状态的结果。
+    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+        session->current_directory != directory || !session->directory_change_pending) {
+      return;
+    }
+
+    session->directory_change_pending = false;
+
+    if (_stopping.load()) {
+      conn->force_close();
+      return;
+    }
+
+    switch (outcome) {
+      case DeleteDirectoryResult::committed:
+        conn->send("directory removed.\r\n");
+        break;
+
+      case DeleteDirectoryResult::failed:
+        conn->send("Cannot remove directory.\r\n");
+        break;
+
+      case DeleteDirectoryResult::not_empty:
+        conn->send("Directory is not empty.\r\n");
+        break;
+
+      case DeleteDirectoryResult::outcome_unknown:
+      default:
+        conn->send(
+            "Delete result is unknown. "
+            "Check the directory state.\r\n");
+        break;
+    }
+
+    transfer_prompt(conn, session);
+  };
+
+  // 将检查会话，恢复结果的任务交给io线程去做
+  io_loop->queue_in_loop(std::move(check_task));
 }
 
 }  // namespace TLSS::FileStorage

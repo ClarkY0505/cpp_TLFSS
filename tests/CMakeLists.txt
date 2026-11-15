@@ -78,6 +78,9 @@ add_executable(test_metadata_cache
     # 元数据登记现在依赖对象仓储与显式上传事务。
     ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/file_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_creation.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_deletion.cpp
 )
 add_dependencies(test_metadata_cache prepare_runtime_directories)
 target_link_libraries(test_metadata_cache PRIVATE common_lib OpenSSL::Crypto)
@@ -85,6 +88,16 @@ foreach(scenario IN ITEMS list cd download failures writes failed_write unknown_
         local_invalidation partition_concurrency ttl large statistics disabled arc shared config)
     add_test(NAME metadata_cache_${scenario} COMMAND test_metadata_cache ${scenario})
     set_tests_properties(metadata_cache_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 双目录协调仅测试真实缓存，无数据库替代或服务启动。
+add_executable(test_metadata_cache_pair test_metadata_cache_pair.cpp)
+add_dependencies(test_metadata_cache_pair prepare_runtime_directories)
+target_link_libraries(test_metadata_cache_pair PRIVATE common_lib Threads::Threads)
+foreach(scenario IN ITEMS success failure exception nonstandard_exception same_directory collision
+        readers reverse_order independent stale_fill removed_directory disabled move_only)
+    add_test(NAME metadata_cache_pair_${scenario} COMMAND test_metadata_cache_pair ${scenario})
+    set_tests_properties(metadata_cache_pair_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
 
 # Compile the real FTP handlers with local database/authentication substitutes.
@@ -101,6 +114,9 @@ add_executable(test_ftp_transfer
     ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
     # 文件登记与对象登记现在共同调用上传事务实现。
     ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/file_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_creation.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_deletion.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_garbage_collector.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_transaction.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_gc_worker.cpp
@@ -123,7 +139,24 @@ foreach(scenario IN ITEMS
         prepare_orphan_valid prepare_orphan_corrupt prepare_orphan_existing
         prepare_orphan_lookup_failure prepare_orphan_insert_failure
         gc_start_failure gc_late_start_failure gc_shutdown_idle gc_shutdown_wait
-        gc_unstarted_cleanup)
+        gc_unstarted_cleanup
+        rm_success rm_help rm_invalid rm_unauthenticated rm_transfer_busy rm_directory_busy
+        rm_queue_full rm_pool_stopped rm_missing rm_delete_failure rm_zero rm_exception
+        rm_nonstandard_exception rm_unknown_applied rm_unknown_not_applied rm_pending
+        rm_stale_session rm_expired_session rm_stale_identity rm_stale_directory
+        rm_stale_login rm_stale_pending rm_disconnect rm_stopping
+        mkdir_success mkdir_unknown_applied mkdir_unknown_not_applied mkdir_sql_failure
+        mkdir_zero mkdir_exception mkdir_nonstandard_exception mkdir_missing_parent mkdir_invalid
+        mkdir_queue_full mkdir_pool_stopped mkdir_pending mkdir_disconnect mkdir_unauthenticated
+        # 空目录删除：命令分发、四态响应、参数、并发会话与停机边界。
+        rmdir_success rmdir_help rmdir_invalid rmdir_unauthenticated
+        rmdir_transfer_busy rmdir_directory_busy rmdir_queue_full rmdir_pool_stopped
+        rmdir_missing rmdir_missing_parent rmdir_not_empty_file rmdir_not_empty_directory
+        rmdir_child_query_failure rmdir_child_malformed rmdir_borrow_failure rmdir_borrow_exception
+        rmdir_delete_failure rmdir_zero rmdir_exception rmdir_nonstandard_exception
+        rmdir_unknown_applied rmdir_unknown_not_applied rmdir_pending
+        rmdir_stale_session rmdir_expired_session rmdir_stale_identity rmdir_stale_directory
+        rmdir_stale_login rmdir_stale_pending rmdir_disconnect rmdir_stopping rmdir_stopping_entry)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
@@ -274,6 +307,101 @@ add_dependencies(test_upload_registration prepare_runtime_directories)
 target_link_libraries(test_upload_registration PRIVATE common_lib)
 add_test(NAME upload_registration_test COMMAND test_upload_registration)
 set_tests_properties(upload_registration_test PROPERTIES TIMEOUT 15)
+
+# 真实删除事务函数；数据库连接与事务边界由测试替代，不连接 MySQL。
+add_executable(test_file_deletion
+    test_file_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/file_deletion.cpp
+)
+add_dependencies(test_file_deletion prepare_runtime_directories)
+target_link_libraries(test_file_deletion PRIVATE common_lib)
+foreach(scenario IN ITEMS invalid_arguments path_limits begin_failure existing_transaction
+        user_results parent_results file_results delete_results committed unknown_applied
+        unknown_not_applied commit_not_active exceptions repeat object_retention)
+    add_test(NAME file_deletion_${scenario} COMMAND test_file_deletion ${scenario})
+    set_tests_properties(file_deletion_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 目录创建事务：替代数据库边界，验证用户锁顺序、同名冲突和事务收尾。
+add_executable(test_directory_creation
+    test_directory_creation.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_creation.cpp
+)
+add_dependencies(test_directory_creation prepare_runtime_directories)
+target_link_libraries(test_directory_creation PRIVATE common_lib)
+foreach(scenario IN ITEMS invalid_arguments path_limits begin_failure existing_transaction
+        user_results parent_results invalid_parents duplicate_file duplicate_directory
+        insert_results committed root_parent quoted_name unknown_applied unknown_not_applied
+        commit_not_active parent_moved parent_replaced exceptions repeat)
+    add_test(NAME directory_creation_${scenario} COMMAND test_directory_creation ${scenario})
+    set_tests_properties(directory_creation_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 空目录删除事务：替代数据库边界，验证根目录保护、判空和事务收尾。
+add_executable(test_directory_deletion
+    test_directory_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_deletion.cpp
+)
+add_dependencies(test_directory_deletion prepare_runtime_directories)
+target_link_libraries(test_directory_deletion PRIVATE common_lib)
+foreach(scenario IN ITEMS invalid_arguments path_limits begin_failure existing_transaction
+        user_results parent_results target_results children_results nonempty_file
+        nonempty_directory invalid_targets root_protection exact_path delete_results committed
+        unknown_applied unknown_not_applied commit_not_active exceptions repeat)
+    add_test(NAME directory_deletion_${scenario} COMMAND test_directory_deletion ${scenario})
+    set_tests_properties(directory_deletion_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 递归目录删除：执行真实事务函数，替代数据库验证整棵子树的原子删除。
+add_executable(test_directory_tree_deletion
+    test_directory_tree_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_deletion.cpp
+)
+add_dependencies(test_directory_tree_deletion prepare_runtime_directories)
+target_link_libraries(test_directory_tree_deletion PRIVATE common_lib)
+foreach(scenario IN ITEMS invalid_arguments path_limits begin_failure existing_transaction
+        user_results parent_results target_results invalid_targets exact_path children_results
+        child_values duplicate_ids query_failure delete_failure delete_zero delete_many
+        committed unknown_applied unknown_not_applied commit_not_active exceptions repeat
+        empty_tree nested_tree wide_tree deep_tree literal_names root_child)
+    add_test(NAME directory_tree_deletion_${scenario} COMMAND test_directory_tree_deletion ${scenario})
+    set_tests_properties(directory_tree_deletion_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 运行真实服务、缓存和删除事务；替代数据库边界验证失效、结果传播及并发读取。
+add_executable(test_metadata_deletion
+    test_metadata_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/file_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_creation.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/directory_deletion.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/upload_registration.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/object_repository.cpp
+)
+add_dependencies(test_metadata_deletion prepare_runtime_directories)
+target_link_libraries(test_metadata_deletion PRIVATE common_lib Threads::Threads)
+foreach(scenario IN ITEMS committed unknown_applied unknown_not_applied borrow_failure
+        begin_failure query_failure missing_file delete_failure delete_zero borrow_exception
+        query_exception delete_exception invalid_arguments concurrent shared disabled)
+    add_test(NAME metadata_deletion_${scenario} COMMAND test_metadata_deletion ${scenario})
+    set_tests_properties(metadata_deletion_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 同一服务层替代数据库还验证 mkdir 的三态返回、缓存失效与并发读取。
+foreach(scenario IN ITEMS committed unknown_applied unknown_not_applied borrow_failure
+        begin_failure query_failure insert_failure insert_zero borrow_exception query_exception
+        insert_exception invalid_arguments concurrent shared disabled duplicate_file)
+    add_test(NAME metadata_creation_${scenario} COMMAND test_metadata_deletion creation_${scenario})
+    set_tests_properties(metadata_creation_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
+
+# 空目录删除使用相同服务层替代数据库，验证父目录和目标目录的缓存范围。
+foreach(scenario IN ITEMS committed not_empty_file not_empty_directory unknown_applied
+        unknown_not_applied borrow_failure begin_failure query_failure delete_failure delete_zero
+        borrow_exception query_exception delete_exception invalid_arguments concurrent shared disabled wrong_case)
+    add_test(NAME metadata_rmdir_${scenario} COMMAND test_metadata_deletion rmdir_${scenario})
+    set_tests_properties(metadata_rmdir_${scenario} PROPERTIES TIMEOUT 15)
+endforeach()
 
 foreach(scenario IN ITEMS thresholds schema lifecycle resources transport configuration self_stop)
     add_test(NAME storage_monitor_${scenario} COMMAND test_storage_monitor_runtime ${scenario})

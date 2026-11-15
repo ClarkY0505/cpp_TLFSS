@@ -78,7 +78,6 @@ struct DirectoryGate {
 
   void advance() noexcept {
     // 版本耗尽后关闭该分片的版本缓存，防止回绕后旧记录再次有效。
-    // CD 不依赖版本，因此仍可以正常命中和过期。
     if (generation == std::numeric_limits<std::uint64_t>::max()) {
       versioned_cache_enabled = false;
       return;
@@ -155,9 +154,10 @@ class MetadataCache {
   template <typename Loader>
   StorageContext<std::string> cd(const std::string& username, const std::string& directory,
                                  const std::string& argument, Loader&& loader) {
-    // 当前只新增、不删除/移动目录；已有成功路径只检查 TTL，不跟随写入失效。
+    // 当前只新增、不删除/移动目录；已有成功路径只检查 TTL和版本，写入后按版本失效
+    bool check_version = true;
     return read(_cd_paths, make_key(username, directory, argument), make_key(username, directory),
-                false, std::forward<Loader>(loader));
+                check_version, std::forward<Loader>(loader));
   }
 
   template <typename Writer>
@@ -176,6 +176,37 @@ class MetadataCache {
     // 结果不确定的情况；此清理过程不分配内存，不会在提交后额外抛异常。
     InvalidateOnExit invalidate{gate};
     // 回调只能调用数据库方法，不能再次进入同一缓存的读写接口。
+    return std::forward<Writer>(writer)();
+  }
+
+  template <typename Writer>
+  bool write_two_directories(const std::string& username, const std::string& first_directory,
+                             const std::string& second_directory, Writer&& writer) {
+    auto& first = gate_for(make_key(username, first_directory));
+    auto& second = gate_for(make_key(username, second_directory));
+
+    // 不同目录也可能映射到同一分片，此时只加一次锁
+    if (&first == &second) {
+      return write(username, first_directory, std::forward<Writer>(writer));
+    }
+
+    std::unique_lock<std::shared_mutex> first_lock(first.mutex, std::defer_lock);
+    std::unique_lock<std::shared_mutex> second_lock(second.mutex, std::defer_lock);
+
+    // 统一获取两把锁，避免两个调用以相反顺序加锁而死锁
+    std::lock(first_lock, second_lock);
+
+    struct InvalidateOnExit {
+      MetadataCacheDetail::DirectoryGate& first;
+      MetadataCacheDetail::DirectoryGate& second;
+
+      ~InvalidateOnExit() {
+        first.advance();
+        second.advance();
+      }
+    };
+
+    InvalidateOnExit invalidate{first, second};
     return std::forward<Writer>(writer)();
   }
 

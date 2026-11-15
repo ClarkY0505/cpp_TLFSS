@@ -13,6 +13,9 @@ add_library(metadata_lib
     metadata_service.cpp 
     metadata_root.cpp 
     upload_registration.cpp
+    directory_creation.cpp
+    directory_deletion.cpp
+    file_deletion.cpp
     object_repository.cpp
     object_gc_transaction.cpp
 )

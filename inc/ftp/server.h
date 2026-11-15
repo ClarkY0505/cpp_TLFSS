@@ -94,6 +94,26 @@ class StorageService {
   void handle_mkdir(const NET::TcpConnectionPtr& conn,
                     const std::shared_ptr<ConnectionSession>& session,
                     const std::string& directory);
+  // 在连接所属的 IO 线程中执行：解析参数、检查状态、提交任务。
+  void handle_rm(const NET::TcpConnectionPtr& conn,
+                 const std::shared_ptr<ConnectionSession>& session, const std::string& args);
+  // IO 线程：校验参数和会话状态，提交业务任务。
+  void handle_rmdir(const NET::TcpConnectionPtr& conn,
+                    const std::shared_ptr<ConnectionSession>& session, const std::string& args);
+
+  // 业务线程：删除空目录，将结果投递回 IO 线程。
+  void remove_empty_directory_by_current_dir(const std::string& username,
+                                             const std::string& directory,
+                                             const std::string& directory_name,
+                                             const std::weak_ptr<ConnectionSession>& original,
+                                             const std::weak_ptr<NET::TcpConnection>& connection,
+                                             NET::EventLoop* io_loop);
+  // 在业务线程中执行：删除元数据，再向 IO 线程投递结果。
+  void remove_file_by_current_dir(const std::string& username, const std::string& directory,
+                                  const std::string& file_name,
+                                  const std::weak_ptr<ConnectionSession>& original,
+                                  const std::weak_ptr<NET::TcpConnection>& connection,
+                                  NET::EventLoop* io_loop);
   void create_dir(const std::string& username, const std::string& current_directory,
                   const std::string& directory, std::weak_ptr<NET::TcpConnection>& connection);
   // 异步线程超时处理

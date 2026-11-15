@@ -174,7 +174,7 @@ DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
   throw std::runtime_error("unexpected upload write: " + sql);
 }
 
-// 此替代层关注缓存行为，事务原子性由独立上传登记测试覆盖。
+// 此替代层关注缓存失效，事务原子性由独立上传登记和目录创建测试覆盖。
 DbTransaction::DbTransaction(DbConnection& connection) noexcept
     : connection_(connection)
     , active_(!connection._transaction_active) {
@@ -283,7 +283,7 @@ void test_failures(StorageEngine& engine) {
   engine.find_download_hash("alice", "/", "missing");
   engine.find_download_hash("alice", "/", "missing");
   check(database.queries.load() == before + 4, "missing metadata was cached");
-  check(engine.create_dir("alice", "/", "missing"), "mkdir failed");
+  check(engine.create_dir("alice", "/", "missing") == CreateDirectoryResult::committed, "mkdir failed");
   check(engine.move_dir_by_current_dir("alice", "/", "missing").success,
         "negative cd result hid the new directory");
 }
@@ -292,7 +292,7 @@ void test_writes(StorageEngine& engine) {
   engine.find_file_by_current_dir("alice", "/");
   engine.find_download_hash("alice", "/", "a.txt");
   engine.move_dir_by_current_dir("alice", "/", "docs");
-  check(engine.create_dir("alice", "/", "new"), "mkdir failed");
+  check(engine.create_dir("alice", "/", "new") == CreateDirectoryResult::committed, "mkdir failed");
   check(engine.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#1",
         "mkdir did not invalidate listing");
   int before = database.queries.load();
@@ -300,7 +300,7 @@ void test_writes(StorageEngine& engine) {
   check(database.queries.load() == before + 1, "mkdir did not invalidate download hash");
   before = database.queries.load();
   engine.move_dir_by_current_dir("alice", "/", "docs");
-  check(database.queries.load() == before, "mkdir invalidated hot cd paths");
+  check(database.queries.load() == before + 1, "mkdir did not invalidate the old cd path");
 
   check(engine.commit_upload("alice", "42", "/", "new.txt", std::string(64, 'a')) ==
             UploadCommitResult::committed,
@@ -312,7 +312,7 @@ void test_writes(StorageEngine& engine) {
   check(database.queries.load() == before + 1, "upload did not invalidate download hash");
   before = database.queries.load();
   engine.move_dir_by_current_dir("alice", "/", "docs");
-  check(database.queries.load() == before, "upload invalidated hot cd paths");
+  check(database.queries.load() == before + 1, "upload did not invalidate the old cd path");
 
   before = database.queries.load();
   engine.prepare_upload("alice", "/", "another.txt");
@@ -324,6 +324,8 @@ void test_unknown_commit(StorageEngine& engine) {
   // 先填充缓存，并确认后续读取不会再次查询数据库。
   const auto original_list = engine.find_file_by_current_dir("alice", "/");
   const auto original_hash = engine.find_download_hash("alice", "/", "a.txt");
+  check(engine.move_dir_by_current_dir("alice", "/", "docs").success,
+        "initial cd lookup failed");
   check(original_list.success && !original_list.result.empty(),
         "initial directory listing failed");
   check(original_hash.success, "initial download lookup failed");
@@ -331,6 +333,7 @@ void test_unknown_commit(StorageEngine& engine) {
   int before = database.queries.load();
   engine.find_file_by_current_dir("alice", "/");
   engine.find_download_hash("alice", "/", "a.txt");
+  engine.move_dir_by_current_dir("alice", "/", "docs");
   check(database.queries.load() == before, "initial metadata was not cached");
 
   // 目录内容已变化，但提交响应未知，不能把三态结果压缩成失败或成功。
@@ -356,17 +359,24 @@ void test_unknown_commit(StorageEngine& engine) {
   check(database.queries.load() == before + 1,
         "unknown commit left a stale download cache");
 
+  before = database.queries.load();
+  check(engine.move_dir_by_current_dir("alice", "/", "docs").result == "/docs",
+        "cd lookup failed after unknown commit");
+  check(database.queries.load() == before + 1, "unknown commit left the old cd path cached");
+
   // 重新加载后仍然可以正常命中缓存。
   before = database.queries.load();
   engine.find_file_by_current_dir("alice", "/");
   engine.find_download_hash("alice", "/", "a.txt");
+  engine.move_dir_by_current_dir("alice", "/", "docs");
   check(database.queries.load() == before, "refreshed metadata was not cached");
 }
 
 void test_failed_write(StorageEngine& engine) {
   engine.find_file_by_current_dir("alice", "/");
   database.fail_write.store(true);
-  check(!engine.create_dir("alice", "/", "uncertain"), "write failure was hidden");
+  check(engine.create_dir("alice", "/", "uncertain") == CreateDirectoryResult::failed,
+        "write failure was hidden");
   check(engine.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#1",
         "uncertain write left a stale listing");
   database.throw_write.store(true);
@@ -420,7 +430,8 @@ void test_stale_fill(StorageEngine& engine) {
   const bool writer_waited = writer.wait_for(20ms) == std::future_status::timeout;
   // 先释放读取线程再断言，避免断言失败后异步任务清理一直等待。
   release.set_value();
-  check(reader.get().success && writer.get(), "concurrent operations failed");
+  check(reader.get().success && writer.get() == CreateDirectoryResult::committed,
+        "concurrent operations failed");
   database.list_ready = {};
   check(writer_waited, "write interleaved with an unfinished cache fill");
   check(engine.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#1",
@@ -449,7 +460,7 @@ void test_local_invalidation(StorageEngine& engine) {
   engine.find_file_by_current_dir("alice", other);
   engine.find_download_hash("alice", other, "a.txt");
 
-  check(engine.create_dir("alice", "/", "new"), "建目录失败");
+  check(engine.create_dir("alice", "/", "new") == CreateDirectoryResult::committed, "建目录失败");
   const int before = database.queries.load();
   engine.find_file_by_current_dir("alice", other);
   engine.find_download_hash("alice", other, "a.txt");
@@ -574,7 +585,7 @@ void test_shared(StorageEngine& engine, const std::shared_ptr<MetadataCache>& ca
   engine.find_file_by_current_dir("alice", "/");
   second.find_file_by_current_dir("alice", "/");
   check(database.queries.load() == 2, "显式共享缓存的引擎未复用查询结果");
-  check(engine.create_dir("alice", "/", "new"), "共享缓存写入失败");
+  check(engine.create_dir("alice", "/", "new") == CreateDirectoryResult::committed, "共享缓存写入失败");
   check(second.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#1",
         "共享缓存的写后失效没有传播");
 }

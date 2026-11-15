@@ -32,8 +32,9 @@ class MetadataService {
   StorageContext<std::string> move_dir_by_current_dir(const std::string& username,
                                                       const std::string& current_directory,
                                                       const std::string& dir_name);
-  bool create_dir(const std::string& username, const std::string& current_directory,
-                  const std::string& directory);
+  CreateDirectoryResult create_dir(const std::string& username,
+                                   const std::string& current_directory,
+                                   const std::string& directory);
 
   StorageContext<std::string> prepare_upload(const std::string& username,
                                              const std::string& directory,
@@ -48,8 +49,14 @@ class MetadataService {
                                                  const std::string& file_name);
 
   MetadataCacheStats metadata_cache_stats() const;
+  // 删除当前目录下的文件，保留事务提交结果未知的状态。
+  DeleteFileResult delete_file(const std::string& username, const std::string& directory,
+                               const std::string& file_name);
+  // 删除当前目录下的空子目录，保留 not_empty 和 outcome_unknown。
+  DeleteDirectoryResult delete_empty_directory(const std::string& username,
+                                               const std::string& current_directory,
+                                               const std::string& directory_name);
 
-  // Called only within signup's existing transaction; never borrows or commits.
   static bool create_root_in_transaction(BASE::DbConnection& connection,
                                          const std::string& username);
 
@@ -64,11 +71,19 @@ class MetadataService {
   StorageContext<std::string> find_download_hash_db(const std::string& username,
                                                     const std::string& directory,
                                                     const std::string& file_name);
-  bool create_dir_db(const std::string& username, const std::string& current_directory,
-                     const std::string& directory);
+  CreateDirectoryResult create_dir_db(const std::string& username,
+                                      const std::string& current_directory,
+                                      const std::string& directory);
   UploadCommitResult commit_upload_db(const std::string& username, const std::string& parent_id,
-                        const std::string& directory, const std::string& file_name,
-                        const std::string& hash);
+                                      const std::string& directory, const std::string& file_name,
+                                      const std::string& hash);
+  // 借用数据库连接并调用删除事务；不进入缓存接口。
+  DeleteFileResult delete_file_db(const std::string& username, const std::string& directory,
+                                  const std::string& file_name);
+  // 借用连接并执行空目录删除事务，不进入缓存接口。
+  DeleteDirectoryResult delete_empty_directory_db(const std::string& username,
+                                                  const std::string& current_directory,
+                                                  const std::string& directory_name);
 
   std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
   BASE::DbConnectionPool& _db_conn_pool;

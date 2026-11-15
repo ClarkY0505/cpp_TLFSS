@@ -5,6 +5,7 @@
 #include "ftp/server.h"
 #include "ftp/service_engine.h"
 #include "ftp/storage_root_lock.h"
+#include "ftp/transfer_validation.h"
 
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -129,6 +130,30 @@ TLSS::BASE::Thread* watched_gc_thread = nullptr;
 std::atomic<bool> gc_callback_active{false};
 std::atomic<bool> shutdown_before_gc_finished{false};
 const std::string abc_hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+// rm 命令专用的数据库替代状态。其他 FTP 场景继续使用原有替代逻辑。
+std::atomic<bool> rm_mode{false};
+std::atomic<int> rm_queries{0}, rm_deletes{0}, rm_borrows{0};
+std::atomic<bool> rm_exists{true}, rm_pending_delete{false};
+bool rm_unknown_applies = false;
+int rm_failure = 0; // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常。
+std::thread::id rm_io_thread;
+const std::string rm_filename = "report with spaces.txt";
+// mkdir 使用独立替代状态，验证新三态接口从命令分发一直传递到网络响应。
+std::atomic<bool> mkdir_mode{false}, mkdir_exists{false}, mkdir_pending_insert{false};
+std::atomic<int> mkdir_borrows{0}, mkdir_queries{0}, mkdir_inserts{0};
+int mkdir_failure = 0; // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常，5 父目录不存在。
+bool mkdir_unknown_applies = false;
+std::thread::id mkdir_io_thread;
+// rmdir 的目录记录独立于共享对象；测试不能顺便删除对象文件或对象表记录。
+std::atomic<bool> rmdir_mode{false}, rmdir_exists{true}, rmdir_pending_delete{false};
+std::atomic<int> rmdir_borrows{0}, rmdir_queries{0}, rmdir_deletes{0};
+int rmdir_children = 0; // 0 为空，1 含文件，2 含子目录。
+// 1 DELETE 失败，2 零行，3/4 标准/非标准异常，5 父目录缺失，
+// 6 子项查询失败，7 子项结果格式错误，8 借连接失败，9 借连接抛异常。
+int rmdir_failure = 0;
+bool rmdir_unknown_applies = false;
+std::thread::id rmdir_io_thread;
+const std::string rmdir_name = "empty with spaces";
 void check(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
@@ -163,6 +188,24 @@ DbConnectionPool* DbConnectionPool::get_connection_pool() {
   return &pool;
 }
 DbConnectionHandle DbConnectionPool::get_connection() {
+  if (rmdir_mode.load()) {
+    ++rmdir_borrows;
+    check(std::this_thread::get_id() != rmdir_io_thread,
+          "rmdir borrowed a connection on the IO thread");
+    if (rmdir_failure == 8)
+      return {nullptr, DbConnectionDeleter{}};
+    if (rmdir_failure == 9)
+      throw std::runtime_error("injected rmdir connection exception");
+  }
+  if (mkdir_mode.load()) {
+    ++mkdir_borrows;
+    check(std::this_thread::get_id() != mkdir_io_thread, "mkdir borrowed a connection on the IO thread");
+  }
+  if (rm_mode.load()) {
+    ++rm_borrows;
+    check(std::this_thread::get_id() != rm_io_thread,
+          "rm borrowed a database connection on the IO thread");
+  }
   if (single_connection_only.load()) {
     check(startup_temporary_path.empty() || !std::filesystem::exists(startup_temporary_path),
           "startup borrowed a database connection before cleaning temporary files");
@@ -199,7 +242,74 @@ DbConnection::DbConnection()
     , _connected(false)
     , _transaction_active(false) {}
 DbConnection::~DbConnection() = default;
-DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::vector<DbValue>&) {
+DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::vector<DbValue>& params) {
+  if (rmdir_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
+              sql.find("FOR UPDATE") != std::string::npos,
+          "rmdir query ran outside its transaction, on the IO thread, or without a row lock");
+    const int stage = ++rmdir_queries;
+    if (stage == 1) {
+      check(sql.find("SELECT id FROM users ") == 0 && params == std::vector<DbValue>{"test_user"},
+            "rmdir did not lock the authenticated user first");
+      return {true, {{"1"}}};
+    }
+    if (stage == 2) {
+      check(sql.find("SELECT id FROM virtual_files ") == 0 &&
+                params == std::vector<DbValue>{"test_user", "/"},
+            "rmdir did not query the captured parent directory");
+      return rmdir_failure == 5 ? DbQueryResult{true, {}} : DbQueryResult{true, {{"42"}}};
+    }
+    if (stage == 3) {
+      check(sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user", "42", rmdir_name, "/" + rmdir_name},
+            "rmdir changed its captured target or omitted byte-exact path comparison");
+      return rmdir_exists.load() ? DbQueryResult{true, {{"128"}}} : DbQueryResult{true, {}};
+    }
+    check(stage == 4 && sql.find("file_type") == std::string::npos &&
+              params == std::vector<DbValue>{"test_user", "128"},
+          "rmdir skipped its emptiness check or excluded a child type");
+    if (rmdir_failure == 6) return {};
+    if (rmdir_failure == 7) return {true, {{"129", "extra column"}}};
+    if (rmdir_children != 0)
+      return {true, {{rmdir_children == 1 ? "129" : "130"}}};
+    return {true, {}};
+  }
+  if (mkdir_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != mkdir_io_thread,
+          "mkdir query ran outside its transaction or on the IO thread");
+    const int stage = ++mkdir_queries;
+    check(sql.find("FOR UPDATE") != std::string::npos, "mkdir omitted its row lock");
+    if (stage == 1) {
+      check(sql.find("SELECT id FROM users ") == 0 && params == std::vector<DbValue>{"test_user"},
+            "mkdir did not lock the authenticated user first");
+      return {true, {{"1"}}};
+    }
+    check(stage == 2 && sql.find("SELECT id FROM virtual_files ") == 0 &&
+              params == std::vector<DbValue>{"test_user", "/"},
+          "mkdir did not query the captured parent after locking the user");
+    return mkdir_failure == 5 ? DbQueryResult{true, {}} : DbQueryResult{true, {{"42"}}};
+  }
+  if (rm_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rm_io_thread,
+          "rm query ran outside its transaction or on the IO thread");
+    ++rm_queries;
+    check(sql.find("FOR UPDATE") != std::string::npos, "rm omitted a required row lock");
+    if (sql.find("SELECT id FROM users ") == 0) {
+      check(params == std::vector<DbValue>{"test_user"}, "rm changed the authenticated user");
+      return {true, {{"1"}}};
+    }
+    if (sql.find("SELECT id FROM virtual_files ") == 0) {
+      check(params == std::vector<DbValue>{"test_user", "/"}, "rm changed the captured directory");
+      return {true, {{"42"}}};
+    }
+    if (sql.find("SELECT id, object_hash FROM virtual_files ") == 0) {
+      check(params == std::vector<DbValue>{"test_user", "42", rm_filename},
+            "rm parsed the wrong filename or parent");
+      return rm_exists.load() ? DbQueryResult{true, {{"128", abc_hash}}}
+                             : DbQueryResult{true, {}};
+    }
+    throw std::runtime_error("unexpected rm query: " + sql);
+  }
   // LIMIT 0 预检成功时没有结果行，不能据此判断对象表不可用。
   if (sql.find("SELECT object_hash, state, unreferenced_at") == 0) {
     ++object_table_checks;
@@ -260,10 +370,55 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
   return {true, {{std::string("42")}}};
 }
 bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue>&) {
+  check(!rmdir_mode.load(), "rmdir attempted an unexpected nontransactional write");
   return true;
 }
 DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
                                                const std::vector<DbValue>& params) {
+  if (rmdir_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
+              rmdir_queries.load() == 4 && sql.find("DELETE FROM virtual_files ") == 0 &&
+              sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+              params == std::vector<DbValue>{"128", "test_user", "42", rmdir_name, "/" + rmdir_name},
+          "rmdir DELETE changed its target, ran on the IO thread, or ran before the emptiness check");
+    ++rmdir_deletes;
+    commit_gate.wait();
+    if (rmdir_failure == 1) return {false, 1213, 0, 0};
+    if (rmdir_failure == 2) return {true, 0, 0, 0};
+    if (rmdir_failure == 3) throw std::runtime_error("injected rmdir SQL exception");
+    if (rmdir_failure == 4) throw 7;
+    rmdir_pending_delete.store(true);
+    return {true, 0, 1, 0};
+  }
+  if (mkdir_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != mkdir_io_thread &&
+              sql.find("INSERT INTO virtual_files ") == 0 &&
+              params == std::vector<DbValue>{"drafts", "test_user", "42", "/drafts"},
+          "mkdir INSERT ran on the wrong thread, outside its transaction, or with incorrect parameters");
+    ++mkdir_inserts;
+    commit_gate.wait();
+    if (mkdir_failure == 1) return {false, 1213, 0, 0};
+    if (mkdir_failure == 2) return {true, 0, 0, 0};
+    if (mkdir_failure == 3) throw std::runtime_error("injected mkdir SQL exception");
+    if (mkdir_failure == 4) throw 7;
+    mkdir_pending_insert.store(true);
+    return {true, 0, 1, 500};
+  }
+  if (rm_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rm_io_thread,
+          "rm DELETE ran outside its transaction or on the IO thread");
+    check(sql.find("DELETE FROM virtual_files ") == 0 &&
+              params == std::vector<DbValue>{"128", "test_user", "42", rm_filename, abc_hash},
+          "rm attempted another database write or deleted a different file");
+    ++rm_deletes;
+    commit_gate.wait();
+    if (rm_failure == 1) return {false, 1213, 0, 0};
+    if (rm_failure == 2) return {true, 0, 0, 0};
+    if (rm_failure == 3) throw std::runtime_error("injected rm SQL exception");
+    if (rm_failure == 4) throw 7;
+    rm_pending_delete.store(true);
+    return {true, 0, 1, 0};
+  }
   // 启动回填使用普通 INSERT；上传登记则在显式事务中执行。
   if (!_transaction_active && single_connection_only.load() &&
       sql.find("INSERT INTO storage_objects ") == 0) {
@@ -319,6 +474,21 @@ DbCommitStatus DbTransaction::commit() noexcept {
     return DbCommitStatus::k_not_active;
 
   ++upload_commits;
+  if (rmdir_mode.load()) {
+    if (rmdir_pending_delete.load() && (!upload_outcome_unknown.load() || rmdir_unknown_applies))
+      rmdir_exists.store(false);
+    rmdir_pending_delete.store(false);
+  }
+  if (mkdir_mode.load()) {
+    if (mkdir_pending_insert.load() && (!upload_outcome_unknown.load() || mkdir_unknown_applies))
+      mkdir_exists.store(true);
+    mkdir_pending_insert.store(false);
+  }
+  if (rm_mode.load()) {
+    if (rm_pending_delete.load() && (!upload_outcome_unknown.load() || rm_unknown_applies))
+      rm_exists.store(false);
+    rm_pending_delete.store(false);
+  }
   connection_._transaction_active = false;
   active_ = false;
   // 未知结果仍结束客户端事务句柄，不能误报回滚已经撤销提交。
@@ -328,6 +498,12 @@ DbCommitStatus DbTransaction::commit() noexcept {
 
 bool DbTransaction::rollback() noexcept {
   if (active_) {
+    if (rmdir_mode.load())
+      rmdir_pending_delete.store(false);
+    if (mkdir_mode.load())
+      mkdir_pending_insert.store(false);
+    if (rm_mode.load())
+      rm_pending_delete.store(false);
     ++upload_rollbacks;
     connection_._transaction_active = false;
     active_ = false;
@@ -390,8 +566,8 @@ struct Fixture {
   std::shared_ptr<ConnectionSession> session;
   int peer = -1;
 
-  explicit Fixture(int workers = 0)
-      : service(&loop, InetAddress(0), "regression", 0, workers, 32, metrics) {
+  explicit Fixture(int workers = 0, int queue_size = 32)
+      : service(&loop, InetAddress(0), "regression", 0, workers, queue_size, metrics) {
     service._th_pool.start(workers);
     service._disk_executor.start(2);
     int sockets[2];
@@ -1039,7 +1215,535 @@ void check_gc_shutdown(bool active) {
         "service closed the database before GC finished and returned its connection");
 }
 
+void wait_rm_gate() {
+  std::unique_lock<std::mutex> lock(commit_gate.mutex);
+  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3), [] {
+    return commit_gate.entered;
+  }), "rm did not reach its database boundary");
+}
+
+// 实际网络分发 -> 实际业务线程 -> 实际删除事务 -> IO 回调。
+// 数据库替代层只模拟提交状态；真实 MySQL 的锁等待另行验证。
+void check_rm(const std::string& scenario, const std::string& directory) {
+  rm_mode.store(true);
+  rm_io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  // 断言抛异常时先释放数据库闸门，避免 Fixture 清理线程池时死锁。
+  CommitRelease release;
+  const auto request = "rm " + Transfer::quote(rm_filename) + "\n";
+  const std::string prompt = "tlss@test_user:/>";
+
+  if (scenario == "rm_help") {
+    fixture.receive("help\n");
+    check(fixture.await_wire(prompt).find(" rm ") != std::string::npos,
+          "rm was omitted from help");
+    check(rm_borrows.load() == 0, "help accessed the database");
+    return;
+  }
+  if (scenario == "rm_invalid") {
+    // 空参数、未闭合引号、多余参数，以及不能作为单个文件名的输入。
+    for (const auto& args : std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"",
+             "\"\"", "../a", "/a", ".", "..", std::string(256, 'x'),
+             Transfer::quote("a\\b"), Transfer::quote(std::string("a\0b", 3))}) {
+      fixture.receive("rm " + args + "\n");
+      const auto wire = fixture.await_wire(prompt);
+      check(wire.find("Usage: rm") != std::string::npos ||
+                wire.find("Invalid filename.") != std::string::npos,
+            "invalid rm arguments did not receive a local error");
+      check(fixture.conn->connected() && !fixture.session->directory_change_pending,
+            "invalid rm arguments closed or blocked the session");
+    }
+    check(rm_borrows.load() == 0 && rm_deletes.load() == 0,
+          "invalid rm arguments reached the database");
+    return;
+  }
+  if (scenario == "rm_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    // 先验证处理函数的防御性检查，再验证线上分发仍受认证交互拦截。
+    fixture.service.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
+    fixture.await_wire("Login required.");
+    fixture.receive(request);
+    fixture.drain();
+    check(rm_borrows.load() == 0 && fixture.conn->connected(),
+          "unauthenticated rm reached the database or closed the connection");
+    return;
+  }
+  if (scenario == "rm_transfer_busy" || scenario == "rm_directory_busy") {
+    const auto generation = fixture.session->transfer_generation;
+    if (scenario == "rm_transfer_busy") {
+      fixture.session->transfer = fixture.service._upload_engine.create(
+          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+          [](TransferEvent) {});
+    } else {
+      fixture.session->directory_change_pending = true;
+    }
+    auto transfer = fixture.session->transfer;
+    const auto current_generation = fixture.session->transfer_generation;
+    // 活动传输时 on_message 有更上层的协议检查，这里单独验证 handle_rm 不取消传输。
+    fixture.service.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
+    fixture.await_wire("Please wait.");
+    check(fixture.conn->connected() && fixture.session->transfer == transfer &&
+              fixture.session->transfer_generation == current_generation &&
+              rm_borrows.load() == 0, "busy rm cancelled a transfer or accessed the database");
+    check(current_generation >= generation, "transfer generation moved backwards");
+    fixture.session->transfer.reset();
+    return;
+  }
+  if (scenario == "rm_queue_full" || scenario == "rm_pool_stopped") {
+    if (scenario == "rm_queue_full") {
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }),
+            "could not occupy the business worker");
+      wait_rm_gate();
+      check(fixture.service._th_pool.try_run([] {}), "could not fill the business queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    fixture.receive(request);
+    const auto wire = fixture.await_wire(prompt);
+    check(wire.find("Server busy. Please retry.") != std::string::npos &&
+              wire.find("Usage:") == std::string::npos,
+          "task rejection was reported as an argument error");
+    check(!fixture.session->directory_change_pending && rm_borrows.load() == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
+          "rejected rm left the session busy or executed a database operation");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    return;
+  }
+
+  const bool stale = scenario.rfind("rm_stale_", 0) == 0 || scenario == "rm_expired_session";
+  const bool gated = stale || scenario == "rm_pending" || scenario == "rm_disconnect" ||
+                     scenario == "rm_stopping";
+  if (gated)
+    commit_gate.enabled = true;
+  if (scenario == "rm_missing") rm_exists.store(false);
+  if (scenario == "rm_delete_failure") rm_failure = 1;
+  if (scenario == "rm_zero") rm_failure = 2;
+  if (scenario == "rm_exception") rm_failure = 3;
+  if (scenario == "rm_nonstandard_exception") rm_failure = 4;
+  const bool unknown = scenario == "rm_unknown_applied" || scenario == "rm_unknown_not_applied";
+  upload_outcome_unknown.store(unknown);
+  rm_unknown_applies = scenario == "rm_unknown_applied";
+
+  // 数据库成功删引用后，磁盘对象也应保留；这里只写一个真实的临时对象文件。
+  const auto object_path = directory + "/" + abc_hash;
+  std::ofstream(object_path, std::ios::binary) << "abc";
+  fixture.receive(request);
+  // receive() 只写入对端套接字；先驱动 IO loop，等待命令实际进入业务线程。
+  fixture.until([] { return rm_borrows.load() == 1; });
+  std::shared_ptr<ConnectionSession> original_session;
+  if (gated) {
+    wait_rm_gate();
+    check(fixture.session->directory_change_pending,
+          "rm did not mark its session busy before the database operation");
+    check(fixture.read_wire().empty(), "rm replied before its transaction finished");
+    if (scenario == "rm_pending") {
+      fixture.receive("pwd\n" + request);
+      const auto busy = fixture.await_wire("Please wait.");
+      check(busy.find("File removed.") == std::string::npos && rm_deletes.load() == 1,
+            "pending rm allowed another deletion or replied early");
+      // IO 线程可以继续运行回调，数据库闸门没有阻塞事件循环。
+      bool heartbeat = false;
+      fixture.loop.queue_in_loop([&] { heartbeat = true; });
+      fixture.drain();
+      check(heartbeat, "rm blocked the IO event loop");
+    } else if (scenario == "rm_stale_session" || scenario == "rm_expired_session") {
+      if (scenario == "rm_stale_session")
+        original_session = fixture.session; // 保留旧对象，专门验证会话映射身份检查。
+      auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
+      {
+        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+        fixture.service._sessions[fixture.conn.get()] = replacement;
+      }
+      fixture.session = std::move(replacement);
+    } else if (scenario == "rm_stale_identity") {
+      fixture.session->name = "another_user";
+    } else if (scenario == "rm_stale_directory") {
+      fixture.session->current_directory = "/changed";
+    } else if (scenario == "rm_stale_login") {
+      fixture.session->login_state = LoginState::k_await_choice;
+    } else if (scenario == "rm_stale_pending") {
+      fixture.session->directory_change_pending = false;
+    } else if (scenario == "rm_disconnect") {
+      fixture.conn->force_close();
+      fixture.until([&] { return fixture.conn->disconnected(); });
+    } else if (scenario == "rm_stopping") {
+      fixture.service._stopping.store(true);
+    }
+    commit_gate.release();
+  }
+
+  // 等待工作线程退出后再执行 IO 回调，确保测试确实检查了最终响应。
+  fixture.service._th_pool.stop();
+  fixture.drain();
+  // send() 将响应放入发送队列，EPOLLOUT 排空后才能检查线上响应或确认静默。
+  fixture.until([&] { return !fixture.conn->_channel->is_writing(); });
+  const auto wire = fixture.read_wire();
+  if (stale || scenario == "rm_disconnect" || scenario == "rm_stopping") {
+    check(wire.empty(), "obsolete rm completion replied to an invalid session");
+    if (stale)
+      check(fixture.session->directory_change_pending == (scenario != "rm_stale_pending"),
+            "obsolete rm completion changed the current session's busy flag");
+    if (scenario == "rm_stopping") {
+      fixture.until([&] { return fixture.conn->disconnected(); });
+      check(!fixture.session->directory_change_pending, "stopping rm retained its busy flag");
+    }
+  } else {
+    const bool failed = scenario == "rm_missing" || rm_failure != 0;
+    const std::string expected = unknown ? "Delete result is unknown." :
+                                 failed ? "Cannot remove file." : "File removed.";
+    check(wire.find(expected) != std::string::npos && wire.find(prompt) != std::string::npos,
+          "rm returned the wrong result or omitted the prompt");
+    check(!fixture.session->directory_change_pending && fixture.conn->connected(),
+          "rm completion left the session busy or disconnected");
+    if (unknown || failed)
+      check(wire.find("File removed.") == std::string::npos,
+            "rm reported success for a failed or unknown transaction");
+    check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
+              (failed || unknown ? 1U : 0U), "rm failure metric is incorrect");
+  }
+
+  const bool failed = scenario == "rm_missing" || rm_failure != 0;
+  check(rm_borrows.load() == 1 && rm_queries.load() == 3 &&
+            rm_deletes.load() == (scenario == "rm_missing" ? 0 : 1) &&
+            upload_commits.load() == (failed ? 0 : 1) &&
+            upload_rollbacks.load() == (failed ? 1 : 0) && borrowed_connections.load() == 0,
+        "rm retried, leaked a connection, or ended the transaction incorrectly");
+  check(rm_exists.load() == (scenario == "rm_missing" ? false :
+                            failed || scenario == "rm_unknown_not_applied"),
+        "rm changed the wrong committed database state");
+  std::ifstream object(object_path, std::ios::binary);
+  std::string bytes;
+  object >> bytes;
+  check(bytes == "abc" && startup_object_deletes.load() == 0,
+        "rm removed the shared object or its catalog record");
+}
+
+// rmdir 从实际网络分发进入业务线程；闸门让数据库等待与 IO 回调顺序可控。
+// 每个 CTest 场景单独启动进程，替代数据库状态不会泄漏到下一个场景。
+void check_rmdir(const std::string& scenario, const std::string& directory) {
+  rmdir_mode.store(true);
+  rmdir_io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  CommitRelease release; // 先释放闸门，再析构 Fixture 中的工作线程。
+  const auto request = "rmdir " + Transfer::quote(rmdir_name) + "\n";
+  const std::string prompt = "tlss@test_user:/>";
+
+  if (scenario == "rmdir_help") {
+    fixture.receive("help\n");
+    check(fixture.await_wire(prompt).find(" rmdir ") != std::string::npos,
+          "rmdir was omitted or misspelled in help");
+    check(rmdir_borrows.load() == 0, "rmdir help accessed the database");
+    return;
+  }
+  if (scenario == "rmdir_invalid") {
+    // 覆盖缺参、引号、多参、根目录、路径穿越、过长名字和控制字符。
+    for (const auto& args : std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"",
+             "\"\"", "../a", "/a", "/", ".", "..", std::string(256, 'x'),
+             Transfer::quote("a\\b"), Transfer::quote(std::string("a\0b", 3))}) {
+      fixture.receive("rmdir " + args + "\n");
+      const auto wire = fixture.await_wire(prompt);
+      check(wire.find("Usage: rmdir") != std::string::npos ||
+                wire.find("Invalid directory name.") != std::string::npos,
+            "invalid rmdir arguments did not receive a local error");
+      check(fixture.conn->connected() && !fixture.session->directory_change_pending,
+            "invalid rmdir arguments closed or blocked the session");
+    }
+    check(rmdir_borrows.load() == 0 && rmdir_deletes.load() == 0,
+          "invalid rmdir arguments reached the database");
+    return;
+  }
+  if (scenario == "rmdir_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.await_wire("Login required.");
+    fixture.receive(request);
+    fixture.await_wire("login or signup");
+    check(rmdir_borrows.load() == 0 && fixture.conn->connected(),
+          "unauthenticated rmdir reached the database or closed the connection");
+    return;
+  }
+  if (scenario == "rmdir_stopping_entry") {
+    fixture.service._stopping.store(true);
+    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.until([&] { return fixture.conn->disconnected(); });
+    check(rmdir_borrows.load() == 0 && !fixture.session->directory_change_pending &&
+              fixture.read_wire().empty(), "stopping rmdir submitted work or replied normally");
+    return;
+  }
+  if (scenario == "rmdir_transfer_busy" || scenario == "rmdir_directory_busy") {
+    if (scenario == "rmdir_transfer_busy") {
+      fixture.session->transfer = fixture.service._upload_engine.create(
+          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+          [](TransferEvent) {});
+    } else {
+      fixture.session->directory_change_pending = true;
+    }
+    auto transfer = fixture.session->transfer;
+    const auto generation = fixture.session->transfer_generation;
+    const bool pending = fixture.session->directory_change_pending;
+    // 活动传输有自己的网络协议入口，直接验证处理函数不会取消既有传输。
+    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.await_wire("Please wait.");
+    check(fixture.conn->connected() && fixture.session->transfer == transfer &&
+              fixture.session->transfer_generation == generation &&
+              fixture.session->directory_change_pending == pending && rmdir_borrows.load() == 0,
+          "busy rmdir changed the active operation or accessed the database");
+    fixture.session->transfer.reset();
+    return;
+  }
+  if (scenario == "rmdir_queue_full" || scenario == "rmdir_pool_stopped") {
+    if (scenario == "rmdir_queue_full") {
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }),
+            "could not occupy the rmdir business worker");
+      wait_rm_gate();
+      check(fixture.service._th_pool.try_run([] {}), "could not fill the rmdir business queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    fixture.receive(request);
+    const auto wire = fixture.await_wire(prompt);
+    check(wire.find("Server busy. Please retry.") != std::string::npos &&
+              wire.find("Usage:") == std::string::npos &&
+              !fixture.session->directory_change_pending && rmdir_borrows.load() == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
+          "rejected rmdir ran a transaction, retained its pending flag, or omitted rejection metrics");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    return;
+  }
+
+  const bool stale = scenario.rfind("rmdir_stale_", 0) == 0 || scenario == "rmdir_expired_session";
+  const bool gated = stale || scenario == "rmdir_pending" || scenario == "rmdir_disconnect" ||
+                     scenario == "rmdir_stopping";
+  if (gated) commit_gate.enabled = true;
+  if (scenario == "rmdir_missing") rmdir_exists.store(false);
+  if (scenario == "rmdir_delete_failure") rmdir_failure = 1;
+  if (scenario == "rmdir_zero") rmdir_failure = 2;
+  if (scenario == "rmdir_exception") rmdir_failure = 3;
+  if (scenario == "rmdir_nonstandard_exception") rmdir_failure = 4;
+  if (scenario == "rmdir_missing_parent") rmdir_failure = 5;
+  if (scenario == "rmdir_child_query_failure") rmdir_failure = 6;
+  if (scenario == "rmdir_child_malformed") rmdir_failure = 7;
+  if (scenario == "rmdir_borrow_failure") rmdir_failure = 8;
+  if (scenario == "rmdir_borrow_exception") rmdir_failure = 9;
+  if (scenario == "rmdir_not_empty_file") rmdir_children = 1;
+  if (scenario == "rmdir_not_empty_directory") rmdir_children = 2;
+  const bool unknown = scenario == "rmdir_unknown_applied" || scenario == "rmdir_unknown_not_applied";
+  upload_outcome_unknown.store(unknown);
+  rmdir_unknown_applies = scenario == "rmdir_unknown_applied";
+
+  // 即使删除目录成功，也不能触碰任何共享对象；临时对象用于检查实际磁盘内容。
+  const auto object_path = directory + "/" + abc_hash;
+  std::ofstream(object_path, std::ios::binary) << "abc";
+  fixture.receive(request);
+  fixture.until([] { return rmdir_borrows.load() == 1; });
+  std::shared_ptr<ConnectionSession> original_session;
+  if (gated) {
+    wait_rm_gate();
+    check(fixture.session->directory_change_pending && fixture.read_wire().empty(),
+          "rmdir failed to mark its session pending or replied before commit");
+    if (scenario == "rmdir_pending") {
+      fixture.receive("pwd\n" + request);
+      const auto busy = fixture.await_wire("Please wait.");
+      check(busy.find("directory removed.") == std::string::npos && rmdir_deletes.load() == 1,
+            "pending rmdir allowed a second deletion or replied early");
+      bool heartbeat = false;
+      fixture.loop.queue_in_loop([&] { heartbeat = true; });
+      fixture.drain();
+      check(heartbeat, "rmdir blocked its IO event loop while waiting for the database");
+    } else if (scenario == "rmdir_stale_session" || scenario == "rmdir_expired_session") {
+      if (scenario == "rmdir_stale_session")
+        original_session = fixture.session; // 弱引用仍可提升，但连接已映射到新会话。
+      auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
+      {
+        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+        fixture.service._sessions[fixture.conn.get()] = replacement;
+      }
+      fixture.session = std::move(replacement);
+    } else if (scenario == "rmdir_stale_identity") {
+      fixture.session->name = "another_user";
+    } else if (scenario == "rmdir_stale_directory") {
+      fixture.session->current_directory = "/changed";
+    } else if (scenario == "rmdir_stale_login") {
+      fixture.session->login_state = LoginState::k_await_choice;
+    } else if (scenario == "rmdir_stale_pending") {
+      fixture.session->directory_change_pending = false;
+    } else if (scenario == "rmdir_disconnect") {
+      fixture.conn->force_close();
+      fixture.until([&] { return fixture.conn->disconnected(); });
+    } else if (scenario == "rmdir_stopping") {
+      fixture.service._stopping.store(true);
+    }
+    commit_gate.release();
+  }
+
+  // 先等待业务任务完成，再驱动 IO 回调和发送队列，避免把“尚未回复”误判为静默。
+  fixture.service._th_pool.stop();
+  fixture.drain();
+  fixture.until([&] { return !fixture.conn->_channel->is_writing(); });
+  const auto wire = fixture.read_wire();
+  const bool failed = scenario == "rmdir_missing" || rmdir_failure != 0;
+  const bool nonempty = rmdir_children != 0;
+  if (stale || scenario == "rmdir_disconnect" || scenario == "rmdir_stopping") {
+    check(wire.empty(), "obsolete rmdir completion replied to an invalid session");
+    if (stale)
+      check(fixture.session->directory_change_pending == (scenario != "rmdir_stale_pending"),
+            "obsolete rmdir completion changed the current session's pending flag");
+    if (scenario == "rmdir_stopping") {
+      fixture.until([&] { return fixture.conn->disconnected(); });
+      check(!fixture.session->directory_change_pending, "stopping rmdir retained its pending flag");
+    }
+  } else {
+    const std::string expected = unknown ? "Delete result is unknown." :
+                                nonempty ? "Directory is not empty." :
+                                failed ? "Cannot remove directory." : "directory removed.";
+    check(wire.find(expected) != std::string::npos && wire.find(prompt) != std::string::npos &&
+              !fixture.session->directory_change_pending && fixture.conn->connected(),
+          "rmdir returned the wrong result, omitted its prompt, or retained its pending flag");
+    if (unknown || failed || nonempty)
+      check(wire.find("directory removed.") == std::string::npos,
+            "rmdir reported success for a nonempty directory, failure, or unknown commit");
+    // 四种返回结果都结束本次命令等待；后续命令应能正常执行。
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(prompt).find("/\r\n") != std::string::npos,
+          "rmdir completion left subsequent commands blocked");
+  }
+
+  const int queries = rmdir_failure >= 8 ? 0 : rmdir_failure == 5 ? 2 :
+                      scenario == "rmdir_missing" ? 3 : 4;
+  const bool attempted_delete = queries == 4 && !nonempty && rmdir_failure != 6 && rmdir_failure != 7;
+  const bool committed = !failed && !nonempty;
+  check(rmdir_borrows.load() == 1 && rmdir_queries.load() == queries &&
+            rmdir_deletes.load() == (attempted_delete ? 1 : 0) &&
+            upload_commits.load() == (committed ? 1 : 0) &&
+            upload_rollbacks.load() == (!committed && queries != 0 ? 1 : 0) &&
+            borrowed_connections.load() == 0,
+        "rmdir retried, leaked a connection, deleted a nonempty target, or ended its transaction incorrectly");
+  check(rmdir_exists.load() == (scenario == "rmdir_missing" ? false :
+                               !committed || scenario == "rmdir_unknown_not_applied"),
+        "rmdir committed state did not match its simulated database outcome");
+  check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
+            (failed || nonempty || unknown ? 1U : 0U), "rmdir failure metric was missing or duplicated");
+  std::ifstream object(object_path, std::ios::binary);
+  std::string bytes;
+  object >> bytes;
+  check(bytes == "abc" && startup_object_deletes.load() == 0,
+        "rmdir removed a shared object or its catalog record");
+}
+
+void wait_mkdir_gate() {
+  std::unique_lock<std::mutex> lock(commit_gate.mutex);
+  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3), [] {
+    return commit_gate.entered;
+  }), "mkdir did not reach its blocked database operation");
+}
+
+void check_mkdir(const std::string& scenario) {
+  mkdir_mode.store(true);
+  mkdir_io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1); // 使用真实业务线程，禁止借用零线程同步模式掩盖 IO 阻塞。
+  CommitRelease release;
+  const std::string prompt = "tlss@test_user:/>";
+  if (scenario == "mkdir_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.receive("mkdir drafts\n");
+    fixture.await_wire("login or signup");
+    check(mkdir_borrows.load() == 0, "unauthenticated mkdir accessed the database");
+    return;
+  }
+  if (scenario == "mkdir_queue_full" || scenario == "mkdir_pool_stopped") {
+    if (scenario == "mkdir_queue_full") {
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }), "could not occupy mkdir worker");
+      wait_mkdir_gate();
+      check(fixture.service._th_pool.try_run([] {}), "could not fill mkdir task queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    fixture.receive("mkdir drafts\n");
+    fixture.await_wire("Server busy. Please retry.");
+    check(mkdir_borrows.load() == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
+          "rejected mkdir ran a transaction or omitted its rejection metric");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    return;
+  }
+
+  const bool unknown = scenario == "mkdir_unknown_applied" || scenario == "mkdir_unknown_not_applied";
+  upload_outcome_unknown.store(unknown);
+  mkdir_unknown_applies = scenario == "mkdir_unknown_applied";
+  if (scenario == "mkdir_sql_failure") mkdir_failure = 1;
+  if (scenario == "mkdir_zero") mkdir_failure = 2;
+  if (scenario == "mkdir_exception") mkdir_failure = 3;
+  if (scenario == "mkdir_nonstandard_exception") mkdir_failure = 4;
+  if (scenario == "mkdir_missing_parent") mkdir_failure = 5;
+  const bool invalid = scenario == "mkdir_invalid";
+  const bool gated = scenario == "mkdir_pending" || scenario == "mkdir_disconnect";
+  if (gated)
+    commit_gate.enabled = true;
+  fixture.receive(invalid ? "mkdir ../drafts\n" : "mkdir drafts\n");
+  if (gated) {
+    // 先驱动 IO loop 将命令提交，再等待业务线程到达闸门。
+    fixture.until([] { return mkdir_inserts.load() == 1; });
+    wait_mkdir_gate();
+    check(fixture.read_wire().empty(), "mkdir responded before COMMIT");
+    if (scenario == "mkdir_pending") {
+      fixture.receive("pwd\n");
+      const auto wire = fixture.await_wire(prompt);
+      check(wire.find("Directory created.") == std::string::npos,
+            "mkdir replied before the blocked transaction finished");
+    } else {
+      fixture.conn->force_close();
+      fixture.until([&] { return fixture.conn->disconnected(); });
+    }
+    commit_gate.release();
+  }
+
+  const bool failed = invalid || mkdir_failure != 0;
+  if (scenario == "mkdir_disconnect") {
+    fixture.service._th_pool.stop();
+    fixture.drain();
+    check(fixture.read_wire().empty(), "mkdir replied through a disconnected connection");
+  } else {
+    // send() 还需要 IO loop 排空发送队列，必须等到完整提示符再检查响应。
+    const auto wire = fixture.await_wire(prompt);
+    const std::string expected = unknown ? "Directory creation result is unknown." :
+                                 failed ? "Cannot create directory." : "Directory created.";
+    check(wire.find(expected) != std::string::npos && fixture.conn->connected(),
+          "mkdir mapped its three-state result to an incorrect response");
+    if (failed || unknown)
+      check(wire.find("Directory created.") == std::string::npos,
+            "mkdir reported success after failure or unknown commit");
+    fixture.service._th_pool.stop();
+  }
+  check(mkdir_borrows.load() == (invalid ? 0 : 1) && mkdir_queries.load() == (invalid ? 0 : 2) &&
+            mkdir_inserts.load() == (invalid || mkdir_failure == 5 ? 0 : 1) &&
+            upload_commits.load() == (failed ? 0 : 1) &&
+            upload_rollbacks.load() == (failed && !invalid ? 1 : 0) && borrowed_connections.load() == 0,
+        "mkdir retried, leaked a connection, or ended its transaction incorrectly");
+  check(mkdir_exists.load() == (!failed && (!unknown || mkdir_unknown_applies)),
+        "mkdir committed state did not match the simulated database outcome");
+  check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
+            (failed || unknown ? 1U : 0U), "mkdir failure metric was missing or duplicated");
+}
+
 void run(const std::string& scenario, const std::string& directory) {
+  if (scenario.rfind("rmdir_", 0) == 0) {
+    check_rmdir(scenario, directory);
+    return;
+  }
+  if (scenario.rfind("mkdir_", 0) == 0) {
+    check_mkdir(scenario);
+    return;
+  }
+  if (scenario.rfind("rm_", 0) == 0) {
+    check_rm(scenario, directory);
+    return;
+  }
   if (scenario == "gc_start_failure" || scenario == "gc_late_start_failure" ||
       scenario == "gc_unstarted_cleanup") {
     check_gc_startup_cleanup(scenario);
