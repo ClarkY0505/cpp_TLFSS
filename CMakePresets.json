@@ -9,13 +9,13 @@
     {
       "name": "debug",
       "displayName": "Debug",
-      "description": "Debug build with tests and compile_commands.json for clangd",
+      "description": "Debug build without tests and with compile_commands.json for clangd",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "BUILD_TESTS": "ON"
+        "BUILD_TESTS": "OFF"
       }
     },
     {
