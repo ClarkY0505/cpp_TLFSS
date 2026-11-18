@@ -18,6 +18,10 @@ add_library(metadata_lib
     file_deletion.cpp
     object_repository.cpp
     object_gc_transaction.cpp
+    subtree_coordinator.cpp
+    subtree_versions.cpp
+    file_rename.cpp
+    file_move.cpp
 )
 target_link_libraries(metadata_lib PUBLIC common_lib)
 

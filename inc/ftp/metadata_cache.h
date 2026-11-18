@@ -1,8 +1,11 @@
 #ifndef TLSS_FTP_METADATA_CACHE_H
 #define TLSS_FTP_METADATA_CACHE_H
 
+#include <unistd.h>
 #include "common/cache/arc_cache.h"
 #include "ftp/metadata_types.h"
+#include "ftp/subtree_coordinator.h"
+#include "ftp/subtree_versions.h"
 
 #include <array>
 #include <atomic>
@@ -100,7 +103,10 @@ struct Entry {
   // 缓存内只复制智能指针，不在 ARC 内部锁中复制整个目录列表。
   std::shared_ptr<const T> value;
   Clock::time_point expires_at{};
+  // 精确目录版本，保留现有字段
   std::uint64_t generation = 0;
+  // 缓存生成时，本目录及祖先目录的子树版本快照
+  std::uint64_t subtree_generation = 0;
 };
 
 template <typename T>
@@ -140,74 +146,111 @@ class MetadataCache {
   template <typename Loader>
   StorageContext<FileList> list(const std::string& username, const std::string& directory,
                                 Loader&& loader) {
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::read;
+    request.scopes.push_back({directory, PathScopeKind::exact});
+
+    auto guard = _subtree_coordinator.acquire(std::move(request));
+    const auto subtree_version = _subtree_versions.snapshot(username, directory);
+
     const auto namespace_key = make_key(username, directory);
-    return read(_lists, namespace_key, namespace_key, true, std::forward<Loader>(loader));
+    return read(_lists, namespace_key, namespace_key, true, subtree_version,
+                std::forward<Loader>(loader));
   }
 
   template <typename Loader>
   StorageContext<std::string> download(const std::string& username, const std::string& directory,
                                        const std::string& filename, Loader&& loader) {
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::read;
+    request.scopes.push_back({directory, PathScopeKind::exact});
+
+    auto guard = _subtree_coordinator.acquire(std::move(request));
+    const auto subtree_version = _subtree_versions.snapshot(username, directory);
+
     return read(_downloads, make_key(username, directory, filename), make_key(username, directory),
-                true, std::forward<Loader>(loader));
+                true, subtree_version, std::forward<Loader>(loader));
   }
 
   template <typename Loader>
   StorageContext<std::string> cd(const std::string& username, const std::string& directory,
                                  const std::string& argument, Loader&& loader) {
-    // 当前只新增、不删除/移动目录；已有成功路径只检查 TTL和版本，写入后按版本失效
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::read;
+    request.scopes.push_back({directory, PathScopeKind::exact});
+
+    auto guard = _subtree_coordinator.acquire(std::move(request));
+    const auto subtree_version = _subtree_versions.snapshot(username, directory);
+    // 服务层传入目标父目录和目标名称；目录写入或祖先子树变化后按版本失效。
     bool check_version = true;
     return read(_cd_paths, make_key(username, directory, argument), make_key(username, directory),
-                check_version, std::forward<Loader>(loader));
+                check_version, subtree_version, std::forward<Loader>(loader));
   }
 
   template <typename Writer>
   bool write(const std::string& username, const std::string& directory, Writer&& writer) {
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::write;
+    request.scopes.push_back({directory, PathScopeKind::exact});
+
+    // 先取得逻辑写权限，再获取目录分片锁。
+    auto guard = _subtree_coordinator.acquire(std::move(request));
+
     auto& gate = gate_for(make_key(username, directory));
-    std::unique_lock<std::shared_mutex> lock(gate.mutex);
-
-    struct InvalidateOnExit {
-      MetadataCacheDetail::DirectoryGate& gate;
-      ~InvalidateOnExit() {
-        gate.advance();
-      }
-    };
-
-    // 先推进版本再释放独占锁。成功、失败和异常都使旧条目失效，兼顾提交
-    // 结果不确定的情况；此清理过程不分配内存，不会在提交后额外抛异常。
-    InvalidateOnExit invalidate{gate};
-    // 回调只能调用数据库方法，不能再次进入同一缓存的读写接口。
-    return std::forward<Writer>(writer)();
+    return write_gate(gate, std::forward<Writer>(writer));
   }
 
   template <typename Writer>
   bool write_two_directories(const std::string& username, const std::string& first_directory,
                              const std::string& second_directory, Writer&& writer) {
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::write;
+    request.scopes.push_back({first_directory, PathScopeKind::exact});
+    request.scopes.push_back({second_directory, PathScopeKind::exact});
+
+    // 两个范围一起获准进入，或者一起等待。
+    auto guard = _subtree_coordinator.acquire(std::move(request));
+
     auto& first = gate_for(make_key(username, first_directory));
     auto& second = gate_for(make_key(username, second_directory));
+    return write_two_gates(first, second, std::forward<Writer>(writer));
+  }
 
-    // 不同目录也可能映射到同一分片，此时只加一次锁
-    if (&first == &second) {
-      return write(username, first_directory, std::forward<Writer>(writer));
-    }
+  template <typename Writer>
+  bool write_subtree(const std::string& username, const std::string& parent_directory,
+                     const std::string& target_directory, Writer&& writer) {
+    CoordinationRequest request;
+    request.username = username;
+    request.access = AccessMode::write;
+    request.scopes.push_back({parent_directory, PathScopeKind::exact});
+    request.scopes.push_back({target_directory, PathScopeKind::subtree});
+    auto guard = _subtree_coordinator.acquire(std::move(request));
 
-    std::unique_lock<std::shared_mutex> first_lock(first.mutex, std::defer_lock);
-    std::unique_lock<std::shared_mutex> second_lock(second.mutex, std::defer_lock);
+    auto& first = gate_for(make_key(username, parent_directory));
+    auto& second = gate_for(make_key(username, target_directory));
+    auto task = [&] {
+      struct InvalidateSubtreeOnExit {
+        SubtreeVersions& versions;
+        const std::string& username;
+        const std::string& root;
 
-    // 统一获取两把锁，避免两个调用以相反顺序加锁而死锁
-    std::lock(first_lock, second_lock);
+        ~InvalidateSubtreeOnExit() noexcept {
+          versions.advance(username, root);
+        }
+      };
 
-    struct InvalidateOnExit {
-      MetadataCacheDetail::DirectoryGate& first;
-      MetadataCacheDetail::DirectoryGate& second;
+      // 初始化三个引用；此时只创建守卫，不推进版本。
+      InvalidateSubtreeOnExit invalidate{_subtree_versions, username, target_directory};
 
-      ~InvalidateOnExit() {
-        first.advance();
-        second.advance();
-      }
+      // 先执行业务，退出回调时再通过守卫推进版本。
+      return std::forward<Writer>(writer)();
     };
-
-    InvalidateOnExit invalidate{first, second};
-    return std::forward<Writer>(writer)();
+    return write_two_gates(first, second, task);
   }
 
   MetadataCacheStats stats() const {
@@ -281,9 +324,11 @@ class MetadataCache {
   static MetadataCacheDetail::Probe probe(MetadataCacheDetail::Bank<T>& bank,
                                           const std::string& key,
                                           const MetadataCacheDetail::DirectoryGate& gate,
-                                          bool versioned, std::shared_ptr<const T>& value) {
+                                          bool versioned,
+                                          const SubtreeVersions::Snapshot& subtree_version,
+                                          std::shared_ptr<const T>& value) {
     using Probe = MetadataCacheDetail::Probe;
-    if (versioned && !gate.versioned_cache_enabled) {
+    if (!subtree_version.enabled || (versioned && !gate.versioned_cache_enabled)) {
       return Probe::miss;
     }
     MetadataCacheDetail::Entry<T> entry;
@@ -291,16 +336,36 @@ class MetadataCache {
       return Probe::miss;
     }
     if (!entry.value || entry.expires_at <= MetadataCacheDetail::Clock::now() ||
-        (versioned && entry.generation != gate.generation)) {
+        (versioned && entry.generation != gate.generation) ||
+        entry.subtree_generation != subtree_version.generation) {
       return Probe::stale;
     }
     value = std::move(entry.value);
     return Probe::hit;
   }
 
+  template <typename Writer>
+  bool write_gate(MetadataCacheDetail::DirectoryGate& gate, Writer&& writer) {
+    std::unique_lock<std::shared_mutex> lock(gate.mutex);
+
+    struct InvalidateOnExit {
+      MetadataCacheDetail::DirectoryGate& gate;
+      ~InvalidateOnExit() {
+        gate.advance();
+      }
+    };
+
+    // 先推进版本再释放独占锁。成功、失败和异常都使旧条目失效，兼顾提交
+    // 结果不确定的情况；此清理过程不分配内存，不会在提交后额外抛异常。
+    InvalidateOnExit invalidate{gate};
+    // 回调只能调用数据库方法，不能再次进入同一缓存的读写接口。
+    return std::forward<Writer>(writer)();
+  }
+
   template <typename T, typename Loader>
   StorageContext<T> read(MetadataCacheDetail::Bank<T>& bank, const std::string& key,
-                         const std::string& namespace_key, bool versioned, Loader&& loader) {
+                         const std::string& namespace_key, bool versioned,
+                         const SubtreeVersions::Snapshot& subtree_version, Loader&& loader) {
     using Probe = MetadataCacheDetail::Probe;
     auto& counters = bank.counters;
     counters.requests.fetch_add(1, std::memory_order_relaxed);
@@ -315,7 +380,7 @@ class MetadataCache {
     {
       // 命中路径只持共享协调锁；ARC 内部按存储分片短暂加锁。
       std::shared_lock<std::shared_mutex> lock(gate.mutex);
-      probe(bank, key, gate, versioned, cached);
+      probe(bank, key, gate, versioned, subtree_version, cached);
     }
     if (cached) {
       counters.hits.fetch_add(1, std::memory_order_relaxed);
@@ -326,7 +391,7 @@ class MetadataCache {
     counters.misses.fetch_add(1, std::memory_order_relaxed);
     // 不原地升级共享锁；取得独占锁后重新检查，复用等待期间的填充。
     std::unique_lock<std::shared_mutex> lock(gate.mutex);
-    const auto second_probe = probe(bank, key, gate, versioned, cached);
+    const auto second_probe = probe(bank, key, gate, versioned, subtree_version, cached);
     if (second_probe == Probe::hit) {
       counters.coalesced.fetch_add(1, std::memory_order_relaxed);
       lock.unlock();
@@ -343,7 +408,8 @@ class MetadataCache {
       // 失败和不存在不缓存，成功的空目录则可以缓存。
       return result;
     }
-    if ((versioned && !gate.versioned_cache_enabled) || !fits(result.result, bank.max_bytes)) {
+    if (!subtree_version.enabled || (versioned && !gate.versioned_cache_enabled) ||
+        !fits(result.result, bank.max_bytes)) {
       counters.admission_skips.fetch_add(1, std::memory_order_relaxed);
       return result;
     }
@@ -352,10 +418,39 @@ class MetadataCache {
     MetadataCacheDetail::Entry<T> entry;
     entry.value = snapshot;
     entry.generation = gate.generation;
+    entry.subtree_generation = subtree_version.generation;
     entry.expires_at = MetadataCacheDetail::Clock::now() + jittered_ttl(bank.ttl, key);
     bank.arc.put(key, std::move(entry));
     lock.unlock();
     return {true, *snapshot};
+  }
+
+  template <typename Writer>
+  bool write_two_gates(MetadataCacheDetail::DirectoryGate& first,
+                       MetadataCacheDetail::DirectoryGate& second, Writer&& writer) {
+    // 不同目录也可能映射到同一分片，此时只加一次锁
+    if (&first == &second) {
+      return write_gate(first, std::forward<Writer>(writer));
+    }
+
+    std::unique_lock<std::shared_mutex> first_lock(first.mutex, std::defer_lock);
+    std::unique_lock<std::shared_mutex> second_lock(second.mutex, std::defer_lock);
+
+    // 统一获取两把锁，避免两个调用以相反顺序加锁而死锁
+    std::lock(first_lock, second_lock);
+
+    struct InvalidateOnExit {
+      MetadataCacheDetail::DirectoryGate& first;
+      MetadataCacheDetail::DirectoryGate& second;
+
+      ~InvalidateOnExit() {
+        first.advance();
+        second.advance();
+      }
+    };
+
+    InvalidateOnExit invalidate{first, second};
+    return std::forward<Writer>(writer)();
   }
 
   // 固定分片避免为每个目录永久保留锁和版本。碰撞只会多等待或多失效，
@@ -364,6 +459,12 @@ class MetadataCache {
   MetadataCacheDetail::Bank<FileList> _lists;
   MetadataCacheDetail::Bank<std::string> _downloads;
   MetadataCacheDetail::Bank<std::string> _cd_paths;
+
+  // 所有缓存入口共用，协调同一用户下存在范围冲突的操作。
+  SubtreeCoordinator _subtree_coordinator;
+
+  // 保存子树失效版本，让后代目录的旧缓存能够被识别。
+  SubtreeVersions _subtree_versions;
 };
 
 }  // namespace TLSS::FileStorage

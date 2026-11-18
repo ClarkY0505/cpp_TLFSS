@@ -68,19 +68,16 @@ DbQueryResult query(const std::string& sql, const std::vector<DbValue>& params) 
     return result;
   }
 
-  if (sql.find("SELECT child.path") != std::string::npos) {
-    const auto name = parameter(params, 1);
-    if (name == "missing" && !database.created_missing.load()) {
+  if (sql.find("SELECT path FROM virtual_files ") == 0) {
+    check(params.size() == 2 && sql.find("WHERE username = ?") != std::string::npos &&
+              sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+              sql.find("file_type = 'directory'") != std::string::npos,
+          "cd lookup omitted user, exact target path or directory type");
+    const auto path = parameter(params, 1);
+    const auto name = path.substr(path.rfind('/') + 1);
+    if (name == "missing" && !database.created_missing.load())
       return {true, {}};
-    }
-    const auto parent = parameter(params, 2);
-    return {true, {{(parent == "/" ? parent : parent + "/") + name}}};
-  }
-
-  if (sql.find("SELECT parent.path") != std::string::npos) {
-    const auto current = parameter(params, 1);
-    const auto separator = current.rfind('/');
-    return {true, {{separator == 0 ? "/" : current.substr(0, separator)}}};
+    return {true, {{path}}};
   }
 
   if (sql.find("SELECT f.object_hash") != std::string::npos) {
@@ -163,8 +160,7 @@ DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
                                                const std::vector<DbValue>&) {
   check(_transaction_active, "upload write ran outside transaction");
   // 对象表写入不改变目录内容，不能增加虚拟目录的数据版本。
-  if (sql.find("INSERT INTO storage_objects ") == 0 ||
-      sql.find("UPDATE storage_objects ") == 0) {
+  if (sql.find("INSERT INTO storage_objects ") == 0 || sql.find("UPDATE storage_objects ") == 0) {
     return {true, 0, 1, 0};
   }
   if (sql.find("INSERT INTO virtual_files ") == 0) {
@@ -194,7 +190,7 @@ DbCommitStatus DbTransaction::commit() noexcept {
   connection_._transaction_active = false;
   active_ = false;
   return database.unknown_commit.exchange(false) ? DbCommitStatus::k_outcome_unknown
-                                                : DbCommitStatus::k_committed;
+                                                 : DbCommitStatus::k_committed;
 }
 
 bool DbTransaction::rollback() noexcept {
@@ -247,9 +243,11 @@ void test_cd(StorageEngine& engine) {
         "parent lookup failed");
   const int parent_queries = database.queries.load();
   engine.move_dir_by_current_dir("alice", "/docs/sub", "..");
+  check(database.queries == parent_queries, "parent alias did not reuse the target cache");
   engine.move_dir_by_current_dir("alice", "/", "..");
-  check(database.queries.load() == parent_queries,
-        "cached parent or root lookup queried the database");
+  check(database.queries == parent_queries + 1, "root lookup did not verify its database record");
+  engine.move_dir_by_current_dir("alice", "/docs", "/");
+  check(database.queries == parent_queries + 1, "root aliases did not share the same cache entry");
 
   // 名称中的分隔符不能让不同字段组合发生键冲突。
   // 如果仅用 ':' 拼接字段，下面两次访问就会生成相同的键。
@@ -283,7 +281,8 @@ void test_failures(StorageEngine& engine) {
   engine.find_download_hash("alice", "/", "missing");
   engine.find_download_hash("alice", "/", "missing");
   check(database.queries.load() == before + 4, "missing metadata was cached");
-  check(engine.create_dir("alice", "/", "missing") == CreateDirectoryResult::committed, "mkdir failed");
+  check(engine.create_dir("alice", "/", "missing") == CreateDirectoryResult::committed,
+        "mkdir failed");
   check(engine.move_dir_by_current_dir("alice", "/", "missing").success,
         "negative cd result hid the new directory");
 }
@@ -324,10 +323,8 @@ void test_unknown_commit(StorageEngine& engine) {
   // 先填充缓存，并确认后续读取不会再次查询数据库。
   const auto original_list = engine.find_file_by_current_dir("alice", "/");
   const auto original_hash = engine.find_download_hash("alice", "/", "a.txt");
-  check(engine.move_dir_by_current_dir("alice", "/", "docs").success,
-        "initial cd lookup failed");
-  check(original_list.success && !original_list.result.empty(),
-        "initial directory listing failed");
+  check(engine.move_dir_by_current_dir("alice", "/", "docs").success, "initial cd lookup failed");
+  check(original_list.success && !original_list.result.empty(), "initial directory listing failed");
   check(original_hash.success, "initial download lookup failed");
 
   int before = database.queries.load();
@@ -356,8 +353,7 @@ void test_unknown_commit(StorageEngine& engine) {
   before = database.queries.load();
   const auto refreshed_hash = engine.find_download_hash("alice", "/", "a.txt");
   check(refreshed_hash.success, "download lookup failed after unknown commit");
-  check(database.queries.load() == before + 1,
-        "unknown commit left a stale download cache");
+  check(database.queries.load() == before + 1, "unknown commit left a stale download cache");
 
   before = database.queries.load();
   check(engine.move_dir_by_current_dir("alice", "/", "docs").result == "/docs",
@@ -585,7 +581,8 @@ void test_shared(StorageEngine& engine, const std::shared_ptr<MetadataCache>& ca
   engine.find_file_by_current_dir("alice", "/");
   second.find_file_by_current_dir("alice", "/");
   check(database.queries.load() == 2, "显式共享缓存的引擎未复用查询结果");
-  check(engine.create_dir("alice", "/", "new") == CreateDirectoryResult::committed, "共享缓存写入失败");
+  check(engine.create_dir("alice", "/", "new") == CreateDirectoryResult::committed,
+        "共享缓存写入失败");
   check(second.find_file_by_current_dir("alice", "/").result.front().file_name == "alice@/#1",
         "共享缓存的写后失效没有传播");
 }

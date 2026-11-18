@@ -57,6 +57,14 @@ class MetadataService {
                                                const std::string& current_directory,
                                                const std::string& directory_name);
 
+  DeleteDirectoryTreeResult delete_directory_tree(const std::string& username,
+                                                  const std::string& current_directory,
+                                                  const std::string& directory_name);
+  RenameFileResult rename_file(const std::string& username, const std::string& directory,
+                               const std::string& old_name, const std::string& new_name);
+  // 同一用户的文件跨目录移动，保留名称并拒绝覆盖，保留提交结果未知状态。
+  MoveFileResult move_file(const std::string& username, const std::string& source_directory,
+                           const std::string& target_directory, const std::string& file_name);
   static bool create_root_in_transaction(BASE::DbConnection& connection,
                                          const std::string& username);
 
@@ -65,9 +73,9 @@ class MetadataService {
   // 它们不能回调公开缓存接口，否则会再次申请目录协调锁而死锁。
   StorageContext<std::vector<FileInfo>> find_file_by_current_dir_db(
       const std::string& username, const std::string& current_directory);
-  StorageContext<std::string> move_dir_by_current_dir_db(const std::string& username,
-                                                         const std::string& current_directory,
-                                                         const std::string& dir_name);
+  // 按当前用户的规范绝对路径查目录；不进入缓存，异常继续向上传播。
+  StorageContext<std::string> find_directory_by_path_db(
+      const std::string& username, const std::string& target_directory);
   StorageContext<std::string> find_download_hash_db(const std::string& username,
                                                     const std::string& directory,
                                                     const std::string& file_name);
@@ -84,6 +92,15 @@ class MetadataService {
   DeleteDirectoryResult delete_empty_directory_db(const std::string& username,
                                                   const std::string& current_directory,
                                                   const std::string& directory_name);
+  DeleteDirectoryTreeResult delete_directory_tree_db(const std::string& username,
+                                                     const std::string& current_directory,
+                                                     const std::string& directory_name);
+  // 借用连接并执行重命名事务，保留三态结果，异常继续向上传播。
+  RenameFileResult rename_file_db(const std::string& username, const std::string& directory,
+                                  const std::string& old_name, const std::string& new_name);
+
+  MoveFileResult move_file_db(const std::string& username, const std::string& source_directory,
+                              const std::string& target_directory, const std::string& file_name);
 
   std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
   BASE::DbConnectionPool& _db_conn_pool;

@@ -140,7 +140,7 @@ ObjectGcPrepareResult prepare_object_gc_transaction(BASE::DbConnection& connecti
 
 ObjectGcFinalizeResult finalize_object_gc_transaction(BASE::DbConnection& connection,
                                                       const std::string& hash) {
-  // 1. 校验哈希，非法返回 failed 
+  // 1. 校验哈希，非法返回 failed
   if (!Transfer::valid_hash(hash)) {
     return ObjectGcFinalizeResult::failed;
   }
@@ -149,12 +149,12 @@ ObjectGcFinalizeResult finalize_object_gc_transaction(BASE::DbConnection& connec
   if (!transaction.active()) {
     return ObjectGcFinalizeResult::failed;
   }
-  // 3. 使用同一个连接创建 ObjectRepository 
+  // 3. 使用同一个连接创建 ObjectRepository
   ObjectRepository object_rep(connection);
   // 4. 调用 find_object_for_update(hash)：
-  //   - 查询失败：返回 failed 
+  //   - 查询失败：返回 failed
   //   - 记录不存在：返回 completed，支持重复收尾
-  //   - 有记录：先用 valid_object_result() 校验，再要求状态为 DELETING；不满足返回 failed 
+  //   - 有记录：先用 valid_object_result() 校验，再要求状态为 DELETING；不满足返回 failed
   BASE::DbQueryResult qu_res = object_rep.find_object_for_update(hash);
 
   if (!qu_res.success) {
@@ -176,7 +176,7 @@ ObjectGcFinalizeResult finalize_object_gc_transaction(BASE::DbConnection& connec
   }
   // 5. 调用 find_reference_for_update(hash)：
   //   - 用 valid_reference_result() 校验
-  //   - 校验失败或仍有引用，都返回 failed 
+  //   - 校验失败或仍有引用，都返回 failed
   BASE::DbQueryResult reference_res = object_rep.find_reference_for_update(hash);
 
   if (!valid_reference_result(reference_res) || !reference_res.rows.empty()) {

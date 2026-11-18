@@ -1,10 +1,12 @@
+#include "ftp/metadata_service.h"
 #include "common/base/base_logger.h"
 #include "common/base/mysql_connection.h"
 #include "common/base/mysql_connection_pool.h"
 #include "ftp/directory_creation.h"
 #include "ftp/directory_deletion.h"
 #include "ftp/file_deletion.h"
-#include "ftp/metadata_service.h"
+#include "ftp/file_move.h"
+#include "ftp/file_rename.h"
 #include "ftp/metadata_types.h"
 #include "ftp/transfer_validation.h"
 #include "ftp/upload_registration.h"
@@ -109,63 +111,31 @@ StorageContext<std::vector<FileInfo>> MetadataService::find_file_by_current_dir_
   return {true, files_info};
 }
 
-StorageContext<std::string> MetadataService::move_dir_by_current_dir_db(
-    const std::string& username, const std::string& current_directory,
-    const std::string& dir_name) {
-  if (username.empty() || current_directory.empty() || dir_name.empty()) {
+StorageContext<std::string> MetadataService::find_directory_by_path_db(
+    const std::string& username, const std::string& target_directory) {
+  if (username.empty() || !Transfer::valid_directory_path(target_directory)) {
     return {false, {}};
-  }
-
-  // 根目录没有上级目录，保持在根目录。
-  if (dir_name == ".." && current_directory == "/") {
-    return {true, "/"};
   }
 
   auto db_conn = _db_conn_pool.get_connection();
   if (!db_conn) {
-    BASE::mysql_logger()->error("storage engine get connection failed");
+    BASE::mysql_logger()->error("directory lookup get connection failed");
     return {false, {}};
   }
 
-  BASE::DbQueryResult result;
+  // 虚拟路径属于当前用户；仅允许进入目录，路径按字节精确匹配。
+  auto result = db_conn->query_prepared(
+      "SELECT path FROM virtual_files "
+      "WHERE username = ? "
+      "AND CAST(path AS BINARY) = CAST(? AS BINARY) "
+      "AND file_type = 'directory';",
+      {username, target_directory});
 
-  if (dir_name != "..") {
-    // parent 是当前目录，child 是要进入的子目录。
-    result = db_conn->query_prepared(
-        "SELECT child.path FROM virtual_files AS child "
-        "JOIN virtual_files AS parent ON parent.id = child.parent_id "
-        "AND parent.username = child.username "
-        "WHERE child.username = ? "
-        "AND child.file_name = ? "
-        "AND child.file_type = 'directory' "
-        "AND parent.file_type = 'directory' "
-        "AND parent.path = ? LIMIT 1",
-        {username, dir_name, current_directory});
-  } else {
-    // child 是当前目录，parent 是它的父目录。
-    result = db_conn->query_prepared(
-        "SELECT parent.path FROM virtual_files AS child "
-        "JOIN virtual_files AS parent ON parent.id = child.parent_id "
-        "AND parent.username = child.username "
-        "WHERE child.username = ? "
-        "AND child.path = ? "
-        "AND child.file_type = 'directory' "
-        "AND parent.file_type = 'directory' LIMIT 1",
-        {username, current_directory});
-  }
-
-  if (!result.success) {
-    BASE::mysql_logger()->error("storage engine query failed");
+  if (!result.success || result.rows.size() != 1) {
     return {false, {}};
   }
-
-  if (result.rows.empty()) {
-    return {false, {}};
-  }
-
-  const auto& row = result.rows.front();
-  if (row.size() != 1 || !row[0] || row[0]->empty()) {
-    BASE::mysql_logger()->error("storage engine received invalid directory data");
+  const auto& row = result.rows[0];
+  if (row.size() != 1 || !row[0] || *row[0] != target_directory) {
     return {false, {}};
   }
 
@@ -316,22 +286,31 @@ StorageContext<std::vector<FileInfo>> MetadataService::find_file_by_current_dir(
 StorageContext<std::string> MetadataService::move_dir_by_current_dir(
     const std::string& username, const std::string& current_directory,
     const std::string& dir_name) {
-  return observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_queries_failed,
-                          [&]() -> StorageContext<std::string> {
-                            if (username.empty() || current_directory.empty() || dir_name.empty()) {
-                              return {false, {}};
-                            }
-                            // 根目录返回上级无需访问缓存或数据库；会话更新仍由原 IO 线程负责。
-                            if (current_directory == "/" && dir_name == "..") {
-                              return {true, "/"};
-                            }
-                            return _metadata_cache->cd(
-                                username, current_directory, dir_name,
-                                [this, &username, &current_directory, &dir_name] {
-                                  return move_dir_by_current_dir_db(username, current_directory,
-                                                                    dir_name);
-                                });
-                          });
+  return observe_metadata(
+      _metrics, OBSERVABILITY::Metric::metadata_queries_failed,
+      [&]() -> StorageContext<std::string> {
+        if (username.empty()) {
+          return {false, {}};
+        }
+        auto resolved = Transfer::resolve_directory_path(current_directory, dir_name);
+        if (!resolved) {
+          return {false, {}};
+        }
+        const std::string target_directory = *resolved;
+
+        // 缓存及协调范围由目标的父目录决定，与发起 cd 的工作目录无关。
+        std::string parent_directory = "/";
+        std::string directory_name = "/";
+        if (target_directory != "/") {
+          const auto separator = target_directory.rfind('/');
+          parent_directory = separator == 0 ? "/" : target_directory.substr(0, separator);
+          directory_name = target_directory.substr(separator + 1);
+        }
+        return _metadata_cache->cd(username, parent_directory, directory_name,
+                                   [this, &username, &target_directory] {
+                                     return find_directory_by_path_db(username, target_directory);
+                                   });
+      });
 }
 
 StorageContext<std::string> MetadataService::find_download_hash(const std::string& username,
@@ -475,6 +454,136 @@ DeleteDirectoryResult MetadataService::delete_empty_directory(const std::string&
 
   observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
 
+  return outcome;
+}
+
+DeleteDirectoryTreeResult MetadataService::delete_directory_tree_db(
+    const std::string& username, const std::string& current_directory,
+    const std::string& directory_name) {
+  auto connection = _db_conn_pool.get_connection();
+  if (!connection) {
+    BASE::mysql_logger()->error("delete directory tree failed");
+    return DeleteDirectoryTreeResult::failed;
+  }
+  return delete_directory_tree_transaction(*connection, username, current_directory,
+                                           directory_name);
+}
+
+DeleteDirectoryTreeResult MetadataService::delete_directory_tree(
+    const std::string& username, const std::string& current_directory,
+    const std::string& directory_name) {
+  DeleteDirectoryTreeResult outcome = DeleteDirectoryTreeResult::failed;
+  auto work = [&]() -> bool {
+    if (username.empty() || current_directory.empty() || !Transfer::valid_name(directory_name)) {
+      return false;
+    }
+    const std::string target_path = current_directory == "/"
+                                        ? current_directory + directory_name
+                                        : current_directory + "/" + directory_name;
+
+    if (target_path.size() > 1024) {
+      return false;
+    }
+
+    auto writer = [&]() -> bool {
+      outcome = delete_directory_tree_db(username, current_directory, directory_name);
+      return outcome == DeleteDirectoryTreeResult::committed;
+    };
+    return _metadata_cache->write_subtree(username, current_directory, target_path, writer);
+  };
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+  return outcome;
+}
+
+RenameFileResult MetadataService::rename_file_db(const std::string& username,
+                                                 const std::string& directory,
+                                                 const std::string& old_name,
+                                                 const std::string& new_name) {
+  auto connection = _db_conn_pool.get_connection();
+  if (!connection) {
+    BASE::mysql_logger()->error("rename file failed");
+    return RenameFileResult::failed;
+  }
+  return rename_file_transaction(*connection, username, directory, old_name, new_name);
+}
+
+RenameFileResult MetadataService::rename_file(const std::string& username,
+                                              const std::string& directory,
+                                              const std::string& old_name,
+                                              const std::string& new_name) {
+  RenameFileResult outcome = RenameFileResult::failed;
+  auto work = [&]() -> bool {
+    if (username.empty() || directory.empty() || !Transfer::valid_name(old_name) ||
+        !Transfer::valid_name(new_name)) {
+      return false;
+    }
+    const std::string old_path =
+        directory == "/" ? directory + old_name : directory + "/" + old_name;
+
+    const std::string new_path =
+        directory == "/" ? directory + new_name : directory + "/" + new_name;
+
+    if (old_path.size() > 1024) {
+      return false;
+    }
+    if (new_path.size() > 1024) {
+      return false;
+    }
+
+    auto writer = [&]() -> bool {
+      outcome = rename_file_db(username, directory, old_name, new_name);
+      return outcome == RenameFileResult::committed;
+    };
+
+    return _metadata_cache->write(username, directory, writer);
+  };
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
+  return outcome;
+}
+
+MoveFileResult MetadataService::move_file_db(const std::string& username,
+                                             const std::string& source_directory,
+                                             const std::string& target_directory,
+                                             const std::string& file_name) {
+  auto connection = _db_conn_pool.get_connection();
+  if (!connection) {
+    return MoveFileResult::failed;
+  }
+
+  return move_file_transaction(*connection, username, source_directory, target_directory,
+                               file_name);
+}
+
+MoveFileResult MetadataService::move_file(const std::string& username,
+                                          const std::string& source_directory,
+                                          const std::string& target_directory,
+                                          const std::string& file_name) {
+  MoveFileResult outcome = MoveFileResult::failed;
+  auto work = [&]() -> bool {
+    if (username.empty() || source_directory.empty() || target_directory.empty() ||
+        !Transfer::valid_name(file_name)) {
+      return false;
+    }
+
+    const std::string source_path =
+        source_directory == "/" ? source_directory + file_name : source_directory + "/" + file_name;
+    const std::string target_path =
+        target_directory == "/" ? target_directory + file_name : target_directory + "/" + file_name;
+    if (source_path.size() > 1024 || target_path.size() > 1024) {
+      return false;
+    }
+
+    auto writer = [&]() -> bool {
+      outcome = move_file_db(username, source_directory, target_directory, file_name);
+      return outcome == MoveFileResult::committed;
+    };
+
+    // 一次申请两个目录的写权限，并在退出时推进两个目录的缓存版本。
+    return _metadata_cache->write_two_directories(username, source_directory, target_directory,
+                                                  writer);
+  };
+
+  observe_metadata(_metrics, OBSERVABILITY::Metric::metadata_writes_failed, work);
   return outcome;
 }
 

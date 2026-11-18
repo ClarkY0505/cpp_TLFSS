@@ -1,4 +1,4 @@
-"""Execute the production cd SQL against an isolated in-memory directory tree."""
+"""执行当前目录查询 SQL；路径解析和结果校验由 C++ 服务测试覆盖。"""
 
 import json
 from pathlib import Path
@@ -14,7 +14,9 @@ class DirectoryLookupTest(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "src/ftp/metadata_service.cpp"
         ).read_text()
-        function = source.split("MetadataService::move_dir_by_current_dir", 1)[1]
+        # 只从当前私有查询方法提取 SQL，避免误取文件中的其他元数据查询。
+        function = source.split("MetadataService::find_directory_by_path_db(", 1)[1]
+        function = function.split("\n}\n", 1)[0]
         queries = re.findall(
             r'query_prepared\(\s*((?:"(?:\\.|[^"\\])*"\s*)+)\s*,',
             function,
@@ -27,15 +29,14 @@ class DirectoryLookupTest(unittest.TestCase):
             for query in queries
         ]
         cls.sql = next(
-            (sql for sql in statements if sql.startswith("SELECT child.path")),
-            None,
-        )
-        cls.parent_sql = next(
-            (sql for sql in statements if sql.startswith("SELECT parent.path")),
+            (sql for sql in statements if sql.startswith("SELECT path FROM virtual_files")),
             None,
         )
         if cls.sql is None:
             raise AssertionError("Cannot locate the production cd query")
+        # SQLite 使用 BLOB 表示字节串；其 BINARY 类型不能模拟 MySQL 的 BINARY。
+        # 仅适配这处方言差异，仍执行从生产源码提取的查询和参数占位符。
+        cls.sqlite_sql = cls.sql.replace(" AS BINARY)", " AS BLOB)")
 
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
@@ -43,7 +44,8 @@ class DirectoryLookupTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE virtual_files ("
             "id INTEGER PRIMARY KEY, username TEXT, parent_id INTEGER, "
-            "file_name TEXT, path TEXT, file_type TEXT)"
+            # 使用不区分 ASCII 大小写的列排序，验证查询显式转换后的字节精确比较。
+            "file_name TEXT, path TEXT COLLATE NOCASE, file_type TEXT)"
         )
         self.db.executemany(
             "INSERT INTO virtual_files VALUES (?, ?, ?, ?, ?, ?)",
@@ -61,81 +63,78 @@ class DirectoryLookupTest(unittest.TestCase):
             ],
         )
 
-    def lookup(self, name, current="/", username="alice"):
-        return self.db.execute(self.sql, (username, name, current)).fetchall()
-
-    def lookup_parent(self, current, username="alice"):
-        self.assertIsNotNone(self.parent_sql, "cd .. lookup is not implemented")
-        return self.db.execute(self.parent_sql, (username, current)).fetchall()
+    def lookup(self, target, username="alice"):
+        return self.db.execute(self.sqlite_sql, (username, target)).fetchall()
 
     def test_enters_child_from_root(self):
-        self.assertEqual(self.lookup("docs"), [("/docs",)])
+        self.assertEqual(self.lookup("/docs"), [("/docs",)])
 
     def test_enters_nested_child(self):
-        self.assertEqual(self.lookup("sub", "/docs"), [("/docs/sub",)])
+        self.assertEqual(self.lookup("/docs/sub"), [("/docs/sub",)])
 
-    def test_same_name_is_resolved_under_current_parent(self):
-        self.assertEqual(self.lookup("docs", "/archive"), [("/archive/docs",)])
+    def test_same_name_is_resolved_by_full_path(self):
+        self.assertEqual(self.lookup("/archive/docs"), [("/archive/docs",)])
+        self.assertEqual(self.lookup("/docs"), [("/docs",)])
 
     def test_rejects_regular_file(self):
-        self.assertEqual(self.lookup("a.txt"), [])
+        self.assertEqual(self.lookup("/a.txt"), [])
 
     def test_rejects_missing_directory(self):
-        self.assertEqual(self.lookup("missing"), [])
+        self.assertEqual(self.lookup("/missing"), [])
 
     def test_cannot_enter_another_users_directory(self):
-        self.assertEqual(self.lookup("private"), [])
+        self.assertEqual(self.lookup("/private"), [])
+        self.assertEqual(self.lookup("/private", "bob"), [("/private",)])
 
     def test_directory_name_can_contain_spaces(self):
-        self.assertEqual(self.lookup("my folder"), [("/my folder",)])
+        self.assertEqual(self.lookup("/my folder"), [("/my folder",)])
 
     def test_sql_looking_name_is_literal_data(self):
         name = "x' OR 1=1 -- "
-        self.assertEqual(self.lookup(name), [])
+        self.assertEqual(self.lookup("/" + name), [])
         self.db.execute(
             "INSERT INTO virtual_files VALUES (?, ?, ?, ?, ?, ?)",
             (11, "alice", 1, name, "/" + name, "directory"),
         )
-        self.assertEqual(self.lookup(name), [("/" + name,)])
+        self.assertEqual(self.lookup("/" + name), [("/" + name,)])
 
-    def test_returns_from_nested_directory(self):
-        self.assertEqual(self.lookup_parent("/docs/sub"), [("/docs",)])
+    def test_root_is_queried_as_an_existing_directory(self):
+        self.assertEqual(self.lookup("/"), [("/",)])
 
-    def test_returns_to_root_from_top_level_directory(self):
-        self.assertEqual(self.lookup_parent("/docs"), [("/",)])
+    def test_missing_root_returns_no_record(self):
+        self.db.execute("DELETE FROM virtual_files WHERE username = ? AND path = ?", ("alice", "/"))
+        self.assertEqual(self.lookup("/"), [])
 
-    def test_parent_is_resolved_from_directory_record(self):
-        self.assertEqual(self.lookup_parent("/archive/docs"), [("/archive",)])
+    def test_same_path_is_scoped_to_current_user(self):
+        self.assertEqual(self.lookup("/docs", "bob"), [("/docs",)])
+        self.assertEqual(self.lookup("/docs", "carol"), [])
 
-    def test_root_has_no_parent_record(self):
-        self.assertEqual(self.lookup_parent("/"), [])
+    def test_path_comparison_is_case_sensitive(self):
+        self.assertEqual(self.lookup("/Docs"), [])
+        self.assertEqual(self.lookup("/docs/Sub"), [])
 
-    def test_parent_lookup_rejects_missing_current_directory(self):
-        self.assertEqual(self.lookup_parent("/missing"), [])
+    def test_prefix_is_not_a_complete_path(self):
+        self.assertEqual(self.lookup("/doc"), [])
+        self.assertEqual(self.lookup("/docs-extra"), [])
 
-    def test_parent_lookup_rejects_current_regular_file(self):
-        self.assertEqual(self.lookup_parent("/a.txt"), [])
+    def test_wildcards_are_literal_data(self):
+        self.assertEqual(self.lookup("/%"), [])
+        self.assertEqual(self.lookup("/doc_"), [])
 
-    def test_parent_lookup_is_scoped_to_current_user(self):
+    def test_trailing_spaces_are_not_trimmed(self):
+        self.assertEqual(self.lookup("/my folder "), [])
+
+    def test_directory_type_is_required(self):
+        self.db.execute("UPDATE virtual_files SET file_type = 'file' WHERE id = 2")
+        self.assertEqual(self.lookup("/docs"), [])
+
+    def test_duplicate_targets_are_not_hidden_by_limit(self):
+        # 私有 C++ 方法要求结果恰好一行，因此 SQL 不应通过 LIMIT 隐藏损坏的重复记录。
         self.db.execute(
             "INSERT INTO virtual_files VALUES (?, ?, ?, ?, ?, ?)",
-            (12, "alice", 7, "cross-user", "/cross-user", "directory"),
+            (11, "alice", 1, "duplicate", "/docs", "directory"),
         )
-        self.assertEqual(self.lookup_parent("/cross-user"), [])
-
-    def test_parent_lookup_rejects_regular_file_as_parent(self):
-        self.db.execute(
-            "INSERT INTO virtual_files VALUES (?, ?, ?, ?, ?, ?)",
-            (12, "alice", 4, "invalid-parent", "/invalid-parent", "directory"),
-        )
-        self.assertEqual(self.lookup_parent("/invalid-parent"), [])
-
-    def test_parent_lookup_rejects_missing_parent(self):
-        self.db.execute(
-            "INSERT INTO virtual_files VALUES (?, ?, ?, ?, ?, ?)",
-            (12, "alice", 999, "orphan", "/orphan", "directory"),
-        )
-        self.assertEqual(self.lookup_parent("/orphan"), [])
+        self.assertEqual(self.lookup("/docs"), [("/docs",), ("/docs",)])
 
 
 if __name__ == "__main__":

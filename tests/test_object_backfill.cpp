@@ -165,11 +165,11 @@ void test_disk_registration(TLSS::FileStorage::ObjectBackfill& backfill,
         "disk registration assigned or overwrote an incorrect state");
   check(write_count == 2 && registered_states.size() == 4,
         "disk registration wrote existing or non-regular candidates");
-  check(looked_up_hashes == std::vector<std::string>{
-            first_hash, second_hash, unavailable_hash, published.hash},
+  check(looked_up_hashes ==
+            std::vector<std::string>{first_hash, second_hash, unavailable_hash, published.hash},
         "disk registration did not use the sorted regular-file candidates");
-  check(write_history == std::vector<std::vector<BASE::DbValue>>{
-            {first_hash, "UNAVAILABLE"}, {published.hash, "LIVE"}},
+  check(write_history == std::vector<std::vector<BASE::DbValue>>{{first_hash, "UNAVAILABLE"},
+                                                                 {published.hash, "LIVE"}},
         "disk registration inserted incorrect object states");
   check(fs::exists(root / first_hash) && fs::exists(root / published.hash) &&
             fs::exists(root / ".tlss-part-Ab12c3"),
@@ -195,9 +195,8 @@ void test_disk_registration(TLSS::FileStorage::ObjectBackfill& backfill,
   create_file(last_hash);
   failed_write_hash = second_hash;
   check(!backfill.register_disk_objects(), "later disk insert failure was ignored");
-  check(looked_up_hashes == std::vector<std::string>{first_hash, second_hash} &&
-            write_count == 2 && registered_states.size() == 1 &&
-            registered_states.at(first_hash) == "UNAVAILABLE",
+  check(looked_up_hashes == std::vector<std::string>{first_hash, second_hash} && write_count == 2 &&
+            registered_states.size() == 1 && registered_states.at(first_hash) == "UNAVAILABLE",
         "partial disk registration lost progress or processed later candidates");
   check(fs::exists(root / first_hash) && fs::exists(root / second_hash) &&
             fs::exists(root / last_hash),
@@ -230,7 +229,9 @@ void test_disk_registration(TLSS::FileStorage::ObjectBackfill& backfill,
   // 扫描结果是快照：查询对象表时文件可能已经消失，仍复用 ENOENT 处理。
   reset_case();
   create_file(first_hash);
-  lookup_hook = [&](const std::string& hash) { fs::remove(root / hash); };
+  lookup_hook = [&](const std::string& hash) {
+    fs::remove(root / hash);
+  };
   check(backfill.register_disk_objects() && registered_states.at(first_hash) == "UNAVAILABLE",
         "disappearing disk candidate was not registered as unavailable");
 

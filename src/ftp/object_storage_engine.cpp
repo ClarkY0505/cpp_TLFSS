@@ -68,7 +68,9 @@ std::shared_ptr<SourceFile> open_source(const fs::path& path, bool no_followd) {
   } while (fd == -1 && errno == EINTR);
 
   if (fd == -1) {
-    system_failure("an object backfilling check performed during startup; it failed because the source file could not be opened");
+    system_failure(
+        "an object backfilling check performed during startup; it failed because the source file "
+        "could not be opened");
   }
   source->file.reset(fd);
 

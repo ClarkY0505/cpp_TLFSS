@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <mutex>
@@ -135,25 +136,56 @@ std::atomic<bool> rm_mode{false};
 std::atomic<int> rm_queries{0}, rm_deletes{0}, rm_borrows{0};
 std::atomic<bool> rm_exists{true}, rm_pending_delete{false};
 bool rm_unknown_applies = false;
-int rm_failure = 0; // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常。
+int rm_failure = 0;  // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常。
 std::thread::id rm_io_thread;
 const std::string rm_filename = "report with spaces.txt";
 // mkdir 使用独立替代状态，验证新三态接口从命令分发一直传递到网络响应。
 std::atomic<bool> mkdir_mode{false}, mkdir_exists{false}, mkdir_pending_insert{false};
 std::atomic<int> mkdir_borrows{0}, mkdir_queries{0}, mkdir_inserts{0};
-int mkdir_failure = 0; // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常，5 父目录不存在。
+int mkdir_failure = 0;  // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常，5 父目录不存在。
 bool mkdir_unknown_applies = false;
 std::thread::id mkdir_io_thread;
 // rmdir 的目录记录独立于共享对象；测试不能顺便删除对象文件或对象表记录。
 std::atomic<bool> rmdir_mode{false}, rmdir_exists{true}, rmdir_pending_delete{false};
 std::atomic<int> rmdir_borrows{0}, rmdir_queries{0}, rmdir_deletes{0};
-int rmdir_children = 0; // 0 为空，1 含文件，2 含子目录。
+int rmdir_children = 0;  // 0 为空，1 含文件，2 含子目录。
 // 1 DELETE 失败，2 零行，3/4 标准/非标准异常，5 父目录缺失，
 // 6 子项查询失败，7 子项结果格式错误，8 借连接失败，9 借连接抛异常。
 int rmdir_failure = 0;
 bool rmdir_unknown_applies = false;
 std::thread::id rmdir_io_thread;
-const std::string rmdir_name = "empty with spaces";
+std::string rmdir_name = "empty with spaces";
+// 与普通 rmdir 共用连接替代层，但递归模式返回完整子树并验证每个 DELETE 的身份。
+bool rmdir_recursive = false;
+// 重命名任务尚未接入命令分发：直接通过真实业务线程池执行，结果走真实 IO 回调。
+std::atomic<bool> rename_task_mode{false}, rename_task_pending{false}, rename_task_applied{false};
+std::atomic<int> rename_task_borrows{0}, rename_task_queries{0}, rename_task_updates{0};
+int rename_task_failure = 0;  // 1 UPDATE 失败，2 零行，3/4 标准/非标准异常，5 源文件缺失。
+bool rename_task_unknown_applies = false;
+std::thread::id rename_task_io_thread;
+std::string rename_task_old_name = rm_filename;
+std::string rename_task_new_name = "renamed with spaces.txt";
+// 移动任务使用独立的事务替代状态；线程池、缓存和 IO 回调均执行真实实现。
+struct MoveTaskState {
+  bool enabled = false;
+  std::atomic<int> borrows{0}, queries{0}, updates{0};
+  std::atomic<bool> pending{false}, applied{false};
+  // 1 UPDATE 失败，2 零行，3/4 标准/非标准异常，5 源文件缺失。
+  int failure = 0;
+  bool unknown_applies = false;
+  std::thread::id io_thread;
+  std::string source = "/";
+  std::string target = "/archive with spaces";
+} move_task;
+// cd 入口回归：只替换数据库边界，命令解析、业务线程池和 IO 回调运行真实代码。
+struct CdTestState {
+  bool enabled = false, missing = false;
+  // 1 借连接失败，2 借连接抛异常，3 查询失败，4/5 查询抛标准/非标准异常。
+  int failure = 0;
+  std::atomic<int> borrows{0}, queries{0};
+  std::thread::id io_thread;
+  std::string target = "/archive";
+} cd_test;
 void check(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
@@ -188,6 +220,22 @@ DbConnectionPool* DbConnectionPool::get_connection_pool() {
   return &pool;
 }
 DbConnectionHandle DbConnectionPool::get_connection() {
+  if (cd_test.enabled) {
+    ++cd_test.borrows;
+    check(std::this_thread::get_id() != cd_test.io_thread, "cd borrowed a connection on the IO thread");
+    if (cd_test.failure == 1) return {nullptr, DbConnectionDeleter{}};
+    if (cd_test.failure == 2) throw std::runtime_error("injected cd connection exception");
+  }
+  if (move_task.enabled) {
+    ++move_task.borrows;
+    check(std::this_thread::get_id() != move_task.io_thread,
+          "move task borrowed a connection on the IO thread");
+  }
+  if (rename_task_mode.load()) {
+    ++rename_task_borrows;
+    check(std::this_thread::get_id() != rename_task_io_thread,
+          "rename task borrowed a database connection on the IO thread");
+  }
   if (rmdir_mode.load()) {
     ++rmdir_borrows;
     check(std::this_thread::get_id() != rmdir_io_thread,
@@ -199,7 +247,8 @@ DbConnectionHandle DbConnectionPool::get_connection() {
   }
   if (mkdir_mode.load()) {
     ++mkdir_borrows;
-    check(std::this_thread::get_id() != mkdir_io_thread, "mkdir borrowed a connection on the IO thread");
+    check(std::this_thread::get_id() != mkdir_io_thread,
+          "mkdir borrowed a connection on the IO thread");
   }
   if (rm_mode.load()) {
     ++rm_borrows;
@@ -225,9 +274,8 @@ DbConnectionHandle DbConnectionPool::get_connection() {
 bool DbConnectionPool::shutdown(std::chrono::milliseconds) {
   if (finalizer_active.load())
     shutdown_during_finalize.store(true);
-  if (watched_gc_thread &&
-      ((watched_gc_thread->started() && !watched_gc_thread->_joined) ||
-       gc_callback_active.load() || borrowed_connections.load() != 0))
+  if (watched_gc_thread && ((watched_gc_thread->started() && !watched_gc_thread->_joined) ||
+                            gc_callback_active.load() || borrowed_connections.load() != 0))
     shutdown_before_gc_finished.store(true);
   database_shutdown_called.store(true);
   return true;
@@ -242,7 +290,82 @@ DbConnection::DbConnection()
     , _connected(false)
     , _transaction_active(false) {}
 DbConnection::~DbConnection() = default;
-DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::vector<DbValue>& params) {
+DbQueryResult DbConnection::query_prepared(const std::string& sql,
+                                           const std::vector<DbValue>& params) {
+  if (cd_test.enabled) {
+    check(!_transaction_active && std::this_thread::get_id() != cd_test.io_thread &&
+              sql.find("SELECT path FROM virtual_files ") == 0 &&
+              sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+              sql.find("file_type = 'directory'") != std::string::npos &&
+              params == std::vector<DbValue>{"test_user", cd_test.target},
+          "cd queried an incorrect parsed directory or used the IO thread");
+    ++cd_test.queries;
+    commit_gate.wait();
+    if (cd_test.failure == 3) return {false, {}};
+    if (cd_test.failure == 4) throw std::runtime_error("injected cd query exception");
+    if (cd_test.failure == 5) throw 42;
+    return cd_test.missing ? DbQueryResult{true, {}} : DbQueryResult{true, {{cd_test.target}}};
+  }
+  if (move_task.enabled) {
+    check(_transaction_active && std::this_thread::get_id() != move_task.io_thread &&
+              sql.find("FOR UPDATE") != std::string::npos,
+          "move task queried outside its transaction or on the IO thread");
+    const int stage = ++move_task.queries;
+    if (stage == 1) {
+      check(sql.find("FROM users") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user"},
+            "move task did not lock the captured user first");
+      return {true, {{"1"}}};
+    }
+    if (stage == 2 || stage == 3) {
+      check(sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                sql.find("file_type = 'directory'") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user", stage == 2 ? move_task.source : move_task.target},
+            "move task changed its captured source or target directory");
+      return {true, {{stage == 2 ? "42" : "20"}}};
+    }
+    if (stage == 4) {
+      const auto source_path = move_task.source == "/" ? "/" + rm_filename
+                                                        : move_task.source + "/" + rm_filename;
+      check(sql.find("file_type = 'file'") != std::string::npos &&
+                sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user", "42", rm_filename, source_path},
+            "move task selected the wrong source file");
+      return move_task.failure == 5 ? DbQueryResult{true, {}} : DbQueryResult{true, {{"128"}}};
+    }
+    check(stage == 5 && sql.find("id <> ?") != std::string::npos &&
+              params == std::vector<DbValue>{"test_user", "20", rm_filename, "128"},
+          "move task skipped the target conflict check");
+    return {true, {}};
+  }
+  if (rename_task_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rename_task_io_thread &&
+              sql.find("FOR UPDATE") != std::string::npos,
+          "rename task queried outside its transaction or on the IO thread");
+    const int stage = ++rename_task_queries;
+    if (stage == 1) {
+      check(sql.find("FROM users") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user"},
+            "rename task did not lock the captured user first");
+      return {true, {{"1"}}};
+    }
+    if (stage == 2) {
+      check(params == std::vector<DbValue>{"test_user", "/"},
+            "rename task changed its captured directory");
+      return {true, {{"42"}}};
+    }
+    if (stage == 3) {
+      check(sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                params == std::vector<DbValue>{"test_user", "42", rename_task_old_name,
+                                               "/" + rename_task_old_name},
+            "rename task changed the source name or omitted its exact path");
+      return rename_task_failure == 5 ? DbQueryResult{true, {}} : DbQueryResult{true, {{"128"}}};
+    }
+    check(stage == 4 && sql.find("id <> ?") != std::string::npos &&
+              params == std::vector<DbValue>{"test_user", "42", rename_task_new_name, "128"},
+          "rename task changed its new name or skipped its conflict check");
+    return {true, {}};
+  }
   if (rmdir_mode.load()) {
     check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
               sql.find("FOR UPDATE") != std::string::npos,
@@ -265,11 +388,32 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
             "rmdir changed its captured target or omitted byte-exact path comparison");
       return rmdir_exists.load() ? DbQueryResult{true, {{"128"}}} : DbQueryResult{true, {}};
     }
+    if (rmdir_recursive) {
+      check(sql.find("SELECT id, file_name, path, file_type") == 0 &&
+                params == std::vector<DbValue>{"test_user", stage == 4 ? "128" : "130"},
+            "recursive rmdir skipped child enumeration or changed its parent");
+      if (rmdir_failure == 6)
+        return {};
+      if (rmdir_failure == 7)
+        return {true, {{"129", "malformed"}}};
+      if (rmdir_children == 0) {
+        check(stage == 4, "empty recursive target unexpectedly had descendants");
+        return {true, {}};
+      }
+      if (stage == 4)
+        return {true,
+                {{"129", "notes.txt", "/" + rmdir_name + "/notes.txt", "file"},
+                 {"130", "sub", "/" + rmdir_name + "/sub", "directory"}}};
+      check(stage == 5, "recursive rmdir queried an unexpected node");
+      return {true, {{"131", "item.bin", "/" + rmdir_name + "/sub/item.bin", "file"}}};
+    }
     check(stage == 4 && sql.find("file_type") == std::string::npos &&
               params == std::vector<DbValue>{"test_user", "128"},
           "rmdir skipped its emptiness check or excluded a child type");
-    if (rmdir_failure == 6) return {};
-    if (rmdir_failure == 7) return {true, {{"129", "extra column"}}};
+    if (rmdir_failure == 6)
+      return {};
+    if (rmdir_failure == 7)
+      return {true, {{"129", "extra column"}}};
     if (rmdir_children != 0)
       return {true, {{rmdir_children == 1 ? "129" : "130"}}};
     return {true, {}};
@@ -305,8 +449,7 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
     if (sql.find("SELECT id, object_hash FROM virtual_files ") == 0) {
       check(params == std::vector<DbValue>{"test_user", "42", rm_filename},
             "rm parsed the wrong filename or parent");
-      return rm_exists.load() ? DbQueryResult{true, {{"128", abc_hash}}}
-                             : DbQueryResult{true, {}};
+      return rm_exists.load() ? DbQueryResult{true, {{"128", abc_hash}}} : DbQueryResult{true, {}};
     }
     throw std::runtime_error("unexpected rm query: " + sql);
   }
@@ -322,10 +465,8 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
   }
   if (sql.find("SELECT object_hash FROM storage_objects ") == 0) {
     ++deleting_list_queries;
-    check(referenced_list_queries.load() == 1,
-          "deleting recovery ran before historical backfill");
-    check(borrowed_connections.load() == 1,
-          "deleting list query retained a previous connection");
+    check(referenced_list_queries.load() == 1, "deleting recovery ran before historical backfill");
+    check(borrowed_connections.load() == 1, "deleting list query retained a previous connection");
     const int mode = deleting_list_mode.load();
     if (mode == 1)
       return {false, {}};
@@ -370,23 +511,99 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql, const std::ve
   return {true, {{std::string("42")}}};
 }
 bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue>&) {
-  check(!rmdir_mode.load(), "rmdir attempted an unexpected nontransactional write");
+  check(!move_task.enabled, "move task attempted an unexpected nontransactional write");
+  check(!rmdir_mode.load() && !rename_task_mode.load(),
+        "metadata task attempted an unexpected nontransactional write");
   return true;
 }
 DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
                                                const std::vector<DbValue>& params) {
-  if (rmdir_mode.load()) {
-    check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
-              rmdir_queries.load() == 4 && sql.find("DELETE FROM virtual_files ") == 0 &&
-              sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
-              params == std::vector<DbValue>{"128", "test_user", "42", rmdir_name, "/" + rmdir_name},
-          "rmdir DELETE changed its target, ran on the IO thread, or ran before the emptiness check");
-    ++rmdir_deletes;
+  if (move_task.enabled) {
+    const auto source_path = move_task.source == "/" ? "/" + rm_filename
+                                                      : move_task.source + "/" + rm_filename;
+    const auto target_path = move_task.target == "/" ? "/" + rm_filename
+                                                      : move_task.target + "/" + rm_filename;
+    check(_transaction_active && std::this_thread::get_id() != move_task.io_thread &&
+              move_task.queries.load() == 5 &&
+              sql.find("UPDATE virtual_files SET parent_id = ?, path = ?") == 0 &&
+              params == std::vector<DbValue>{"20", target_path, "128",
+                                             "test_user", "42", rm_filename, source_path},
+          "move task updated the wrong metadata, changed the filename or used the IO thread");
+    ++move_task.updates;
+    move_task.pending.store(true);
     commit_gate.wait();
-    if (rmdir_failure == 1) return {false, 1213, 0, 0};
-    if (rmdir_failure == 2) return {true, 0, 0, 0};
-    if (rmdir_failure == 3) throw std::runtime_error("injected rmdir SQL exception");
-    if (rmdir_failure == 4) throw 7;
+    if (move_task.failure == 1)
+      return {false, 1062, 0, 0};
+    if (move_task.failure == 2)
+      return {true, 0, 0, 0};
+    if (move_task.failure == 3)
+      throw std::runtime_error("injected move task exception");
+    if (move_task.failure == 4)
+      throw 42;
+    return {true, 0, 1, 0};
+  }
+  if (rename_task_mode.load()) {
+    check(_transaction_active && std::this_thread::get_id() != rename_task_io_thread &&
+              rename_task_queries.load() == 4 &&
+              sql.find("UPDATE virtual_files SET file_name = ?, path = ?") == 0 &&
+              params == std::vector<DbValue>{rename_task_new_name, "/" + rename_task_new_name,
+                                             "128", "test_user", "42", rename_task_old_name,
+                                             "/" + rename_task_old_name},
+          "rename task updated the wrong file, changed its hash or used the IO thread");
+    ++rename_task_updates;
+    rename_task_pending.store(true);
+    commit_gate.wait();
+    if (rename_task_failure == 1)
+      return {false, 1062, 0, 0};
+    if (rename_task_failure == 2)
+      return {true, 0, 0, 0};
+    if (rename_task_failure == 3)
+      throw std::runtime_error("injected rename task exception");
+    if (rename_task_failure == 4)
+      throw 42;
+    return {true, 0, 1, 0};
+  }
+  if (rmdir_mode.load()) {
+    const int stage = ++rmdir_deletes;
+    if (rmdir_recursive) {
+      const std::string root = "/" + rmdir_name;
+      // 正常子树四个节点：先删最深文件，再删其目录，最后删除目标目录。
+      const std::vector<std::vector<DbValue>> expected =
+          rmdir_children == 0
+              ? std::vector<std::vector<DbValue>>{{"128", "test_user", "42", rmdir_name, root,
+                                                   "directory"}}
+              : std::vector<std::vector<DbValue>>{
+                    {"131", "test_user", "130", "item.bin", root + "/sub/item.bin", "file"},
+                    {"130", "test_user", "128", "sub", root + "/sub", "directory"},
+                    {"129", "test_user", "128", "notes.txt", root + "/notes.txt", "file"},
+                    {"128", "test_user", "42", rmdir_name, root, "directory"}};
+      check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
+                rmdir_queries.load() == (rmdir_children == 0 ? 4 : 5) &&
+                sql.find("DELETE FROM virtual_files ") == 0 &&
+                sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                stage > 0 && static_cast<std::size_t>(stage) <= expected.size() &&
+                params == expected[static_cast<std::size_t>(stage - 1)],
+            "recursive rmdir changed node identity, deletion order, thread or transaction");
+    } else {
+      check(_transaction_active && std::this_thread::get_id() != rmdir_io_thread &&
+                rmdir_queries.load() == 4 && sql.find("DELETE FROM virtual_files ") == 0 &&
+                sql.find("CAST(path AS BINARY) = CAST(? AS BINARY)") != std::string::npos &&
+                params ==
+                    std::vector<DbValue>{"128", "test_user", "42", rmdir_name, "/" + rmdir_name},
+            "rmdir DELETE changed its target, ran on the IO thread, or ran before the emptiness "
+            "check");
+    }
+    commit_gate.wait();
+    // 递归模式先成功删除一个节点，再注入故障，验证不会留下部分提交。
+    const bool inject = !rmdir_recursive || rmdir_children == 0 || stage == 2;
+    if (inject && rmdir_failure == 1)
+      return {false, 1213, 0, 0};
+    if (inject && rmdir_failure == 2)
+      return {true, 0, 0, 0};
+    if (inject && rmdir_failure == 3)
+      throw std::runtime_error("injected rmdir SQL exception");
+    if (inject && rmdir_failure == 4)
+      throw 7;
     rmdir_pending_delete.store(true);
     return {true, 0, 1, 0};
   }
@@ -394,13 +611,18 @@ DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
     check(_transaction_active && std::this_thread::get_id() != mkdir_io_thread &&
               sql.find("INSERT INTO virtual_files ") == 0 &&
               params == std::vector<DbValue>{"drafts", "test_user", "42", "/drafts"},
-          "mkdir INSERT ran on the wrong thread, outside its transaction, or with incorrect parameters");
+          "mkdir INSERT ran on the wrong thread, outside its transaction, or with incorrect "
+          "parameters");
     ++mkdir_inserts;
     commit_gate.wait();
-    if (mkdir_failure == 1) return {false, 1213, 0, 0};
-    if (mkdir_failure == 2) return {true, 0, 0, 0};
-    if (mkdir_failure == 3) throw std::runtime_error("injected mkdir SQL exception");
-    if (mkdir_failure == 4) throw 7;
+    if (mkdir_failure == 1)
+      return {false, 1213, 0, 0};
+    if (mkdir_failure == 2)
+      return {true, 0, 0, 0};
+    if (mkdir_failure == 3)
+      throw std::runtime_error("injected mkdir SQL exception");
+    if (mkdir_failure == 4)
+      throw 7;
     mkdir_pending_insert.store(true);
     return {true, 0, 1, 500};
   }
@@ -412,10 +634,14 @@ DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
           "rm attempted another database write or deleted a different file");
     ++rm_deletes;
     commit_gate.wait();
-    if (rm_failure == 1) return {false, 1213, 0, 0};
-    if (rm_failure == 2) return {true, 0, 0, 0};
-    if (rm_failure == 3) throw std::runtime_error("injected rm SQL exception");
-    if (rm_failure == 4) throw 7;
+    if (rm_failure == 1)
+      return {false, 1213, 0, 0};
+    if (rm_failure == 2)
+      return {true, 0, 0, 0};
+    if (rm_failure == 3)
+      throw std::runtime_error("injected rm SQL exception");
+    if (rm_failure == 4)
+      throw 7;
     rm_pending_delete.store(true);
     return {true, 0, 1, 0};
   }
@@ -437,8 +663,7 @@ DbExecuteResult DbConnection::execute_prepared(const std::string& sql,
   check(_transaction_active, "upload write ran outside transaction");
 
   // 保留 inserts 的原有含义：只统计文件登记，不混入对象表写入。
-  if (sql.find("INSERT INTO storage_objects ") == 0 ||
-      sql.find("UPDATE storage_objects ") == 0) {
+  if (sql.find("INSERT INTO storage_objects ") == 0 || sql.find("UPDATE storage_objects ") == 0) {
     return {true, 0, 1, 0};
   }
   if (sql.find("INSERT INTO virtual_files ") == 0) {
@@ -474,6 +699,17 @@ DbCommitStatus DbTransaction::commit() noexcept {
     return DbCommitStatus::k_not_active;
 
   ++upload_commits;
+  if (move_task.enabled) {
+    if (move_task.pending.load() && (!upload_outcome_unknown.load() || move_task.unknown_applies))
+      move_task.applied.store(true);
+    move_task.pending.store(false);
+  }
+  if (rename_task_mode.load()) {
+    if (rename_task_pending.load() &&
+        (!upload_outcome_unknown.load() || rename_task_unknown_applies))
+      rename_task_applied.store(true);
+    rename_task_pending.store(false);
+  }
   if (rmdir_mode.load()) {
     if (rmdir_pending_delete.load() && (!upload_outcome_unknown.load() || rmdir_unknown_applies))
       rmdir_exists.store(false);
@@ -498,6 +734,10 @@ DbCommitStatus DbTransaction::commit() noexcept {
 
 bool DbTransaction::rollback() noexcept {
   if (active_) {
+    if (move_task.enabled)
+      move_task.pending.store(false);
+    if (rename_task_mode.load())
+      rename_task_pending.store(false);
     if (rmdir_mode.load())
       rmdir_pending_delete.store(false);
     if (mkdir_mode.load())
@@ -1120,9 +1360,9 @@ void check_gc_startup_cleanup(const std::string& scenario) {
       try {
         service.start();
       } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()) ==
-            (scenario == "gc_start_failure" ? "Failed to start object GC worker"
-                                             : "injected TCP startup failure");
+        rejected = std::string(error.what()) == (scenario == "gc_start_failure"
+                                                     ? "Failed to start object GC worker"
+                                                     : "injected TCP startup failure");
       }
     }
     listener_closed = !service._tcp_server._acceptor->listenning();
@@ -1217,9 +1457,11 @@ void check_gc_shutdown(bool active) {
 
 void wait_rm_gate() {
   std::unique_lock<std::mutex> lock(commit_gate.mutex);
-  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3), [] {
-    return commit_gate.entered;
-  }), "rm did not reach its database boundary");
+  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3),
+                                     [] {
+                                       return commit_gate.entered;
+                                     }),
+        "rm did not reach its database boundary");
 }
 
 // 实际网络分发 -> 实际业务线程 -> 实际删除事务 -> IO 回调。
@@ -1235,16 +1477,16 @@ void check_rm(const std::string& scenario, const std::string& directory) {
 
   if (scenario == "rm_help") {
     fixture.receive("help\n");
-    check(fixture.await_wire(prompt).find(" rm ") != std::string::npos,
-          "rm was omitted from help");
+    check(fixture.await_wire(prompt).find(" rm ") != std::string::npos, "rm was omitted from help");
     check(rm_borrows.load() == 0, "help accessed the database");
     return;
   }
   if (scenario == "rm_invalid") {
     // 空参数、未闭合引号、多余参数，以及不能作为单个文件名的输入。
-    for (const auto& args : std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"",
-             "\"\"", "../a", "/a", ".", "..", std::string(256, 'x'),
-             Transfer::quote("a\\b"), Transfer::quote(std::string("a\0b", 3))}) {
+    for (const auto& args :
+         std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"", "\"\"", "../a", "/a", ".",
+                                  "..", std::string(256, 'x'), Transfer::quote("a\\b"),
+                                  Transfer::quote(std::string("a\0b", 3))}) {
       fixture.receive("rm " + args + "\n");
       const auto wire = fixture.await_wire(prompt);
       check(wire.find("Usage: rm") != std::string::npos ||
@@ -1273,7 +1515,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
     if (scenario == "rm_transfer_busy") {
       fixture.session->transfer = fixture.service._upload_engine.create(
           fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
-          [](TransferEvent) {});
+          [](TransferEvent) {
+          });
     } else {
       fixture.session->directory_change_pending = true;
     }
@@ -1283,8 +1526,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
     fixture.service.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
     fixture.await_wire("Please wait.");
     check(fixture.conn->connected() && fixture.session->transfer == transfer &&
-              fixture.session->transfer_generation == current_generation &&
-              rm_borrows.load() == 0, "busy rm cancelled a transfer or accessed the database");
+              fixture.session->transfer_generation == current_generation && rm_borrows.load() == 0,
+          "busy rm cancelled a transfer or accessed the database");
     check(current_generation >= generation, "transfer generation moved backwards");
     fixture.session->transfer.reset();
     return;
@@ -1292,10 +1535,14 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   if (scenario == "rm_queue_full" || scenario == "rm_pool_stopped") {
     if (scenario == "rm_queue_full") {
       commit_gate.enabled = true;
-      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }),
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
             "could not occupy the business worker");
       wait_rm_gate();
-      check(fixture.service._th_pool.try_run([] {}), "could not fill the business queue");
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill the business queue");
     } else {
       fixture.service._th_pool.stop();
     }
@@ -1313,15 +1560,20 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   }
 
   const bool stale = scenario.rfind("rm_stale_", 0) == 0 || scenario == "rm_expired_session";
-  const bool gated = stale || scenario == "rm_pending" || scenario == "rm_disconnect" ||
-                     scenario == "rm_stopping";
+  const bool gated =
+      stale || scenario == "rm_pending" || scenario == "rm_disconnect" || scenario == "rm_stopping";
   if (gated)
     commit_gate.enabled = true;
-  if (scenario == "rm_missing") rm_exists.store(false);
-  if (scenario == "rm_delete_failure") rm_failure = 1;
-  if (scenario == "rm_zero") rm_failure = 2;
-  if (scenario == "rm_exception") rm_failure = 3;
-  if (scenario == "rm_nonstandard_exception") rm_failure = 4;
+  if (scenario == "rm_missing")
+    rm_exists.store(false);
+  if (scenario == "rm_delete_failure")
+    rm_failure = 1;
+  if (scenario == "rm_zero")
+    rm_failure = 2;
+  if (scenario == "rm_exception")
+    rm_failure = 3;
+  if (scenario == "rm_nonstandard_exception")
+    rm_failure = 4;
   const bool unknown = scenario == "rm_unknown_applied" || scenario == "rm_unknown_not_applied";
   upload_outcome_unknown.store(unknown);
   rm_unknown_applies = scenario == "rm_unknown_applied";
@@ -1331,7 +1583,9 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   std::ofstream(object_path, std::ios::binary) << "abc";
   fixture.receive(request);
   // receive() 只写入对端套接字；先驱动 IO loop，等待命令实际进入业务线程。
-  fixture.until([] { return rm_borrows.load() == 1; });
+  fixture.until([] {
+    return rm_borrows.load() == 1;
+  });
   std::shared_ptr<ConnectionSession> original_session;
   if (gated) {
     wait_rm_gate();
@@ -1345,12 +1599,14 @@ void check_rm(const std::string& scenario, const std::string& directory) {
             "pending rm allowed another deletion or replied early");
       // IO 线程可以继续运行回调，数据库闸门没有阻塞事件循环。
       bool heartbeat = false;
-      fixture.loop.queue_in_loop([&] { heartbeat = true; });
+      fixture.loop.queue_in_loop([&] {
+        heartbeat = true;
+      });
       fixture.drain();
       check(heartbeat, "rm blocked the IO event loop");
     } else if (scenario == "rm_stale_session" || scenario == "rm_expired_session") {
       if (scenario == "rm_stale_session")
-        original_session = fixture.session; // 保留旧对象，专门验证会话映射身份检查。
+        original_session = fixture.session;  // 保留旧对象，专门验证会话映射身份检查。
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
         std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
@@ -1367,7 +1623,9 @@ void check_rm(const std::string& scenario, const std::string& directory) {
       fixture.session->directory_change_pending = false;
     } else if (scenario == "rm_disconnect") {
       fixture.conn->force_close();
-      fixture.until([&] { return fixture.conn->disconnected(); });
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
     } else if (scenario == "rm_stopping") {
       fixture.service._stopping.store(true);
     }
@@ -1378,7 +1636,9 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   fixture.service._th_pool.stop();
   fixture.drain();
   // send() 将响应放入发送队列，EPOLLOUT 排空后才能检查线上响应或确认静默。
-  fixture.until([&] { return !fixture.conn->_channel->is_writing(); });
+  fixture.until([&] {
+    return !fixture.conn->_channel->is_writing();
+  });
   const auto wire = fixture.read_wire();
   if (stale || scenario == "rm_disconnect" || scenario == "rm_stopping") {
     check(wire.empty(), "obsolete rm completion replied to an invalid session");
@@ -1386,13 +1646,16 @@ void check_rm(const std::string& scenario, const std::string& directory) {
       check(fixture.session->directory_change_pending == (scenario != "rm_stale_pending"),
             "obsolete rm completion changed the current session's busy flag");
     if (scenario == "rm_stopping") {
-      fixture.until([&] { return fixture.conn->disconnected(); });
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
       check(!fixture.session->directory_change_pending, "stopping rm retained its busy flag");
     }
   } else {
     const bool failed = scenario == "rm_missing" || rm_failure != 0;
-    const std::string expected = unknown ? "Delete result is unknown." :
-                                 failed ? "Cannot remove file." : "File removed.";
+    const std::string expected = unknown  ? "Delete result is unknown."
+                                 : failed ? "Cannot remove file."
+                                          : "File removed.";
     check(wire.find(expected) != std::string::npos && wire.find(prompt) != std::string::npos,
           "rm returned the wrong result or omitted the prompt");
     check(!fixture.session->directory_change_pending && fixture.conn->connected(),
@@ -1401,7 +1664,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
       check(wire.find("File removed.") == std::string::npos,
             "rm reported success for a failed or unknown transaction");
     check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
-              (failed || unknown ? 1U : 0U), "rm failure metric is incorrect");
+              (failed || unknown ? 1U : 0U),
+          "rm failure metric is incorrect");
   }
 
   const bool failed = scenario == "rm_missing" || rm_failure != 0;
@@ -1410,8 +1674,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
             upload_commits.load() == (failed ? 0 : 1) &&
             upload_rollbacks.load() == (failed ? 1 : 0) && borrowed_connections.load() == 0,
         "rm retried, leaked a connection, or ended the transaction incorrectly");
-  check(rm_exists.load() == (scenario == "rm_missing" ? false :
-                            failed || scenario == "rm_unknown_not_applied"),
+  check(rm_exists.load() ==
+            (scenario == "rm_missing" ? false : failed || scenario == "rm_unknown_not_applied"),
         "rm changed the wrong committed database state");
   std::ifstream object(object_path, std::ios::binary);
   std::string bytes;
@@ -1420,14 +1684,923 @@ void check_rm(const std::string& scenario, const std::string& directory) {
         "rm removed the shared object or its catalog record");
 }
 
+// 直接调用 IO 处理函数，验证非法参数和忙碌状态不会借连接或改变 pending。
+// 成功解析后的任务提交及命令分发，由下面的命令入口用例覆盖。
+void check_rename_parse(const std::string& scenario) {
+  rename_task_mode.store(true);
+  rename_task_io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  const std::string prompt = "tlss@test_user:/>";
+  const std::string valid =
+      Transfer::quote(rm_filename) + " " + Transfer::quote(rename_task_new_name);
+  if (scenario == "rename_parse_invalid") {
+    const auto rejected = [&](const std::string& args, const std::string& expected) {
+      fixture.service.handle_rename(fixture.conn, fixture.session, args);
+      const auto wire = fixture.await_wire(prompt);
+      check(wire.find(expected) != std::string::npos && fixture.conn->connected() &&
+                !fixture.session->directory_change_pending && rename_task_borrows.load() == 0,
+            "invalid rename parameters reached the database or changed session state");
+    };
+    for (const auto& args : std::vector<std::string>{
+             "", "\"unterminated", "old.txt", "\"old.txt\" \"unterminated", valid + " extra"})
+      rejected(args, "Usage: rename \"old_name\" \"new_name\"");
+    for (const auto& invalid :
+         std::vector<std::string>{"", ".", "..", "/", "a/b", "a\\b", std::string(256, 'x'),
+                                  std::string("a\0b", 3), "a\nb", std::string(1, '\x7f')}) {
+      rejected(Transfer::quote(invalid) + " " + Transfer::quote(rename_task_new_name),
+               "Invalid file name.");
+      rejected(Transfer::quote(rm_filename) + " " + Transfer::quote(invalid), "Invalid file name.");
+    }
+  } else if (scenario == "rename_parse_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.await_wire("Login required.");
+    check(fixture.conn->connected() && !fixture.session->directory_change_pending,
+          "unauthenticated rename changed the session or closed the connection");
+  } else if (scenario == "rename_parse_stopping") {
+    fixture.service._stopping.store(true);
+    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    check(!fixture.session->directory_change_pending && fixture.read_wire().empty(),
+          "stopping rename replied or changed the pending state");
+  } else {
+    check(scenario == "rename_parse_transfer_busy" || scenario == "rename_parse_directory_busy",
+          "unknown rename parser scenario");
+    if (scenario == "rename_parse_transfer_busy") {
+      fixture.session->transfer = fixture.service._upload_engine.create(
+          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+          [](TransferEvent) {
+          });
+    } else {
+      fixture.session->directory_change_pending = true;
+    }
+    const auto transfer = fixture.session->transfer;
+    const auto generation = fixture.session->transfer_generation;
+    const bool pending = fixture.session->directory_change_pending;
+    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.await_wire("Please wait.");
+    check(fixture.session->transfer == transfer &&
+              fixture.session->transfer_generation == generation &&
+              fixture.session->directory_change_pending == pending && fixture.conn->connected(),
+          "busy rename changed the active transfer or directory operation");
+    fixture.session->transfer.reset();
+  }
+  check(rename_task_borrows.load() == 0 && rename_task_queries.load() == 0 &&
+            rename_task_updates.load() == 0,
+        "rejected rename input reached the database");
+}
+
+// 任务用例直接提交业务线程池；命令用例复用同一组事务和响应断言，实际从网络分发进入。
+void check_rename_task(const std::string& requested_scenario, const std::string& directory) {
+  const bool command_route = requested_scenario.rfind("rename_command_", 0) == 0;
+  const std::string scenario =
+      command_route ? "rename_task_" + requested_scenario.substr(15) : requested_scenario;
+  if (scenario == "rename_task_plain") {
+    rename_task_old_name = "report.txt";
+    rename_task_new_name = "summary.txt";
+  } else if (scenario == "rename_task_flag_names") {
+    rename_task_old_name = "-r";
+    rename_task_new_name = "--";
+  } else if (scenario == "rename_task_literal_names") {
+    rename_task_old_name = "old '%_\" 文件.txt";
+    rename_task_new_name = "new '%_\" 文件.txt";
+  }
+  rename_task_mode.store(true);
+  rename_task_io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  CommitRelease release;
+  const std::string prompt = "tlss@test_user:/>";
+  const bool unquoted = scenario == "rename_task_plain" || scenario == "rename_task_flag_names";
+  const std::string args = unquoted ? rename_task_old_name + " " + rename_task_new_name
+                                    : Transfer::quote(rename_task_old_name) + " " +
+                                          Transfer::quote(rename_task_new_name);
+  const std::string request = scenario == "rename_task_whitespace" ? "rename \t " + args + " \t\n"
+                                                                   : "rename " + args + "\n";
+  if (command_route && scenario == "rename_task_help") {
+    fixture.receive("help\n");
+    check(fixture.await_wire(prompt).find(" rename ") != std::string::npos &&
+              rename_task_borrows.load() == 0,
+          "rename was missing from help or help accessed the database");
+    return;
+  }
+  if (command_route && scenario == "rename_task_invalid") {
+    // 从网络输入验证缺参、多参、引号和两侧名称校验；不在行协议中嵌入换行字符。
+    for (const auto& invalid : std::vector<std::string>{
+             "", "old.txt", "\"unterminated", "\"old.txt\" \"unterminated", args + " extra",
+             "\"\" new.txt", "old.txt \"\"", ".. new.txt", "old.txt ../new",
+             Transfer::quote(std::string(256, 'x')) + " new.txt",
+             "old.txt " + Transfer::quote(std::string(256, 'x'))}) {
+      fixture.receive("rename " + invalid + "\n");
+      const auto wire = fixture.await_wire(prompt);
+      check((wire.find("Usage: rename") != std::string::npos ||
+             wire.find("Invalid file name.") != std::string::npos) &&
+                fixture.conn->connected() && !fixture.session->directory_change_pending &&
+                rename_task_borrows.load() == 0,
+            "invalid rename command was not rejected locally");
+    }
+    return;
+  }
+  if (command_route && scenario == "rename_task_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.receive(request);
+    fixture.await_wire("login or signup");
+    check(rename_task_borrows.load() == 0 && !fixture.session->directory_change_pending,
+          "unauthenticated rename command submitted a database task");
+    return;
+  }
+  if (command_route && scenario == "rename_task_directory_busy") {
+    fixture.session->directory_change_pending = true;
+    fixture.receive(request);
+    fixture.await_wire("Please wait.");
+    check(rename_task_borrows.load() == 0 && fixture.session->directory_change_pending,
+          "rename command bypassed an active directory operation");
+    return;
+  }
+  if (command_route &&
+      (scenario == "rename_task_queue_full" || scenario == "rename_task_pool_stopped")) {
+    if (scenario == "rename_task_queue_full") {
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
+            "could not occupy rename worker");
+      wait_rm_gate();
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill rename task queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    fixture.receive(request);
+    const auto wire = fixture.await_wire(prompt);
+    check(wire.find("Server busy. Please retry.") != std::string::npos &&
+              !fixture.session->directory_change_pending && rename_task_borrows.load() == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
+          "rejected rename command ran a transaction or retained its pending state");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    return;
+  }
+  const bool unknown =
+      scenario == "rename_task_unknown_applied" || scenario == "rename_task_unknown_not_applied";
+  const bool stale =
+      scenario.rfind("rename_task_stale_", 0) == 0 || scenario == "rename_task_expired_session";
+  const bool gated = stale || scenario == "rename_task_pending" ||
+                     scenario == "rename_task_disconnect" || scenario == "rename_task_stopping";
+  upload_outcome_unknown.store(unknown);
+  rename_task_unknown_applies = scenario == "rename_task_unknown_applied";
+  if (scenario == "rename_task_sql_failure")
+    rename_task_failure = 1;
+  if (scenario == "rename_task_zero")
+    rename_task_failure = 2;
+  if (scenario == "rename_task_exception")
+    rename_task_failure = 3;
+  if (scenario == "rename_task_nonstandard_exception")
+    rename_task_failure = 4;
+  if (scenario == "rename_task_missing")
+    rename_task_failure = 5;
+  if (gated)
+    commit_gate.enabled = true;
+
+  const auto object_path = directory + "/" + abc_hash;
+  std::ofstream(object_path, std::ios::binary) << "abc";
+  if (command_route) {
+    fixture.receive(request);
+    fixture.drain();
+    check(fixture.session->directory_change_pending || rename_task_borrows.load() != 0,
+          "rename command was not dispatched to its business task");
+  } else {
+    const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
+    const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
+    auto task =
+        std::bind(&StorageService::rename_file_by_current_dir, &fixture.service,
+                  fixture.session->name, fixture.session->current_directory, rename_task_old_name,
+                  rename_task_new_name, original, connection, &fixture.loop);
+    // 直接测试任务时模拟 IO 入口：提交之前设置 pending。
+    fixture.session->directory_change_pending = true;
+    check(fixture.service._th_pool.try_run(std::move(task)),
+          "could not submit rename business task");
+  }
+
+  std::shared_ptr<ConnectionSession> retained_original;
+  if (gated) {
+    wait_rm_gate();
+    check(fixture.session->directory_change_pending && fixture.read_wire().empty(),
+          "rename task replied or changed the session before its transaction ended");
+    if (scenario == "rename_task_pending") {
+      fixture.receive("pwd\n");
+      check(fixture.await_wire("Please wait.").find("File renamed.") == std::string::npos,
+            "rename task replied successfully before commit");
+      bool heartbeat = false;
+      fixture.loop.queue_in_loop([&] {
+        heartbeat = true;
+      });
+      fixture.drain();
+      check(heartbeat, "rename transaction blocked its IO loop");
+    } else if (scenario == "rename_task_stale_session" ||
+               scenario == "rename_task_expired_session") {
+      if (scenario == "rename_task_stale_session")
+        retained_original = fixture.session;
+      auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
+      {
+        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+        fixture.service._sessions[fixture.conn.get()] = replacement;
+      }
+      fixture.session = std::move(replacement);
+    } else if (scenario == "rename_task_stale_identity") {
+      fixture.session->name = "another_user";
+    } else if (scenario == "rename_task_stale_directory") {
+      fixture.session->current_directory = "/changed";
+    } else if (scenario == "rename_task_stale_login") {
+      fixture.session->login_state = LoginState::k_await_choice;
+    } else if (scenario == "rename_task_stale_pending") {
+      fixture.session->directory_change_pending = false;
+    } else if (scenario == "rename_task_disconnect") {
+      fixture.conn->force_close();
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+    } else if (scenario == "rename_task_stopping") {
+      fixture.service._stopping.store(true);
+    }
+    commit_gate.release();
+  }
+  fixture.service._th_pool.stop();
+  // 业务方法已返回，结果回调尚未由 IO 线程处理；业务线程不能提前清除 pending。
+  if (!command_route && !stale && scenario != "rename_task_disconnect")
+    check(fixture.session->directory_change_pending,
+          "business thread changed IO-owned session state");
+  fixture.drain();
+  fixture.until([&] {
+    return !fixture.conn->_channel->is_writing();
+  });
+  const auto wire = fixture.read_wire();
+  const bool failed = rename_task_failure != 0;
+  if (stale || scenario == "rename_task_disconnect" || scenario == "rename_task_stopping") {
+    check(wire.empty(), "rename completion replied to an invalid or obsolete session");
+    if (stale)
+      check(fixture.session->directory_change_pending == (scenario != "rename_task_stale_pending"),
+            "obsolete rename completion changed the current session pending flag");
+    if (scenario == "rename_task_stopping") {
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+      check(!fixture.session->directory_change_pending,
+            "stopping rename retained its pending flag");
+    }
+  } else {
+    const std::string expected = unknown  ? "Rename result is unknown. Check the directory state."
+                                 : failed ? "Cannot rename file."
+                                          : "File renamed.";
+    check(wire.find(expected) != std::string::npos && wire.find(prompt) != std::string::npos &&
+              !fixture.session->directory_change_pending && fixture.conn->connected(),
+          "rename task returned the wrong outcome, prompt or session state");
+    if (unknown || failed)
+      check(wire.find("File renamed.") == std::string::npos,
+            "rename task reported uncertain or failed work as successful");
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(prompt).find("/\r\n") != std::string::npos,
+          "rename completion left subsequent commands blocked");
+  }
+  check(rename_task_borrows.load() == 1 &&
+            rename_task_queries.load() == (rename_task_failure == 5 ? 3 : 4) &&
+            rename_task_updates.load() == (rename_task_failure == 5 ? 0 : 1) &&
+            upload_commits.load() == (failed ? 0 : 1) &&
+            upload_rollbacks.load() == (failed ? 1 : 0) && borrowed_connections.load() == 0 &&
+            !rename_task_pending.load(),
+        "rename task retried, leaked a connection or ended its transaction incorrectly");
+  check(rename_task_applied.load() == (!failed && (!unknown || rename_task_unknown_applies)),
+        "rename task did not preserve the simulated commit outcome");
+  check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
+            (failed || unknown ? 1U : 0U),
+        "rename task failure metric was missing or duplicated");
+  std::ifstream object(object_path, std::ios::binary);
+  std::string bytes;
+  object >> bytes;
+  check(bytes == "abc" && startup_object_deletes.load() == 0,
+        "rename task changed a shared disk object");
+}
+
+// 直接调用 cd 入口检查拒绝分支，不应为语法或会话错误提交数据库任务。
+void check_cd_parse(const std::string& scenario) {
+  cd_test.enabled = true;
+  cd_test.io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  const std::string prompt = "tlss@test_user:/>";
+  if (scenario == "cd_parse_invalid") {
+    for (const auto& args :
+         std::vector<std::string>{"", "\"\"", "\"unterminated", "a b", "\"my docs\" extra"}) {
+      fixture.service.handle_cd(fixture.conn, fixture.session, args);
+      check(fixture.await_wire(prompt) == "Usage: cd \"directory\"\r\n" + prompt &&
+                fixture.conn->connected() && !fixture.session->directory_change_pending,
+            "invalid cd parameters were not rejected with a recoverable usage response");
+    }
+  } else if (scenario == "cd_parse_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    check(fixture.await_wire("\r\n") == "Login required.\r\n" && fixture.conn->connected(),
+          "unauthenticated cd was not rejected");
+  } else if (scenario == "cd_parse_stopping") {
+    fixture.service._stopping.store(true);
+    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    check(fixture.read_wire().empty() && !fixture.session->directory_change_pending,
+          "stopping cd replied or changed pending state");
+  } else {
+    check(scenario == "cd_parse_transfer_busy" || scenario == "cd_parse_directory_busy",
+          "unknown cd parser scenario");
+    if (scenario == "cd_parse_transfer_busy") {
+      fixture.session->transfer = fixture.service._upload_engine.create(
+          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+          [](TransferEvent) {
+          });
+    } else {
+      fixture.session->directory_change_pending = true;
+    }
+    const auto transfer = fixture.session->transfer;
+    const auto generation = fixture.session->transfer_generation;
+    const bool pending = fixture.session->directory_change_pending;
+    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    check(fixture.await_wire("\r\n") == "Please wait.\r\n" && fixture.conn->connected() &&
+              fixture.session->transfer == transfer &&
+              fixture.session->transfer_generation == generation &&
+              fixture.session->directory_change_pending == pending,
+          "busy cd changed an active transfer or directory operation");
+    fixture.session->transfer.reset();
+  }
+  fixture.service._th_pool.stop();
+  check(cd_test.borrows == 0 && cd_test.queries == 0 && fixture.session->current_directory == "/" &&
+            fixture.metrics->get(OBSERVABILITY::Metric::metadata_queries_failed) == 0,
+        "rejected cd reached the database, changed directory or recorded a metadata query failure");
+}
+
+// 从真实网络输入 cd，覆盖字段解析、规范路径、任务绑定及队列拒绝后的恢复。
+void check_cd_command(const std::string& scenario) {
+  cd_test.enabled = true;
+  cd_test.io_thread = std::this_thread::get_id();
+  if (scenario == "cd_command_borrow_failure")
+    cd_test.failure = 1;
+  if (scenario == "cd_command_borrow_exception")
+    cd_test.failure = 2;
+  if (scenario == "cd_command_query_failure")
+    cd_test.failure = 3;
+  if (scenario == "cd_command_query_exception")
+    cd_test.failure = 4;
+  if (scenario == "cd_command_nonstandard_exception")
+    cd_test.failure = 5;
+  const bool stale = scenario.rfind("cd_command_stale_", 0) == 0 ||
+                     scenario == "cd_command_missing_session" ||
+                     scenario == "cd_command_expired_session";
+  const bool disconnected = scenario == "cd_command_disconnect";
+  const bool stopping = scenario == "cd_command_stopping";
+  const bool gated = stale || disconnected || stopping || scenario == "cd_command_pending";
+  std::string source = "/", args = "archive";
+  if (scenario == "cd_command_quoted") {
+    args = "\"my docs\"";
+    cd_test.target = "/my docs";
+  } else if (scenario == "cd_command_absolute") {
+    source = "/docs";
+    args = "/archive";
+  } else if (scenario == "cd_command_relative") {
+    source = "/docs";
+    args = "sub";
+    cd_test.target = "/docs/sub";
+  } else if (scenario == "cd_command_parent") {
+    source = "/docs/sub";
+    args = "..";
+    cd_test.target = "/docs";
+  } else if (scenario == "cd_command_dot") {
+    source = "/docs";
+    args = ".";
+    cd_test.target = "/docs";
+  } else if (scenario == "cd_command_root") {
+    source = "/docs";
+    args = "/";
+    cd_test.target = "/";
+  } else if (scenario == "cd_command_missing") {
+    cd_test.missing = true;
+  } else if (scenario == "cd_command_whitespace") {
+    args = "\t archive \t";
+  }
+  Fixture fixture(1, 1);
+  CommitRelease release;
+  fixture.session->current_directory = source;
+  const std::string original_prompt = "tlss@test_user:" + source + ">";
+  if (scenario == "cd_command_invalid") {
+    // 空参数也必须走统一入口，不能被分发器误判为致命命令错误。
+    for (const auto& invalid :
+         std::vector<std::string>{"", "\"\"", "\"unterminated", "my docs", "\"my docs\" extra"}) {
+      fixture.receive("cd " + invalid + "\n");
+      check(
+          fixture.await_wire(original_prompt) == "Usage: cd \"directory\"\r\n" + original_prompt &&
+              fixture.conn->connected() && !fixture.session->directory_change_pending &&
+              cd_test.borrows == 0,
+          "invalid cd command closed the connection, started a task or omitted its prompt");
+    }
+    return;
+  }
+  if (scenario == "cd_command_queue_full" || scenario == "cd_command_pool_stopped") {
+    if (scenario == "cd_command_queue_full") {
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
+            "could not occupy cd worker");
+      wait_rm_gate();
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill cd task queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    fixture.receive("cd archive\n");
+    check(
+        fixture.await_wire(original_prompt) == "Server busy. Please retry.\r\n" + original_prompt &&
+            !fixture.session->directory_change_pending && cd_test.borrows == 0 &&
+            fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
+        "rejected cd did not restore pending or recorded wrong metrics");
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(original_prompt).find(source + "\r\n") != std::string::npos,
+          "rejected cd left subsequent commands blocked");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    return;
+  }
+  if (gated)
+    commit_gate.enabled = true;
+  const std::weak_ptr<ConnectionSession> submitted_session = fixture.session;
+  fixture.receive("cd " + args + "\n");
+  fixture.until([] {
+    return cd_test.failure == 1 || cd_test.failure == 2 ? cd_test.borrows == 1
+                                                        : cd_test.queries == 1;
+  });
+  std::shared_ptr<ConnectionSession> retained_original;
+  if (gated) {
+    wait_rm_gate();
+    check(fixture.session->directory_change_pending &&
+              fixture.session->current_directory == source && fixture.read_wire().empty(),
+          "cd changed session state before its database query completed");
+    if (scenario == "cd_command_pending") {
+      fixture.receive("pwd\n");
+      check(fixture.await_wire("Please wait.\r\n") == "Please wait.\r\n",
+            "pending cd allowed another directory command");
+    } else if (scenario == "cd_command_stale_session" || scenario == "cd_command_expired_session") {
+      // 分别验证“旧对象还活着但映射已替换”和“弱引用已过期”，任务不能延长会话寿命。
+      if (scenario == "cd_command_stale_session")
+        retained_original = fixture.session;
+      auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
+      {
+        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+        fixture.service._sessions[fixture.conn.get()] = replacement;
+      }
+      fixture.session = std::move(replacement);
+      if (scenario == "cd_command_expired_session")
+        check(submitted_session.expired(), "queued cd task retained a strong session reference");
+    } else if (scenario == "cd_command_missing_session") {
+      std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+      fixture.service._sessions.erase(fixture.conn.get());
+    } else if (scenario == "cd_command_stale_identity") {
+      fixture.session->name = "another_user";
+    } else if (scenario == "cd_command_stale_directory") {
+      fixture.session->current_directory = "/changed";
+    } else if (scenario == "cd_command_stale_login") {
+      fixture.session->login_state = LoginState::k_await_choice;
+    } else if (scenario == "cd_command_stale_pending") {
+      fixture.session->directory_change_pending = false;
+    } else if (disconnected) {
+      fixture.conn->force_close();
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+    } else if (stopping) {
+      fixture.service._stopping.store(true);
+    }
+    commit_gate.release();
+  }
+  // 所有会话修改都在 IO 线程进行；数据库完成后只能由排队的 IO 回调消费结果。
+  const auto directory_before = fixture.session->current_directory;
+  const auto name_before = fixture.session->name;
+  const auto login_before = fixture.session->login_state;
+  const bool pending_before = fixture.session->directory_change_pending;
+  fixture.service._th_pool.stop();
+  if (gated)
+    check(fixture.session->current_directory == directory_before &&
+              fixture.session->directory_change_pending == pending_before,
+          "cd business thread modified IO-owned session fields");
+  const bool failed = cd_test.missing || cd_test.failure != 0;
+  if (stale || disconnected || stopping) {
+    fixture.drain();
+    fixture.until([&] {
+      return !fixture.conn->_channel->is_writing();
+    });
+    check(fixture.read_wire().empty(), "obsolete cd completion replied through an invalid session");
+    if (stale) {
+      check(fixture.session->current_directory == directory_before &&
+                fixture.session->name == name_before &&
+                fixture.session->login_state == login_before &&
+                fixture.session->directory_change_pending == pending_before,
+            "obsolete cd completion changed the current session");
+      if (retained_original)
+        check(retained_original->current_directory == source &&
+                  retained_original->directory_change_pending,
+              "obsolete cd completion changed a replaced session");
+    }
+    if (stopping) {
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+      check(!fixture.session->directory_change_pending &&
+                fixture.session->current_directory == source,
+            "stopping cd changed directory or left its pending state set");
+    }
+  } else {
+    const auto expected_directory = failed ? source : cd_test.target;
+    const auto prompt = "tlss@test_user:" + expected_directory + ">";
+    const auto expected = failed ? "Cannot change directory.\r\n" + prompt : prompt;
+    check(fixture.await_wire(prompt) == expected && fixture.conn->connected() &&
+              !fixture.session->directory_change_pending &&
+              fixture.session->current_directory == expected_directory,
+          "cd returned an incorrect directory, response or pending state");
+    // 失败及异常也必须清理 pending，后续命令才能继续执行。
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(prompt).find(expected_directory + "\r\n") != std::string::npos,
+          "completed cd left subsequent commands blocked");
+  }
+  check(cd_test.borrows == 1 &&
+            cd_test.queries == (cd_test.failure == 1 || cd_test.failure == 2 ? 0 : 1) &&
+            borrowed_connections == 0 && upload_commits == 0 && upload_rollbacks == 0 &&
+            fixture.metrics->get(OBSERVABILITY::Metric::metadata_queries_failed) ==
+                (failed ? 1U : 0U) &&
+            fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 0,
+        "cd queried on the wrong thread, retried or leaked a connection");
+}
+
+// 当前直接调用移动入口，验证参数错误和会话状态会在 IO 线程被拒绝。
+// 使用移动任务的数据库计数器，确保解析阶段不会借连接或修改元数据。
+void check_move_parse(const std::string& scenario) {
+  move_task.enabled = true;
+  move_task.io_thread = std::this_thread::get_id();
+  Fixture fixture;
+  const std::string prompt = "tlss@test_user:/>";
+  const std::string valid = Transfer::quote(rm_filename) + " " + Transfer::quote(move_task.target);
+  const auto rejected = [&](const std::string& args, const std::string& expected) {
+    fixture.service.handle_move(fixture.conn, fixture.session, args);
+    const auto wire = fixture.await_wire(prompt);
+    check(wire == expected + "\r\n" + prompt && fixture.conn->connected() &&
+              !fixture.session->directory_change_pending,
+          "invalid move input returned the wrong response or changed pending state");
+  };
+
+  if (scenario == "move_parse_syntax") {
+    // 分别覆盖缺参、多参，以及第一个/第二个字段的引号不完整。
+    for (const auto& args :
+         std::vector<std::string>{"", "report.txt", "\"unterminated", "report.txt \"unterminated",
+                                  valid + " extra", valid + " \"extra field\""})
+      rejected(args, "Usage: move \"file_name\" \"target_directory\"");
+  } else if (scenario == "move_parse_file_name") {
+    for (const auto& name :
+         std::vector<std::string>{"", ".", "..", "/", "a/b", "a\\b", std::string(256, 'x'),
+                                  std::string("a\0b", 3), "a\nb", std::string(1, '\x7f')})
+      rejected(Transfer::quote(name) + " " + Transfer::quote(move_task.target),
+               "Invalid file name.");
+  } else if (scenario == "move_parse_target") {
+    // 相对路径和 .、.. 已经合法；只把解析后仍非法的输入放入拒绝清单。
+    for (const auto& path : std::vector<std::string>{
+             "", "//archive", "/archive/", "/archive//docs", "archive//docs", "../archive/",
+             "/archive/a\\b", "bad\\name/../archive",
+             "/" + std::string(256, 'x'), "/" + std::string(1024, 'x'), std::string("/a\0b", 4),
+             "/a\nb", "/a" + std::string(1, '\x7f')})
+      rejected(Transfer::quote(rm_filename) + " " + Transfer::quote(path),
+               "Invalid target directory.");
+  } else if (scenario == "move_parse_unauthenticated") {
+    fixture.session->login_state = LoginState::k_await_choice;
+    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    check(fixture.await_wire("Login required.\r\n") == "Login required.\r\n" &&
+              fixture.conn->connected() && !fixture.session->directory_change_pending,
+          "unauthenticated move changed session state or closed the connection");
+  } else if (scenario == "move_parse_stopping") {
+    fixture.service._stopping.store(true);
+    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    check(fixture.read_wire().empty() && !fixture.session->directory_change_pending,
+          "stopping move replied or changed pending state");
+  } else {
+    check(scenario == "move_parse_transfer_busy" || scenario == "move_parse_directory_busy",
+          "unknown move parser scenario");
+    if (scenario == "move_parse_transfer_busy") {
+      fixture.session->transfer = fixture.service._upload_engine.create(
+          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+          [](TransferEvent) {
+          });
+    } else {
+      fixture.session->directory_change_pending = true;
+    }
+    const auto transfer = fixture.session->transfer;
+    const auto generation = fixture.session->transfer_generation;
+    const bool pending = fixture.session->directory_change_pending;
+    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    check(fixture.await_wire("Please wait.\r\n") == "Please wait.\r\n" &&
+              fixture.conn->connected() && fixture.session->transfer == transfer &&
+              fixture.session->transfer_generation == generation &&
+              fixture.session->directory_change_pending == pending,
+          "busy move changed the active transfer or directory operation");
+    fixture.session->transfer.reset();
+  }
+  check(move_task.borrows.load() == 0 && move_task.queries.load() == 0 &&
+            move_task.updates.load() == 0 && upload_commits.load() == 0 &&
+            upload_rollbacks.load() == 0,
+        "rejected move input reached the database");
+  check(fixture.session->name == "test_user" && fixture.session->current_directory == "/" &&
+            fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 0,
+        "rejected move input changed identity, current directory or metadata failure metrics");
+}
+
+// 任务、入口、网络命令三条路径复用事务和 IO 断言，网络用例还覆盖真实命令分发。
+void check_move_task(const std::string& requested_scenario, const std::string& directory) {
+  const bool command_route = requested_scenario.rfind("move_command_", 0) == 0;
+  const bool submit_route = requested_scenario.rfind("move_submit_", 0) == 0;
+  const std::string scenario = command_route  ? "move_task_" + requested_scenario.substr(13)
+                               : submit_route ? "move_task_" + requested_scenario.substr(12)
+                                              : requested_scenario;
+  std::string target_argument = move_task.target;
+  struct PathCase {
+    const char* name;
+    const char* source;
+    const char* argument;
+    const char* target;
+  };
+  // 输入与预期绝对路径分别给定，不能在替代数据库中调用被测解析函数推导预期。
+  for (const auto& sample : std::vector<PathCase>{
+           {"relative_root", "/", "archive with spaces", "/archive with spaces"},
+           {"relative_nested", "/docs", "archive with spaces", "/docs/archive with spaces"},
+           {"absolute_nested", "/docs", "/archive with spaces", "/archive with spaces"},
+           {"parent", "/docs", "../archive with spaces", "/archive with spaces"},
+           {"absolute_parent", "/docs", "/tmp/../archive with spaces", "/archive with spaces"},
+           {"dot", "/docs", "./archive with spaces", "/docs/archive with spaces"},
+           {"target_root", "/docs", "..", "/"},
+           {"root_boundary", "/", "../../archive with spaces", "/archive with spaces"},
+           {"relative_multi", "/docs", "a/b", "/docs/a/b"}}) {
+    if (scenario == std::string("move_task_") + sample.name) {
+      move_task.source = sample.source;
+      move_task.target = sample.target;
+      target_argument = sample.argument;
+    }
+  }
+  move_task.enabled = true;
+  move_task.io_thread = std::this_thread::get_id();
+  Fixture fixture(1, 1);
+  fixture.session->current_directory = move_task.source;
+  // 比 fixture 后析构，保证断言失败时先释放数据库闸门，再等待线程池退出。
+  CommitRelease release;
+  const std::string args = Transfer::quote(rm_filename) + " " + Transfer::quote(target_argument);
+  const std::string request =
+      scenario == "move_task_whitespace" ? "move \t " + args + " \t\n" : "move " + args + "\n";
+  const std::string prompt = "tlss@test_user:" + move_task.source + ">";
+  if (command_route && scenario == "move_task_help") {
+    for (const auto& command : {"help\n", "h\n"}) {
+      fixture.receive(command);
+      check(fixture.await_wire(prompt).find(" move ") != std::string::npos &&
+                move_task.borrows.load() == 0 && !fixture.session->directory_change_pending,
+            "move was missing from help or help started a metadata operation");
+    }
+    return;
+  }
+  if (command_route && scenario == "move_task_invalid") {
+    // 从行协议输入参数错误；不能在这里嵌入换行，控制字节由入口测试单独覆盖。
+    for (const auto& invalid : std::vector<std::string>{
+             "", "report.txt", "\"unterminated", "report.txt \"unterminated", args + " extra",
+             "\"\" /archive", "../report.txt /archive", "report.txt /archive/",
+             "report.txt /archive//docs", "report.txt archive//docs"}) {
+      fixture.receive("move " + invalid + "\n");
+      const auto wire = fixture.await_wire(prompt);
+      check((wire.find("Usage: move") != std::string::npos ||
+             wire.find("Invalid file name.") != std::string::npos ||
+             wire.find("Invalid target directory.") != std::string::npos) &&
+                fixture.conn->connected() && !fixture.session->directory_change_pending &&
+                move_task.borrows.load() == 0 && move_task.queries.load() == 0 &&
+                move_task.updates.load() == 0,
+            "invalid move command was not rejected before accessing the database");
+    }
+    return;
+  }
+  if ((submit_route || command_route) &&
+      (scenario == "move_task_queue_full" || scenario == "move_task_pool_stopped")) {
+    if (scenario == "move_task_queue_full") {
+      // 占住唯一业务线程，再填满唯一队列槽，确保 try_run() 确定性拒绝请求。
+      commit_gate.enabled = true;
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
+            "could not occupy move worker");
+      wait_rm_gate();
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill move task queue");
+    } else {
+      fixture.service._th_pool.stop();
+    }
+    if (command_route)
+      fixture.receive(request);
+    else
+      fixture.service.handle_move(fixture.conn, fixture.session, args);
+    const auto wire = fixture.await_wire(prompt);
+    check(wire == "Server busy. Please retry.\r\n" + prompt && fixture.conn->connected() &&
+              !fixture.session->directory_change_pending && move_task.borrows.load() == 0 &&
+              move_task.queries.load() == 0 && move_task.updates.load() == 0 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1 &&
+              fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 0,
+          "rejected move task entered the database, retained pending or recorded wrong metrics");
+    // 没有任务就不会有完成回调，入口必须自行恢复状态，使后续命令能够继续执行。
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(prompt).find("/\r\n") != std::string::npos,
+          "rejected move task left subsequent commands blocked");
+    commit_gate.release();
+    fixture.service._th_pool.stop();
+    check(upload_commits.load() == 0 && upload_rollbacks.load() == 0 &&
+              borrowed_connections.load() == 0,
+          "rejected move task started a transaction or leaked a connection");
+    return;
+  }
+  const bool unknown =
+      scenario == "move_task_unknown_applied" || scenario == "move_task_unknown_not_applied";
+  const bool stale =
+      scenario.rfind("move_task_stale_", 0) == 0 || scenario == "move_task_expired_session";
+  const bool disconnected = scenario == "move_task_disconnect";
+  const bool stopping = scenario == "move_task_stopping";
+  const bool gated = stale || disconnected || stopping || scenario == "move_task_pending";
+  upload_outcome_unknown.store(unknown);
+  move_task.unknown_applies = scenario == "move_task_unknown_applied";
+  if (scenario == "move_task_sql_failure")
+    move_task.failure = 1;
+  if (scenario == "move_task_zero")
+    move_task.failure = 2;
+  if (scenario == "move_task_exception")
+    move_task.failure = 3;
+  if (scenario == "move_task_nonstandard_exception")
+    move_task.failure = 4;
+  if (scenario == "move_task_missing")
+    move_task.failure = 5;
+  commit_gate.enabled = gated;
+
+  // 元数据移动不应改变共享对象的磁盘路径或内容。
+  const auto object_path = directory + "/" + abc_hash;
+  std::ofstream(object_path, std::ios::binary) << "abc";
+  if (command_route) {
+    fixture.receive(request);
+    fixture.drain();
+    check(fixture.session->directory_change_pending || move_task.borrows.load() != 0,
+          "move command was not dispatched to its business task");
+  } else if (submit_route) {
+    fixture.service.handle_move(fixture.conn, fixture.session, args);
+    // 尚未驱动 IO 回调，即使业务任务立即完成，pending 也应已经设置。
+    check(fixture.session->directory_change_pending,
+          "move handler did not set pending before returning");
+  } else {
+    const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
+    const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
+    auto task = std::bind(&StorageService::move_file_to_directory, &fixture.service,
+                          fixture.session->name, fixture.session->current_directory,
+                          move_task.target, rm_filename, original, connection, &fixture.loop);
+    // 直接测试业务任务时，模拟 IO 入口在提交前设置 pending。
+    fixture.session->directory_change_pending = true;
+    check(fixture.service._th_pool.try_run(std::move(task)), "could not submit move business task");
+  }
+
+  std::shared_ptr<ConnectionSession> retained_original;
+  if (gated) {
+    wait_rm_gate();
+    check(fixture.session->directory_change_pending && fixture.read_wire().empty(),
+          "move task replied or changed session state before its transaction ended");
+    if (scenario == "move_task_pending") {
+      // 数据库等待期间，IO loop 仍能处理命令并提示等待。
+      fixture.receive("pwd\n");
+      check(fixture.await_wire("Please wait.").find("File moved.") == std::string::npos,
+            "move task reported success before commit");
+      bool heartbeat = false;
+      fixture.loop.queue_in_loop([&] {
+        heartbeat = true;
+      });
+      fixture.drain();
+      check(heartbeat, "move transaction blocked its IO loop");
+    } else if (scenario == "move_task_stale_session" || scenario == "move_task_expired_session") {
+      // 保留旧会话验证映射检查；不保留则验证 weak_ptr 已经失效的分支。
+      if (scenario == "move_task_stale_session")
+        retained_original = fixture.session;
+      auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
+      {
+        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
+        fixture.service._sessions[fixture.conn.get()] = replacement;
+      }
+      fixture.session = std::move(replacement);
+    } else if (scenario == "move_task_stale_identity") {
+      fixture.session->name = "another_user";
+    } else if (scenario == "move_task_stale_directory") {
+      fixture.session->current_directory = "/changed";
+    } else if (scenario == "move_task_stale_login") {
+      fixture.session->login_state = LoginState::k_await_choice;
+    } else if (scenario == "move_task_stale_pending") {
+      fixture.session->directory_change_pending = false;
+    } else if (disconnected) {
+      fixture.conn->force_close();
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+    } else if (stopping) {
+      fixture.service._stopping.store(true);
+    }
+    commit_gate.release();
+  }
+
+  // 先等待业务任务完整返回，再驱动 IO 回调，检查业务线程没有提前改动会话。
+  fixture.service._th_pool.stop();
+  if (!command_route && !stale && !disconnected)
+    check(fixture.session->directory_change_pending, "move worker changed IO-owned session state");
+  fixture.drain();
+  fixture.until([&] {
+    return !fixture.conn->_channel->is_writing();
+  });
+  const auto wire = fixture.read_wire();
+  const bool failed = move_task.failure != 0;
+  if (stale || disconnected || stopping) {
+    check(wire.empty(), "move completion replied to an invalid or obsolete session");
+    if (stale)
+      check(fixture.session->directory_change_pending == (scenario != "move_task_stale_pending"),
+            "obsolete move completion changed the current session pending flag");
+    if (stopping) {
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
+      check(!fixture.session->directory_change_pending, "stopping move retained its pending flag");
+    }
+  } else {
+    const std::string expected = unknown  ? "Move result is unknown. Check both directories."
+                                 : failed ? "Cannot move file."
+                                          : "File moved.";
+    check(wire.find(expected + "\r\n") != std::string::npos &&
+              wire.find(prompt) != std::string::npos &&
+              !fixture.session->directory_change_pending && fixture.conn->connected() &&
+              fixture.session->current_directory == move_task.source,
+          "move task returned the wrong outcome, prompt or current directory");
+    if (unknown || failed)
+      check(wire.find("File moved.") == std::string::npos,
+            "move task reported uncertain work as successful");
+    fixture.receive("pwd\n");
+    check(fixture.await_wire(prompt).find(move_task.source + "\r\n") != std::string::npos,
+          "move completion left subsequent commands blocked");
+  }
+  // 未知提交分别模拟实际生效/未生效；两者均只提交一次，不能自动重试或补发回滚。
+  check(move_task.borrows.load() == 1 &&
+            move_task.queries.load() == (move_task.failure == 5 ? 4 : 5) &&
+            move_task.updates.load() == (move_task.failure == 5 ? 0 : 1) &&
+            upload_commits.load() == (failed ? 0 : 1) &&
+            upload_rollbacks.load() == (failed ? 1 : 0) && borrowed_connections.load() == 0 &&
+            !move_task.pending.load(),
+        "move task retried, leaked a connection or ended its transaction incorrectly");
+  check(move_task.applied.load() == (!failed && (!unknown || move_task.unknown_applies)),
+        "move task did not preserve the simulated commit outcome");
+  check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
+            (failed || unknown ? 1U : 0U),
+        "move task failure metric was missing or duplicated");
+  std::ifstream object(object_path, std::ios::binary);
+  std::string bytes;
+  object >> bytes;
+  check(bytes == "abc" && startup_object_deletes.load() == 0,
+        "move task changed a shared disk object");
+}
+
 // rmdir 从实际网络分发进入业务线程；闸门让数据库等待与 IO 回调顺序可控。
 // 每个 CTest 场景单独启动进程，替代数据库状态不会泄漏到下一个场景。
-void check_rmdir(const std::string& scenario, const std::string& directory) {
+void check_rmdir(const std::string& requested_scenario, const std::string& directory) {
+  rmdir_recursive = requested_scenario.rfind("rmtree_", 0) == 0;
+  const std::string scenario =
+      rmdir_recursive ? "rmdir_" + requested_scenario.substr(7) : requested_scenario;
+  if (rmdir_recursive)
+    rmdir_children = 2;
+  if (scenario == "rmdir_empty")
+    rmdir_children = 0;
+  if (scenario == "rmdir_plain")
+    rmdir_name = "drafts";
+  if (scenario == "rmdir_literal_flag")
+    rmdir_name = "-r";
   rmdir_mode.store(true);
   rmdir_io_thread = std::this_thread::get_id();
   Fixture fixture(1, 1);
-  CommitRelease release; // 先释放闸门，再析构 Fixture 中的工作线程。
-  const auto request = "rmdir " + Transfer::quote(rmdir_name) + "\n";
+  CommitRelease release;  // 先释放闸门，再析构 Fixture 中的工作线程。
+  const std::string options = rmdir_recursive ? "-r " : "";
+  const std::string name = scenario == "rmdir_plain" ? rmdir_name : Transfer::quote(rmdir_name);
+  const std::string request = scenario == "rmdir_whitespace"
+                                  ? "rmdir \t" + options + "  " + name + " \t\n"
+                                  : "rmdir " + options + name + "\n";
+  const std::string success_reply =
+      rmdir_recursive ? "directory tree removed." : "directory removed.";
+  const std::string failure_reply =
+      rmdir_recursive ? "Cannot remove directory tree." : "Cannot remove directory.";
   const std::string prompt = "tlss@test_user:/>";
 
   if (scenario == "rmdir_help") {
@@ -1439,16 +2612,22 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   }
   if (scenario == "rmdir_invalid") {
     // 覆盖缺参、引号、多参、根目录、路径穿越、过长名字和控制字符。
-    for (const auto& args : std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"",
-             "\"\"", "../a", "/a", "/", ".", "..", std::string(256, 'x'),
-             Transfer::quote("a\\b"), Transfer::quote(std::string("a\0b", 3))}) {
-      fixture.receive("rmdir " + args + "\n");
+    for (const auto& args :
+         std::vector<std::string>{"", "\"unterminated", "\"a\" \"b\"", "\"\"", "../a", "/a", "/",
+                                  ".", "..", std::string(256, 'x'), Transfer::quote("a\\b"),
+                                  Transfer::quote(std::string("a\0b", 3))}) {
+      fixture.receive("rmdir " + options + args + "\n");
       const auto wire = fixture.await_wire(prompt);
       check(wire.find("Usage: rmdir") != std::string::npos ||
                 wire.find("Invalid directory name.") != std::string::npos,
             "invalid rmdir arguments did not receive a local error");
       check(fixture.conn->connected() && !fixture.session->directory_change_pending,
             "invalid rmdir arguments closed or blocked the session");
+    }
+    if (!rmdir_recursive) {
+      fixture.receive("rmdir -r\n");
+      check(fixture.await_wire(prompt).find("Usage: rmdir") != std::string::npos,
+            "a bare recursive flag without a target was accepted");
     }
     check(rmdir_borrows.load() == 0 && rmdir_deletes.load() == 0,
           "invalid rmdir arguments reached the database");
@@ -1467,16 +2646,20 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   if (scenario == "rmdir_stopping_entry") {
     fixture.service._stopping.store(true);
     fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
-    fixture.until([&] { return fixture.conn->disconnected(); });
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
     check(rmdir_borrows.load() == 0 && !fixture.session->directory_change_pending &&
-              fixture.read_wire().empty(), "stopping rmdir submitted work or replied normally");
+              fixture.read_wire().empty(),
+          "stopping rmdir submitted work or replied normally");
     return;
   }
   if (scenario == "rmdir_transfer_busy" || scenario == "rmdir_directory_busy") {
     if (scenario == "rmdir_transfer_busy") {
       fixture.session->transfer = fixture.service._upload_engine.create(
           fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
-          [](TransferEvent) {});
+          [](TransferEvent) {
+          });
     } else {
       fixture.session->directory_change_pending = true;
     }
@@ -1496,10 +2679,14 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   if (scenario == "rmdir_queue_full" || scenario == "rmdir_pool_stopped") {
     if (scenario == "rmdir_queue_full") {
       commit_gate.enabled = true;
-      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }),
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
             "could not occupy the rmdir business worker");
       wait_rm_gate();
-      check(fixture.service._th_pool.try_run([] {}), "could not fill the rmdir business queue");
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill the rmdir business queue");
     } else {
       fixture.service._th_pool.stop();
     }
@@ -1509,7 +2696,8 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
               wire.find("Usage:") == std::string::npos &&
               !fixture.session->directory_change_pending && rmdir_borrows.load() == 0 &&
               fixture.metrics->get(OBSERVABILITY::Metric::commands_rejected) == 1,
-          "rejected rmdir ran a transaction, retained its pending flag, or omitted rejection metrics");
+          "rejected rmdir ran a transaction, retained its pending flag, or omitted rejection "
+          "metrics");
     commit_gate.release();
     fixture.service._th_pool.stop();
     return;
@@ -1518,20 +2706,34 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   const bool stale = scenario.rfind("rmdir_stale_", 0) == 0 || scenario == "rmdir_expired_session";
   const bool gated = stale || scenario == "rmdir_pending" || scenario == "rmdir_disconnect" ||
                      scenario == "rmdir_stopping";
-  if (gated) commit_gate.enabled = true;
-  if (scenario == "rmdir_missing") rmdir_exists.store(false);
-  if (scenario == "rmdir_delete_failure") rmdir_failure = 1;
-  if (scenario == "rmdir_zero") rmdir_failure = 2;
-  if (scenario == "rmdir_exception") rmdir_failure = 3;
-  if (scenario == "rmdir_nonstandard_exception") rmdir_failure = 4;
-  if (scenario == "rmdir_missing_parent") rmdir_failure = 5;
-  if (scenario == "rmdir_child_query_failure") rmdir_failure = 6;
-  if (scenario == "rmdir_child_malformed") rmdir_failure = 7;
-  if (scenario == "rmdir_borrow_failure") rmdir_failure = 8;
-  if (scenario == "rmdir_borrow_exception") rmdir_failure = 9;
-  if (scenario == "rmdir_not_empty_file") rmdir_children = 1;
-  if (scenario == "rmdir_not_empty_directory") rmdir_children = 2;
-  const bool unknown = scenario == "rmdir_unknown_applied" || scenario == "rmdir_unknown_not_applied";
+  if (gated)
+    commit_gate.enabled = true;
+  if (scenario == "rmdir_missing")
+    rmdir_exists.store(false);
+  if (scenario == "rmdir_delete_failure")
+    rmdir_failure = 1;
+  if (scenario == "rmdir_zero")
+    rmdir_failure = 2;
+  if (scenario == "rmdir_exception")
+    rmdir_failure = 3;
+  if (scenario == "rmdir_nonstandard_exception")
+    rmdir_failure = 4;
+  if (scenario == "rmdir_missing_parent")
+    rmdir_failure = 5;
+  if (scenario == "rmdir_child_query_failure")
+    rmdir_failure = 6;
+  if (scenario == "rmdir_child_malformed")
+    rmdir_failure = 7;
+  if (scenario == "rmdir_borrow_failure")
+    rmdir_failure = 8;
+  if (scenario == "rmdir_borrow_exception")
+    rmdir_failure = 9;
+  if (scenario == "rmdir_not_empty_file")
+    rmdir_children = 1;
+  if (scenario == "rmdir_not_empty_directory")
+    rmdir_children = 2;
+  const bool unknown =
+      scenario == "rmdir_unknown_applied" || scenario == "rmdir_unknown_not_applied";
   upload_outcome_unknown.store(unknown);
   rmdir_unknown_applies = scenario == "rmdir_unknown_applied";
 
@@ -1539,7 +2741,9 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   const auto object_path = directory + "/" + abc_hash;
   std::ofstream(object_path, std::ios::binary) << "abc";
   fixture.receive(request);
-  fixture.until([] { return rmdir_borrows.load() == 1; });
+  fixture.until([] {
+    return rmdir_borrows.load() == 1;
+  });
   std::shared_ptr<ConnectionSession> original_session;
   if (gated) {
     wait_rm_gate();
@@ -1548,15 +2752,17 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
     if (scenario == "rmdir_pending") {
       fixture.receive("pwd\n" + request);
       const auto busy = fixture.await_wire("Please wait.");
-      check(busy.find("directory removed.") == std::string::npos && rmdir_deletes.load() == 1,
+      check(busy.find(success_reply) == std::string::npos && rmdir_deletes.load() == 1,
             "pending rmdir allowed a second deletion or replied early");
       bool heartbeat = false;
-      fixture.loop.queue_in_loop([&] { heartbeat = true; });
+      fixture.loop.queue_in_loop([&] {
+        heartbeat = true;
+      });
       fixture.drain();
       check(heartbeat, "rmdir blocked its IO event loop while waiting for the database");
     } else if (scenario == "rmdir_stale_session" || scenario == "rmdir_expired_session") {
       if (scenario == "rmdir_stale_session")
-        original_session = fixture.session; // 弱引用仍可提升，但连接已映射到新会话。
+        original_session = fixture.session;  // 弱引用仍可提升，但连接已映射到新会话。
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
         std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
@@ -1573,7 +2779,9 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
       fixture.session->directory_change_pending = false;
     } else if (scenario == "rmdir_disconnect") {
       fixture.conn->force_close();
-      fixture.until([&] { return fixture.conn->disconnected(); });
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
     } else if (scenario == "rmdir_stopping") {
       fixture.service._stopping.store(true);
     }
@@ -1583,28 +2791,33 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
   // 先等待业务任务完成，再驱动 IO 回调和发送队列，避免把“尚未回复”误判为静默。
   fixture.service._th_pool.stop();
   fixture.drain();
-  fixture.until([&] { return !fixture.conn->_channel->is_writing(); });
+  fixture.until([&] {
+    return !fixture.conn->_channel->is_writing();
+  });
   const auto wire = fixture.read_wire();
   const bool failed = scenario == "rmdir_missing" || rmdir_failure != 0;
-  const bool nonempty = rmdir_children != 0;
+  const bool nonempty = !rmdir_recursive && rmdir_children != 0;
   if (stale || scenario == "rmdir_disconnect" || scenario == "rmdir_stopping") {
     check(wire.empty(), "obsolete rmdir completion replied to an invalid session");
     if (stale)
       check(fixture.session->directory_change_pending == (scenario != "rmdir_stale_pending"),
             "obsolete rmdir completion changed the current session's pending flag");
     if (scenario == "rmdir_stopping") {
-      fixture.until([&] { return fixture.conn->disconnected(); });
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
       check(!fixture.session->directory_change_pending, "stopping rmdir retained its pending flag");
     }
   } else {
-    const std::string expected = unknown ? "Delete result is unknown." :
-                                nonempty ? "Directory is not empty." :
-                                failed ? "Cannot remove directory." : "directory removed.";
+    const std::string expected = unknown    ? "Delete result is unknown."
+                                 : nonempty ? "Directory is not empty."
+                                 : failed   ? failure_reply
+                                            : success_reply;
     check(wire.find(expected) != std::string::npos && wire.find(prompt) != std::string::npos &&
               !fixture.session->directory_change_pending && fixture.conn->connected(),
           "rmdir returned the wrong result, omitted its prompt, or retained its pending flag");
     if (unknown || failed || nonempty)
-      check(wire.find("directory removed.") == std::string::npos,
+      check(wire.find(success_reply) == std::string::npos,
             "rmdir reported success for a nonempty directory, failure, or unknown commit");
     // 四种返回结果都结束本次命令等待；后续命令应能正常执行。
     fixture.receive("pwd\n");
@@ -1612,21 +2825,33 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
           "rmdir completion left subsequent commands blocked");
   }
 
-  const int queries = rmdir_failure >= 8 ? 0 : rmdir_failure == 5 ? 2 :
-                      scenario == "rmdir_missing" ? 3 : 4;
-  const bool attempted_delete = queries == 4 && !nonempty && rmdir_failure != 6 && rmdir_failure != 7;
+  const int queries = rmdir_failure >= 8                         ? 0
+                      : rmdir_failure == 5                       ? 2
+                      : scenario == "rmdir_missing"              ? 3
+                      : rmdir_failure == 6 || rmdir_failure == 7 ? 4
+                      : rmdir_recursive && rmdir_children != 0   ? 5
+                                                                 : 4;
+  const bool attempted_delete =
+      queries >= 4 && !nonempty && rmdir_failure != 6 && rmdir_failure != 7;
+  const int expected_deletes = !attempted_delete                          ? 0
+                               : !rmdir_recursive || rmdir_children == 0  ? 1
+                               : rmdir_failure >= 1 && rmdir_failure <= 4 ? 2
+                                                                          : 4;
   const bool committed = !failed && !nonempty;
   check(rmdir_borrows.load() == 1 && rmdir_queries.load() == queries &&
-            rmdir_deletes.load() == (attempted_delete ? 1 : 0) &&
+            rmdir_deletes.load() == expected_deletes &&
             upload_commits.load() == (committed ? 1 : 0) &&
             upload_rollbacks.load() == (!committed && queries != 0 ? 1 : 0) &&
             borrowed_connections.load() == 0,
-        "rmdir retried, leaked a connection, deleted a nonempty target, or ended its transaction incorrectly");
-  check(rmdir_exists.load() == (scenario == "rmdir_missing" ? false :
-                               !committed || scenario == "rmdir_unknown_not_applied"),
+        "rmdir retried, leaked a connection, deleted a nonempty target, or ended its transaction "
+        "incorrectly");
+  check(rmdir_exists.load() == (scenario == "rmdir_missing"
+                                    ? false
+                                    : !committed || scenario == "rmdir_unknown_not_applied"),
         "rmdir committed state did not match its simulated database outcome");
   check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
-            (failed || nonempty || unknown ? 1U : 0U), "rmdir failure metric was missing or duplicated");
+            (failed || nonempty || unknown ? 1U : 0U),
+        "rmdir failure metric was missing or duplicated");
   std::ifstream object(object_path, std::ios::binary);
   std::string bytes;
   object >> bytes;
@@ -1636,15 +2861,17 @@ void check_rmdir(const std::string& scenario, const std::string& directory) {
 
 void wait_mkdir_gate() {
   std::unique_lock<std::mutex> lock(commit_gate.mutex);
-  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3), [] {
-    return commit_gate.entered;
-  }), "mkdir did not reach its blocked database operation");
+  check(commit_gate.changed.wait_for(lock, std::chrono::seconds(3),
+                                     [] {
+                                       return commit_gate.entered;
+                                     }),
+        "mkdir did not reach its blocked database operation");
 }
 
 void check_mkdir(const std::string& scenario) {
   mkdir_mode.store(true);
   mkdir_io_thread = std::this_thread::get_id();
-  Fixture fixture(1, 1); // 使用真实业务线程，禁止借用零线程同步模式掩盖 IO 阻塞。
+  Fixture fixture(1, 1);  // 使用真实业务线程，禁止借用零线程同步模式掩盖 IO 阻塞。
   CommitRelease release;
   const std::string prompt = "tlss@test_user:/>";
   if (scenario == "mkdir_unauthenticated") {
@@ -1657,9 +2884,14 @@ void check_mkdir(const std::string& scenario) {
   if (scenario == "mkdir_queue_full" || scenario == "mkdir_pool_stopped") {
     if (scenario == "mkdir_queue_full") {
       commit_gate.enabled = true;
-      check(fixture.service._th_pool.try_run([] { commit_gate.wait(); }), "could not occupy mkdir worker");
+      check(fixture.service._th_pool.try_run([] {
+        commit_gate.wait();
+      }),
+            "could not occupy mkdir worker");
       wait_mkdir_gate();
-      check(fixture.service._th_pool.try_run([] {}), "could not fill mkdir task queue");
+      check(fixture.service._th_pool.try_run([] {
+      }),
+            "could not fill mkdir task queue");
     } else {
       fixture.service._th_pool.stop();
     }
@@ -1673,14 +2905,20 @@ void check_mkdir(const std::string& scenario) {
     return;
   }
 
-  const bool unknown = scenario == "mkdir_unknown_applied" || scenario == "mkdir_unknown_not_applied";
+  const bool unknown =
+      scenario == "mkdir_unknown_applied" || scenario == "mkdir_unknown_not_applied";
   upload_outcome_unknown.store(unknown);
   mkdir_unknown_applies = scenario == "mkdir_unknown_applied";
-  if (scenario == "mkdir_sql_failure") mkdir_failure = 1;
-  if (scenario == "mkdir_zero") mkdir_failure = 2;
-  if (scenario == "mkdir_exception") mkdir_failure = 3;
-  if (scenario == "mkdir_nonstandard_exception") mkdir_failure = 4;
-  if (scenario == "mkdir_missing_parent") mkdir_failure = 5;
+  if (scenario == "mkdir_sql_failure")
+    mkdir_failure = 1;
+  if (scenario == "mkdir_zero")
+    mkdir_failure = 2;
+  if (scenario == "mkdir_exception")
+    mkdir_failure = 3;
+  if (scenario == "mkdir_nonstandard_exception")
+    mkdir_failure = 4;
+  if (scenario == "mkdir_missing_parent")
+    mkdir_failure = 5;
   const bool invalid = scenario == "mkdir_invalid";
   const bool gated = scenario == "mkdir_pending" || scenario == "mkdir_disconnect";
   if (gated)
@@ -1688,7 +2926,9 @@ void check_mkdir(const std::string& scenario) {
   fixture.receive(invalid ? "mkdir ../drafts\n" : "mkdir drafts\n");
   if (gated) {
     // 先驱动 IO loop 将命令提交，再等待业务线程到达闸门。
-    fixture.until([] { return mkdir_inserts.load() == 1; });
+    fixture.until([] {
+      return mkdir_inserts.load() == 1;
+    });
     wait_mkdir_gate();
     check(fixture.read_wire().empty(), "mkdir responded before COMMIT");
     if (scenario == "mkdir_pending") {
@@ -1698,7 +2938,9 @@ void check_mkdir(const std::string& scenario) {
             "mkdir replied before the blocked transaction finished");
     } else {
       fixture.conn->force_close();
-      fixture.until([&] { return fixture.conn->disconnected(); });
+      fixture.until([&] {
+        return fixture.conn->disconnected();
+      });
     }
     commit_gate.release();
   }
@@ -1711,8 +2953,9 @@ void check_mkdir(const std::string& scenario) {
   } else {
     // send() 还需要 IO loop 排空发送队列，必须等到完整提示符再检查响应。
     const auto wire = fixture.await_wire(prompt);
-    const std::string expected = unknown ? "Directory creation result is unknown." :
-                                 failed ? "Cannot create directory." : "Directory created.";
+    const std::string expected = unknown  ? "Directory creation result is unknown."
+                                 : failed ? "Cannot create directory."
+                                          : "Directory created.";
     check(wire.find(expected) != std::string::npos && fixture.conn->connected(),
           "mkdir mapped its three-state result to an incorrect response");
     if (failed || unknown)
@@ -1723,16 +2966,43 @@ void check_mkdir(const std::string& scenario) {
   check(mkdir_borrows.load() == (invalid ? 0 : 1) && mkdir_queries.load() == (invalid ? 0 : 2) &&
             mkdir_inserts.load() == (invalid || mkdir_failure == 5 ? 0 : 1) &&
             upload_commits.load() == (failed ? 0 : 1) &&
-            upload_rollbacks.load() == (failed && !invalid ? 1 : 0) && borrowed_connections.load() == 0,
+            upload_rollbacks.load() == (failed && !invalid ? 1 : 0) &&
+            borrowed_connections.load() == 0,
         "mkdir retried, leaked a connection, or ended its transaction incorrectly");
   check(mkdir_exists.load() == (!failed && (!unknown || mkdir_unknown_applies)),
         "mkdir committed state did not match the simulated database outcome");
   check(fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) ==
-            (failed || unknown ? 1U : 0U), "mkdir failure metric was missing or duplicated");
+            (failed || unknown ? 1U : 0U),
+        "mkdir failure metric was missing or duplicated");
 }
 
 void run(const std::string& scenario, const std::string& directory) {
-  if (scenario.rfind("rmdir_", 0) == 0) {
+  if (scenario.rfind("cd_parse_", 0) == 0) {
+    check_cd_parse(scenario);
+    return;
+  }
+  if (scenario.rfind("cd_command_", 0) == 0) {
+    check_cd_command(scenario);
+    return;
+  }
+  if (scenario.rfind("move_parse_", 0) == 0) {
+    check_move_parse(scenario);
+    return;
+  }
+  if (scenario.rfind("move_task_", 0) == 0 || scenario.rfind("move_submit_", 0) == 0 ||
+      scenario.rfind("move_command_", 0) == 0) {
+    check_move_task(scenario, directory);
+    return;
+  }
+  if (scenario.rfind("rename_parse_", 0) == 0) {
+    check_rename_parse(scenario);
+    return;
+  }
+  if (scenario.rfind("rename_task_", 0) == 0 || scenario.rfind("rename_command_", 0) == 0) {
+    check_rename_task(scenario, directory);
+    return;
+  }
+  if (scenario.rfind("rmdir_", 0) == 0 || scenario.rfind("rmtree_", 0) == 0) {
     check_rmdir(scenario, directory);
     return;
   }
@@ -1761,7 +3031,8 @@ void run(const std::string& scenario, const std::string& directory) {
               scenario == "prepare_recovery_unknown" ||
               scenario == "prepare_cleanup_sync_failure" || scenario == "prepare_cleanup_started" ||
               scenario == "prepare_orphan_valid" || scenario == "prepare_orphan_corrupt" ||
-              scenario == "prepare_orphan_existing" || scenario == "prepare_orphan_lookup_failure" ||
+              scenario == "prepare_orphan_existing" ||
+              scenario == "prepare_orphan_lookup_failure" ||
               scenario == "prepare_orphan_insert_failure",
           "unknown preparation scenario");
     const bool table_exists = scenario != "prepare_missing_table";
@@ -1778,18 +3049,19 @@ void run(const std::string& scenario, const std::string& directory) {
     const bool backfill_failure = lookup_failure || insert_failure;
     const bool has_record = resume || referenced || unknown;
     const bool has_disk_object = has_record || orphan;
-    const bool expected_ready = table_exists &&
-        scenario != "prepare_recovery_query_failure" &&
-        scenario != "prepare_recovery_invalid_hash" && !referenced && !unknown &&
-        !cleanup_failure && !already_started && !backfill_failure;
+    const bool expected_ready = table_exists && scenario != "prepare_recovery_query_failure" &&
+                                scenario != "prepare_recovery_invalid_hash" && !referenced &&
+                                !unknown && !cleanup_failure && !already_started &&
+                                !backfill_failure;
 
     object_table_available.store(table_exists);
     object_table_checks.store(0);
     referenced_list_queries.store(0);
     deleting_list_queries.store(0);
-    deleting_list_mode.store(scenario == "prepare_recovery_query_failure" ? 1 :
-        scenario == "prepare_recovery_invalid_hash" ? 2 :
-        (has_record || scenario == "prepare_recovery_skip") ? 3 : 0);
+    deleting_list_mode.store(scenario == "prepare_recovery_query_failure"          ? 1
+                             : scenario == "prepare_recovery_invalid_hash"         ? 2
+                             : (has_record || scenario == "prepare_recovery_skip") ? 3
+                                                                                   : 0);
     startup_deleting_record.store(has_record);
     startup_object_referenced.store(referenced);
     startup_object_deletes.store(0);
@@ -1849,7 +3121,8 @@ void run(const std::string& scenario, const std::string& directory) {
     service._started = false;
     fail_startup_sync.store(false);
 
-    check(cleanup_threw == cleanup_failure, "startup cleanup exception was swallowed or unexpected");
+    check(cleanup_threw == cleanup_failure,
+          "startup cleanup exception was swallowed or unexpected");
     check(std::filesystem::is_regular_file(directory + "/.tlss.lock"),
           "startup cleanup removed the directory lock file");
     if (cleanup_failure || already_started) {
@@ -1864,10 +3137,8 @@ void run(const std::string& scenario, const std::string& directory) {
       return;
     }
 
-    check(ready == expected_ready,
-          "storage preparation ignored a backfill or recovery result");
-    check(object_table_checks.load() == 1,
-          "object table was not checked exactly once");
+    check(ready == expected_ready, "storage preparation ignored a backfill or recovery result");
+    check(object_table_checks.load() == 1, "object table was not checked exactly once");
     check(!std::filesystem::exists(startup_temporary_path),
           "startup did not clean the interrupted upload before database preparation");
 
@@ -1883,8 +3154,7 @@ void run(const std::string& scenario, const std::string& directory) {
           "startup registered an existing object or skipped a disk orphan");
     check(borrowed_connections.load() == 0 && peak_borrowed_connections.load() == 1,
           "preparation leaked a connection or borrowed before returning the previous one");
-    check(inserts.load() == 0,
-          "empty-list preparation unexpectedly wrote metadata");
+    check(inserts.load() == 0, "empty-list preparation unexpectedly wrote metadata");
     check(startup_object_deletes.load() == (resume ? 1 : 0),
           "startup recovery performed an unexpected catalog deletion");
     if (has_disk_object) {
@@ -1892,21 +3162,23 @@ void run(const std::string& scenario, const std::string& directory) {
             "startup recovery removed or retained the wrong disk object");
       check(startup_deleting_record.load() == (has_record && !resume),
             "startup recovery changed the wrong catalog state");
-      check(upload_commits.load() == (resume ? 2 : unknown ? 1 : 0),
+      check(upload_commits.load() == (resume    ? 2
+                                      : unknown ? 1
+                                                : 0),
             "startup recovery committed or retried unexpectedly");
     }
     if (orphan) {
       check(startup_registered_record.load() == !backfill_failure,
             "startup ignored an orphan registration result");
       if (!backfill_failure) {
-        check(startup_registered_state == (orphan_corrupt || orphan_existing ? "UNAVAILABLE" : "LIVE"),
+        check(startup_registered_state ==
+                  (orphan_corrupt || orphan_existing ? "UNAVAILABLE" : "LIVE"),
               "startup changed the wrong orphan or existing object state");
       }
       check(upload_commits.load() == 0 && startup_object_deletes.load() == 0,
             "startup immediately reclaimed a newly registered orphan");
     }
-    check(!service._started,
-          "storage preparation unexpectedly started the service");
+    check(!service._started, "storage preparation unexpectedly started the service");
     return;
   }
   if (scenario == "metrics_pool") {
@@ -2182,8 +3454,7 @@ void run(const std::string& scenario, const std::string& directory) {
           "unknown commit outcome deleted the object");
     check(inserts == 1 && upload_commits.load() == 1,
           "unknown commit outcome retried registration");
-    check(upload_rollbacks.load() == 0,
-          "unknown commit outcome attempted rollback");
+    check(upload_rollbacks.load() == 0, "unknown commit outcome attempted rollback");
     check(fixture.metrics->get(OBSERVABILITY::Metric::upload_committed) == 0 &&
               fixture.metrics->get(OBSERVABILITY::Metric::upload_active) == 0,
           "unknown commit outcome was counted as committed or remained active");

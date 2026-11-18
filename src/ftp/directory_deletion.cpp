@@ -264,7 +264,7 @@ DeleteDirectoryTreeResult delete_directory_tree_transaction(BASE::DbConnection& 
         sql, {node.id, username, node.parent_id, node.file_name, node.path, node.file_type});
     // 此时检查执行成功，并且 affected_rows == 1
     if (!res.success || res.affected_rows != 1) {
-     return DeleteDirectoryTreeResult::failed;
+      return DeleteDirectoryTreeResult::failed;
     }
   }
   // 所有节点均已删除成功，在这里统一提交一次

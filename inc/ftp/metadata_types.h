@@ -42,5 +42,17 @@ enum class DeleteDirectoryTreeResult {
   outcome_unknown  // 提交结果未知，不能认定已经回滚
 };
 
+enum class RenameFileResult {
+  committed,       // 已确认文件重命名事务提交成功
+  failed,          // 参数错误、源文件不存在、目标重名或数据库操作失败
+  outcome_unknown  // 提交结果未知，不能认定已经回滚
+};
+
+enum class MoveFileResult {
+  committed,  // 已确认文件移动事务提交成功
+  failed,     // 参数错误、源文件或目录不存在、目标重名或数据库操作失败
+  outcome_unknown  // 提交结果未知，不能认定已经回滚
+};
+
 }  // namespace TLSS::FileStorage
 #endif
