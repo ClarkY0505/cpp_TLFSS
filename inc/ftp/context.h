@@ -34,9 +34,12 @@ struct ConnectionSession {
   // 每次提交认证任务时递增，用于识别过期回调。
   std::uint64_t auth_attempt = 0;
 
-  // 仅认证成功后填写。
-  std::string name;
-  std::uint64_t user_id = 0;
+  // 仅认证成功后填写；异步任务共享这个只读身份，不自行重建 ID/用户名。
+  AUTH::PrincipalHandle principal;
+  const std::string& username() const noexcept {
+    static const std::string empty;
+    return principal ? principal->username() : empty;
+  }
 
   std::string current_directory = "/";
   bool directory_change_pending = false;

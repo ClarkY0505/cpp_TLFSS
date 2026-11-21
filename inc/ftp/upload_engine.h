@@ -16,8 +16,8 @@ struct UploadRequest {
 
 class UploadEngine {
  public:
-  UploadEngine(MetadataService& metadata, ObjectStorageEngine& objects,
-               ObjectCoordinator& coordinator,
+  UploadEngine(const AUTH::AuthService& auth, MetadataService& metadata,
+               ObjectStorageEngine& objects, ObjectCoordinator& coordinator,
                std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics = {});
   StorageContext<std::string> prepare(const StorageRequestContext& context,
                                       const UploadRequest& request) const;
@@ -26,6 +26,7 @@ class UploadEngine {
                                  const std::string& name, Transfer::Receiver& receiver) const;
 
  private:
+  const AUTH::AuthService& _auth;
   MetadataService& _metadata;
   ObjectStorageEngine& _objects;
   ObjectCoordinator& _coordinator;

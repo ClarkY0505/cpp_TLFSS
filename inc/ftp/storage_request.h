@@ -1,17 +1,21 @@
 #ifndef TLSS_FTP_STORAGE_REQUEST_H
 #define TLSS_FTP_STORAGE_REQUEST_H
 
-#include <cstdint>
+#include "auth/authenticated_principal.h"
+
 #include <string>
 
+namespace TLSS::AUTH {
+class AuthService;
+}
+
 namespace TLSS::FileStorage {
-// The caller takes this identity snapshot after successful authentication.
+// Identity is issued by authentication; callers only choose the request directory.
 struct StorageRequestContext {
-  std::uint64_t user_id = 0;
-  std::string username;
+  AUTH::PrincipalHandle principal;
   std::string directory = "/";
 
-  bool valid() const;
+  bool valid(const AUTH::AuthService& authority) const;
 };
 }  // namespace TLSS::FileStorage
 

@@ -9,6 +9,8 @@
  * 整体系统依然不能使用，必须先修改连接池实现
  * */
 
+#include "auth/authenticated_principal.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -30,8 +32,7 @@ enum class AuthStatus {
 
 struct AuthResult {
   AuthStatus status = AuthStatus::k_backend_unavailable;
-  std::uint64_t user_id = 0;
-  std::string username;
+  PrincipalHandle principal;
 };
 
 struct SignupRequest {
@@ -57,9 +58,14 @@ struct SignupResult {
 class AuthService {
  public:
   explicit AuthService(UserRepository& users);
+  AuthService(const AuthService&) = delete;
+  AuthService& operator=(const AuthService&) = delete;
 
   // 同步业务接口，由调用方安排到工作线程执行。
   AuthResult authenticate(const LoginRequest& request) const;
+  bool owns(const PrincipalHandle& principal) const noexcept {
+    return principal && principal->issuer_ == _issuer;
+  }
   SignupResult signup(const SignupRequest& request) const;
 
   // TCP 交互可提前校验；signup 仍独立校验，供将来的 RPC 调用复用。
@@ -68,6 +74,8 @@ class AuthService {
 
  private:
   UserRepository& users_;
+  const std::shared_ptr<const AuthenticatedPrincipal::Issuer> _issuer =
+      std::make_shared<AuthenticatedPrincipal::Issuer>();
 };
 
 }  // namespace TLSS::AUTH

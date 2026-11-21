@@ -67,14 +67,14 @@ SignupResult AuthService::signup(const SignupRequest& request) const {
 AuthResult AuthService::authenticate(const LoginRequest& request) const {
   if (request.username.empty() || request.username.size() > 64 || request.password.empty() ||
       request.password.size() > 128) {
-    return {AuthStatus::k_invalid_credentials, 0, {}};
+    return {AuthStatus::k_invalid_credentials, {}};
   }
 
   try {
     const auto lookup = users_.find_active_user(request.username);
 
     if (lookup.status == UserLookupStatus::k_not_found) {
-      return {AuthStatus::k_invalid_credentials, 0, {}};
+      return {AuthStatus::k_invalid_credentials, {}};
     }
 
     if (lookup.status != UserLookupStatus::k_found) {
@@ -86,13 +86,13 @@ AuthResult AuthService::authenticate(const LoginRequest& request) const {
     }
 
     if (!PasswordHasher::verify_password(request.password, lookup.user.credentials)) {
-      return {AuthStatus::k_invalid_credentials, 0, {}};
+      return {AuthStatus::k_invalid_credentials, {}};
     }
 
     return {
         AuthStatus::k_authenticated,
-        lookup.user.user_id,
-        lookup.user.username,
+        PrincipalHandle(
+            new AuthenticatedPrincipal(lookup.user.user_id, lookup.user.username, _issuer)),
     };
   } catch (const std::exception&) {
     // 数据访问异常、凭据格式损坏、OpenSSL 失败统一映射为服务故障。

@@ -17,6 +17,7 @@ class StorageService {
       , _uploads(uploads)
       , _downloads(downloads) {}
   AUTH::AuthResult authenticate(const AUTH::LoginRequest& request) const;
+  bool accepts_identity(const AUTH::PrincipalHandle& principal) const noexcept;
   AUTH::SignupResult signup(const AUTH::SignupRequest& request) const;
   StorageContext<std::vector<FileInfo>> find_file_by_current_dir(
       const StorageRequestContext& context) const;

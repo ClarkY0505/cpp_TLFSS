@@ -85,11 +85,8 @@ struct ObjectInfo {
   std::string hash;
   std::uint64_t size = 0;
 };
-// Synchronous storage primitives: callers choose the execution resource.
-// This component has no database, connection or protocol state.
 class ObjectStorageEngine {
  public:
-  // Configure before starting workers; metrics ownership outlives asynchronous operations.
   void set_metrics(std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics) {
     _metrics = std::move(metrics);
   }

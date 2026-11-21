@@ -13,12 +13,15 @@ struct DownloadObject {
 
 class DownloadEngine {
  public:
-  DownloadEngine(MetadataService& metadata, ObjectStorageEngine& objects)
-      : _metadata(metadata)
+  DownloadEngine(const AUTH::AuthService& auth, MetadataService& metadata,
+                 ObjectStorageEngine& objects)
+      : _auth(auth)
+      , _metadata(metadata)
       , _objects(objects) {}
   DownloadObject open(const StorageRequestContext& context, const std::string& name) const;
 
  private:
+  const AUTH::AuthService& _auth;
   MetadataService& _metadata;
   ObjectStorageEngine& _objects;
 };

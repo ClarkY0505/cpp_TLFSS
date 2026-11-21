@@ -82,16 +82,16 @@ class TcpStorageServer {
 
   void handle_cd(const NET::TcpConnectionPtr& conn,
                  const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  void move_file_by_cur_dir(std::uint64_t user_id, const std::string& username,
-                            const std::string& current_directory,
+  void move_file_by_cur_dir(AUTH::PrincipalHandle principal, const std::string& current_directory,
                             const std::weak_ptr<ConnectionSession>& original,
                             const std::weak_ptr<NET::TcpConnection>& connection,
                             const std::string& directory, NET::EventLoop* io_loop);
   void handle_ls(const NET::TcpConnectionPtr& conn,
                  const std::shared_ptr<ConnectionSession>& session);
-  void lookup_file_by_cur_dir(std::uint64_t user_id, const std::string& username,
-                              const std::string& current_directory,
-                              std::weak_ptr<NET::TcpConnection>& connection);
+  void lookup_file_by_cur_dir(AUTH::PrincipalHandle principal, const std::string& current_directory,
+                              const std::weak_ptr<ConnectionSession>& original,
+                              const std::weak_ptr<NET::TcpConnection>& connection,
+                              NET::EventLoop* io_loop);
   void handle_pwd(const NET::TcpConnectionPtr& conn,
                   const std::shared_ptr<ConnectionSession>& session);
   void handle_mkdir(const NET::TcpConnectionPtr& conn,
@@ -111,41 +111,44 @@ class TcpStorageServer {
                    const std::shared_ptr<ConnectionSession>& session, const std::string& args);
 
   // 业务线程：删除空目录，将结果投递回 IO 线程
-  void remove_empty_directory_by_current_dir(std::uint64_t user_id, const std::string& username,
+  void remove_empty_directory_by_current_dir(AUTH::PrincipalHandle principal,
                                              const std::string& directory,
                                              const std::string& directory_name,
                                              const std::weak_ptr<ConnectionSession>& original,
                                              const std::weak_ptr<NET::TcpConnection>& connection,
                                              NET::EventLoop* io_loop);
   // 在业务线程中执行：删除元数据，再向 IO 线程投递结果
-  void remove_file_by_current_dir(std::uint64_t user_id, const std::string& username,
-                                  const std::string& directory, const std::string& file_name,
+  void remove_file_by_current_dir(AUTH::PrincipalHandle principal, const std::string& directory,
+                                  const std::string& file_name,
                                   const std::weak_ptr<ConnectionSession>& original,
                                   const std::weak_ptr<NET::TcpConnection>& connection,
                                   NET::EventLoop* io_loop);
   // 业务线程：重命名文件，将三态结果投递回连接所属的 IO 线程
-  void rename_file_by_current_dir(std::uint64_t user_id, const std::string& username,
-                                  const std::string& directory, const std::string& old_name,
-                                  const std::string& new_name,
+  void rename_file_by_current_dir(AUTH::PrincipalHandle principal, const std::string& directory,
+                                  const std::string& old_name, const std::string& new_name,
                                   const std::weak_ptr<ConnectionSession>& original,
                                   const std::weak_ptr<NET::TcpConnection>& connection,
                                   NET::EventLoop* io_loop);
   // 业务线程：移动文件，将三态结果投递回连接所属的 IO 线程。
-  void move_file_to_directory(std::uint64_t user_id, const std::string& username,
-                              const std::string& source_directory,
+  void move_file_to_directory(AUTH::PrincipalHandle principal, const std::string& source_directory,
                               const std::string& target_directory, const std::string& file_name,
                               const std::weak_ptr<ConnectionSession>& original,
                               const std::weak_ptr<NET::TcpConnection>& connection,
                               NET::EventLoop* io_loop);
-  void create_dir(std::uint64_t user_id, const std::string& username,
-                  const std::string& current_directory, const std::string& directory,
-                  std::weak_ptr<NET::TcpConnection>& connection);
+  void create_dir(AUTH::PrincipalHandle principal, const std::string& current_directory,
+                  const std::string& directory, const std::weak_ptr<ConnectionSession>& original,
+                  const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop);
+  // Worker callers supply snapshots; only the IO loop checks the live session and replies.
+  void queue_command_reply(AUTH::PrincipalHandle principal,
+                           std::weak_ptr<ConnectionSession> original,
+                           std::weak_ptr<NET::TcpConnection> connection, NET::EventLoop* io_loop,
+                           std::string message);
   // 异步线程超时处理
   void finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
                                     std::weak_ptr<NET::TcpConnection> connection);
 
   // 业务线程：递归删除目录，将结果投递回 IO 线程
-  void remove_directory_tree_by_current_dir(std::uint64_t user_id, const std::string& username,
+  void remove_directory_tree_by_current_dir(AUTH::PrincipalHandle principal,
                                             const std::string& directory,
                                             const std::string& directory_name,
                                             const std::weak_ptr<ConnectionSession>& original,

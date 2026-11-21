@@ -46,7 +46,7 @@ enum HandleCommand {
 
 void transfer_prompt(const NET::TcpConnectionPtr& conn,
                      const std::shared_ptr<ConnectionSession>& session) {
-  conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
+  conn->send("tlss@" + session->username() + ":" + session->current_directory + ">");
 }
 
 std::optional<HandleCommand> string_to_command(std::string_view command) {
@@ -255,7 +255,7 @@ void TcpStorageServer::on_message(const NET::TcpConnectionPtr& conn, NET::Buffer
       }
 
       if (!dispatch_task(conn, session, command)) {
-        conn->send("\r\ntlss@" + session->name + ":" + session->current_directory + ">");
+        conn->send("\r\ntlss@" + session->username() + ":" + session->current_directory + ">");
       }
     }
   } catch (const std::exception& exception) {
@@ -278,7 +278,7 @@ bool TcpStorageServer::dispatch_task(const NET::TcpConnectionPtr& conn,
   }
 
   if (command.empty()) {
-    conn->send("tlss@" + session->name + ":" + session->current_directory + ">");
+    conn->send("tlss@" + session->username() + ":" + session->current_directory + ">");
     return true;
   }
 
@@ -290,7 +290,7 @@ bool TcpStorageServer::dispatch_task(const NET::TcpConnectionPtr& conn,
 
   if (command == "help" || command == "h") {
     conn->send("Commands : ls pwd cd rm rename move mkdir rmdir upload or download\r\ntlss@" +
-               session->name + ":" + session->current_directory + ">");
+               session->username() + ":" + session->current_directory + ">");
     return true;
   }
 
@@ -385,7 +385,7 @@ void TcpStorageServer::handle_cd(const NET::TcpConnectionPtr& conn,
   auto original = std::weak_ptr<ConnectionSession>(session);
   auto connection = std::weak_ptr<NET::TcpConnection>(conn);
   auto task =
-      std::bind(&TcpStorageServer::move_file_by_cur_dir, this, session->user_id, session->name,
+      std::bind(&TcpStorageServer::move_file_by_cur_dir, this, session->principal,
                 session->current_directory, original, connection, directory, conn->get_loop());
   session->directory_change_pending = true;
   bool accepted = false;
@@ -406,21 +406,21 @@ void TcpStorageServer::handle_cd(const NET::TcpConnectionPtr& conn,
   }
 }
 
-void TcpStorageServer::move_file_by_cur_dir(std::uint64_t user_id, const std::string& username,
+void TcpStorageServer::move_file_by_cur_dir(AUTH::PrincipalHandle principal,
                                             const std::string& current_directory,
                                             const std::weak_ptr<ConnectionSession>& original,
                                             const std::weak_ptr<NET::TcpConnection>& connection,
                                             const std::string& directory, NET::EventLoop* io_loop) {
   StorageContext<std::string> cur_path{false, {}};
   try {
-    cur_path = _service.move_dir_by_current_dir({user_id, username, current_directory}, directory);
+    cur_path = _service.move_dir_by_current_dir({principal, current_directory}, directory);
   } catch (...) {
     // 服务层已经记录失败指标；异常也要交回 IO 线程清理本次 pending。
     cur_path = {false, {}};
   }
 
   // 查询期间不读取或修改会话；回调持有参数副本和弱引用，不延长旧会话寿命。
-  auto check_task = [this, original, connection, username, current_directory,
+  auto check_task = [this, original, connection, principal, current_directory,
                      cur_path = std::move(cur_path)] {
     auto session = original.lock();
     auto conn = connection.lock();
@@ -437,7 +437,7 @@ void TcpStorageServer::move_file_by_cur_dir(std::uint64_t user_id, const std::st
     }
 
     // 结果只能用于提交查询时的用户、工作目录和仍在等待完成的会话。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != current_directory || !session->directory_change_pending) {
       return;
     }
@@ -463,8 +463,9 @@ void TcpStorageServer::handle_ls(const NET::TcpConnectionPtr& conn,
                                  const std::shared_ptr<ConnectionSession>& session) {
   if (session->login_state == LoginState::k_authenticated) {
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-    auto task = std::bind(&TcpStorageServer::lookup_file_by_cur_dir, this, session->user_id,
-                          session->name, session->current_directory, connection);
+    auto original = std::weak_ptr<ConnectionSession>(session);
+    auto task = std::bind(&TcpStorageServer::lookup_file_by_cur_dir, this, session->principal,
+                          session->current_directory, original, connection, conn->get_loop());
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
       if (_metrics)
@@ -475,22 +476,17 @@ void TcpStorageServer::handle_ls(const NET::TcpConnectionPtr& conn,
   }
 }
 
-void TcpStorageServer::lookup_file_by_cur_dir(std::uint64_t user_id, const std::string& username,
+void TcpStorageServer::lookup_file_by_cur_dir(AUTH::PrincipalHandle principal,
                                               const std::string& current_directory,
-                                              std::weak_ptr<NET::TcpConnection>& connection) {
-  auto files_info = _service.find_file_by_current_dir({user_id, username, current_directory});
-  auto conn = connection.lock();
-  if (!conn || !conn->connected()) {
-    return;
-  }
+                                              const std::weak_ptr<ConnectionSession>& original,
+                                              const std::weak_ptr<NET::TcpConnection>& connection,
+                                              NET::EventLoop* io_loop) {
+  auto files_info = _service.find_file_by_current_dir({principal, current_directory});
   std::string msg;
 
   if (!files_info.success) {
     msg = "Query failed.\r\n";
-  } else if (files_info.result.empty()) {
-    conn->send("tlss@" + username + ":" + current_directory + ">");
-    return;
-  } else {
+  } else if (!files_info.result.empty()) {
     std::ostringstream out;
     out << std::left;  // 左对齐
 
@@ -501,13 +497,40 @@ void TcpStorageServer::lookup_file_by_cur_dir(std::uint64_t user_id, const std::
 
     msg = out.str();
   }
-  conn->send(msg + "tlss@" + username + ":" + current_directory + ">");
+  queue_command_reply(std::move(principal), original, connection, io_loop, std::move(msg));
+}
+
+void TcpStorageServer::queue_command_reply(AUTH::PrincipalHandle principal,
+                                           std::weak_ptr<ConnectionSession> original,
+                                           std::weak_ptr<NET::TcpConnection> connection,
+                                           NET::EventLoop* io_loop, std::string message) {
+  io_loop->queue_in_loop([this, principal = std::move(principal), original, connection,
+                          message = std::move(message)] {
+    auto session = original.lock();
+    auto conn = connection.lock();
+    if (!session || !conn || !conn->connected())
+      return;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto it = _sessions.find(conn.get());
+      if (it == _sessions.end() || it->second != session)
+        return;
+    }
+    if (session->login_state != LoginState::k_authenticated ||
+        !_service.accepts_identity(principal) || session->principal != principal)
+      return;
+    if (_stopping.load()) {
+      conn->force_close();
+      return;
+    }
+    conn->send(message + "tlss@" + principal->username() + ":" + session->current_directory + ">");
+  });
 }
 
 void TcpStorageServer::handle_pwd(const NET::TcpConnectionPtr& conn,
                                   const std::shared_ptr<ConnectionSession>& session) {
   if (session->login_state == LoginState::k_authenticated) {
-    conn->send(session->current_directory + "\r\ntlss@" + session->name + ":" +
+    conn->send(session->current_directory + "\r\ntlss@" + session->username() + ":" +
                session->current_directory + ">");
   }
 }
@@ -517,8 +540,10 @@ void TcpStorageServer::handle_mkdir(const NET::TcpConnectionPtr& conn,
                                     const std::string& directory) {
   if (session->login_state == LoginState::k_authenticated) {
     auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-    auto task = std::bind(&TcpStorageServer::create_dir, this, session->user_id, session->name,
-                          session->current_directory, directory, connection);
+    auto original = std::weak_ptr<ConnectionSession>(session);
+    auto task =
+        std::bind(&TcpStorageServer::create_dir, this, session->principal,
+                  session->current_directory, directory, original, connection, conn->get_loop());
     const bool accepted = _th_pool.try_run(std::move(task));
     if (!accepted) {
       if (_metrics) {
@@ -530,42 +555,40 @@ void TcpStorageServer::handle_mkdir(const NET::TcpConnectionPtr& conn,
   }
 }
 
-void TcpStorageServer::create_dir(std::uint64_t user_id, const std::string& username,
+void TcpStorageServer::create_dir(AUTH::PrincipalHandle principal,
                                   const std::string& current_directory,
                                   const std::string& directory,
-                                  std::weak_ptr<NET::TcpConnection>& connection) {
+                                  const std::weak_ptr<ConnectionSession>& original,
+                                  const std::weak_ptr<NET::TcpConnection>& connection,
+                                  NET::EventLoop* io_loop) {
   CreateDirectoryResult outcome = CreateDirectoryResult::failed;
 
   try {
-    outcome = _service.create_dir({user_id, username, current_directory}, directory);
+    outcome = _service.create_dir({principal, current_directory}, directory);
   } catch (...) {
     // 元数据服务已统计失败；避免异常逃出业务任务。
     outcome = CreateDirectoryResult::failed;
   }
 
-  auto conn = connection.lock();
-  if (!conn || !conn->connected()) {
-    return;
-  }
-
+  std::string message;
   switch (outcome) {
     case CreateDirectoryResult::committed:
-      conn->send("Directory created.\r\n");
+      message = "Directory created.\r\n";
       break;
 
     case CreateDirectoryResult::failed:
-      conn->send("Cannot create directory.\r\n");
+      message = "Cannot create directory.\r\n";
       break;
 
     case CreateDirectoryResult::outcome_unknown:
     default:
-      conn->send(
+      message =
           "Directory creation result is unknown. "
-          "Check the directory state.\r\n");
+          "Check the directory state.\r\n";
       break;
   }
 
-  conn->send("tlss@" + username + ":" + current_directory + ">");
+  queue_command_reply(std::move(principal), original, connection, io_loop, std::move(message));
 }
 
 bool TcpStorageServer::handle_auth_command(const NET::TcpConnectionPtr& conn,
@@ -579,15 +602,13 @@ bool TcpStorageServer::handle_auth_command(const NET::TcpConnectionPtr& conn,
     case LoginState::k_await_choice:
       if (command == "login") {
         session->pending_username.clear();
-        session->name.clear();
-        session->user_id = 0;
+        session->principal.reset();
         session->login_state = LoginState::k_await_username;
         conn->send("Username:");
       } else if (command == "signup") {
         session->pending_username.clear();
         session->signup_password.clear();
-        session->name.clear();
-        session->user_id = 0;
+        session->principal.reset();
         session->login_state = LoginState::k_signup_username;
         conn->send("New username (3-64 letters, digits or underscore):");
       } else if (command == "help" || command == "h") {
@@ -780,8 +801,7 @@ void TcpStorageServer::finish_signup(std::weak_ptr<ConnectionSession> original,
   }
   session->signup_password.clear();
   // 注册成功也不会自动获得登录身份。
-  session->name.clear();
-  session->user_id = 0;
+  session->principal.reset();
   session->current_directory = "/";
   session->directory_change_pending = false;
 
@@ -836,23 +856,22 @@ void TcpStorageServer::finish_authentication(std::weak_ptr<ConnectionSession> or
 
   session->pending_username.clear();
 
-  if (result.status == AUTH::AuthStatus::k_authenticated) {
-    session->user_id = result.user_id;
-    session->name = std::move(result.username);
+  if (result.status == AUTH::AuthStatus::k_authenticated &&
+      _service.accepts_identity(result.principal)) {
+    session->principal = std::move(result.principal);
     session->current_directory = "/";
     session->directory_change_pending = false;
     session->login_state = LoginState::k_authenticated;
 
     Transfer::send_control(conn, "AUTH_OK");
 
-    conn->send("Login successful.\r\ntlss@" + session->name + ":" + session->current_directory +
-               ">");
+    conn->send("Login successful.\r\ntlss@" + session->username() + ":" +
+               session->current_directory + ">");
 
     return;
   }
 
-  session->user_id = 0;
-  session->name.clear();
+  session->principal.reset();
   session->current_directory = "/";
   session->login_state = LoginState::k_await_username;
 
@@ -884,8 +903,7 @@ TransferContext TcpStorageServer::transfer_context(
   return {conn,
           session,
           ++session->transfer_generation,
-          session->user_id,
-          session->name,
+          session->principal,
           session->current_directory,
           _metrics};
 }
@@ -1082,9 +1100,9 @@ void TcpStorageServer::handle_rm(const NET::TcpConnectionPtr& conn,
   auto original = std::weak_ptr<ConnectionSession>(session);
   auto connection = std::weak_ptr<NET::TcpConnection>(conn);
 
-  auto task = std::bind(&TcpStorageServer::remove_file_by_current_dir, this, session->user_id,
-                        session->name, session->current_directory, file_name, original, connection,
-                        conn->get_loop());
+  auto task =
+      std::bind(&TcpStorageServer::remove_file_by_current_dir, this, session->principal,
+                session->current_directory, file_name, original, connection, conn->get_loop());
 
   // 暂时复用此标志，阻止删除期间继续提交普通命令。
   session->directory_change_pending = true;
@@ -1109,13 +1127,13 @@ void TcpStorageServer::handle_rm(const NET::TcpConnectionPtr& conn,
 }
 
 void TcpStorageServer::remove_file_by_current_dir(
-    std::uint64_t user_id, const std::string& username, const std::string& directory,
-    const std::string& file_name, const std::weak_ptr<ConnectionSession>& original,
+    AUTH::PrincipalHandle principal, const std::string& directory, const std::string& file_name,
+    const std::weak_ptr<ConnectionSession>& original,
     const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop) {
   DeleteFileResult outcome = DeleteFileResult::failed;
   // 业务线程：执行数据库删除，不访问会话字段
   try {
-    outcome = _service.delete_file({user_id, username, directory}, file_name);
+    outcome = _service.delete_file({principal, directory}, file_name);
   } catch (...) {
     // MetadataService 已记录失败指标。
     // 在任务入口处理异常，避免异常逃出业务线程。
@@ -1123,7 +1141,7 @@ void TcpStorageServer::remove_file_by_current_dir(
   }
 
   // IO 线程：检查会话、恢复状态并发送结果
-  auto check_task = [this, original, connection, username, directory, outcome] {
+  auto check_task = [this, original, connection, principal, directory, outcome] {
     auto session = original.lock();
     auto conn = connection.lock();
 
@@ -1142,7 +1160,7 @@ void TcpStorageServer::remove_file_by_current_dir(
     }
 
     // 丢弃已经不适用于当前会话状态的结果。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != directory || !session->directory_change_pending) {
       return;
     }
@@ -1217,9 +1235,9 @@ void TcpStorageServer::handle_rename(const NET::TcpConnectionPtr& conn,
 
   auto original = std::weak_ptr<ConnectionSession>(session);
   auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-  auto task = std::bind(&TcpStorageServer::rename_file_by_current_dir, this, session->user_id,
-                        session->name, session->current_directory, old_name, new_name, original,
-                        connection, conn->get_loop());
+  auto task = std::bind(&TcpStorageServer::rename_file_by_current_dir, this, session->principal,
+                        session->current_directory, old_name, new_name, original, connection,
+                        conn->get_loop());
 
   // 提交前设置，防止任务立即完成时 IO 回调看不到本次操作的 pending 状态
   session->directory_change_pending = true;
@@ -1289,9 +1307,9 @@ void TcpStorageServer::handle_move(const NET::TcpConnectionPtr& conn,
 
   auto original = std::weak_ptr<ConnectionSession>(session);
   auto connection = std::weak_ptr<NET::TcpConnection>(conn);
-  auto task = std::bind(&TcpStorageServer::move_file_to_directory, this, session->user_id,
-                        session->name, session->current_directory, target_directory, file_name,
-                        original, connection, conn->get_loop());
+  auto task = std::bind(&TcpStorageServer::move_file_to_directory, this, session->principal,
+                        session->current_directory, target_directory, file_name, original,
+                        connection, conn->get_loop());
 
   // 提交前设置 pending；成功后的清理由业务任务投递的 IO 回调负责。
   session->directory_change_pending = true;
@@ -1316,21 +1334,20 @@ void TcpStorageServer::handle_move(const NET::TcpConnectionPtr& conn,
 }
 
 void TcpStorageServer::rename_file_by_current_dir(
-    std::uint64_t user_id, const std::string& username, const std::string& directory,
-    const std::string& old_name, const std::string& new_name,
-    const std::weak_ptr<ConnectionSession>& original,
+    AUTH::PrincipalHandle principal, const std::string& directory, const std::string& old_name,
+    const std::string& new_name, const std::weak_ptr<ConnectionSession>& original,
     const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop) {
   RenameFileResult outcome = RenameFileResult::failed;
   // 业务线程执行数据库事务；会话字段的检查和修改统一放到 IO 回调中。
   try {
-    outcome = _service.rename_file({user_id, username, directory}, old_name, new_name);
+    outcome = _service.rename_file({principal, directory}, old_name, new_name);
   } catch (...) {
     // 服务层已经记录失败指标，任务入口负责阻止异常逃出业务线程。
     outcome = RenameFileResult::failed;
   }
 
   // 业务方法返回后回调才可能执行，因此捕获参数副本，连接和会话保留弱引用。
-  auto check_task = [this, original, connection, username, directory, outcome] {
+  auto check_task = [this, original, connection, principal, directory, outcome] {
     auto session = original.lock();
     auto conn = connection.lock();
     if (!session || !conn || !conn->connected()) {
@@ -1346,7 +1363,7 @@ void TcpStorageServer::rename_file_by_current_dir(
     }
 
     // 结果只适用于提交任务时的会话身份和当前目录。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != directory || !session->directory_change_pending) {
       return;
     }
@@ -1376,7 +1393,7 @@ void TcpStorageServer::rename_file_by_current_dir(
   io_loop->queue_in_loop(std::move(check_task));
 }
 
-void TcpStorageServer::move_file_to_directory(std::uint64_t user_id, const std::string& username,
+void TcpStorageServer::move_file_to_directory(AUTH::PrincipalHandle principal,
                                               const std::string& source_directory,
                                               const std::string& target_directory,
                                               const std::string& file_name,
@@ -1385,15 +1402,14 @@ void TcpStorageServer::move_file_to_directory(std::uint64_t user_id, const std::
                                               NET::EventLoop* io_loop) {
   MoveFileResult outcome = MoveFileResult::failed;
   try {
-    outcome =
-        _service.move_file({user_id, username, source_directory}, target_directory, file_name);
+    outcome = _service.move_file({principal, source_directory}, target_directory, file_name);
   } catch (...) {
     // 服务层负责失败指标；任务入口捕获异常，保证结果仍能交回 IO 线程。
     outcome = MoveFileResult::failed;
   }
 
   // 回调晚于业务方法返回，必须捕获参数副本；连接和会话继续保持弱引用。
-  auto check_task = [this, original, connection, username, source_directory, outcome] {
+  auto check_task = [this, original, connection, principal, source_directory, outcome] {
     auto session = original.lock();
     auto conn = connection.lock();
     if (!session || !conn || !conn->connected()) {
@@ -1409,7 +1425,7 @@ void TcpStorageServer::move_file_to_directory(std::uint64_t user_id, const std::
     }
 
     // 只处理发起移动时的会话和源目录，过期结果不能影响后来的会话。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != source_directory || !session->directory_change_pending) {
       return;
     }
@@ -1488,9 +1504,8 @@ void TcpStorageServer::handle_rmdir(const NET::TcpConnectionPtr& conn,
   auto operation = recursive ? &TcpStorageServer::remove_directory_tree_by_current_dir
                              : &TcpStorageServer::remove_empty_directory_by_current_dir;
 
-  auto task =
-      std::bind(operation, this, session->user_id, session->name, session->current_directory,
-                directory_name, original, connection, conn->get_loop());
+  auto task = std::bind(operation, this, session->principal, session->current_directory,
+                        directory_name, original, connection, conn->get_loop());
   session->directory_change_pending = true;
 
   bool accepted = false;
@@ -1513,19 +1528,19 @@ void TcpStorageServer::handle_rmdir(const NET::TcpConnectionPtr& conn,
 }
 
 void TcpStorageServer::remove_empty_directory_by_current_dir(
-    std::uint64_t user_id, const std::string& username, const std::string& directory,
+    AUTH::PrincipalHandle principal, const std::string& directory,
     const std::string& directory_name, const std::weak_ptr<ConnectionSession>& original,
     const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop) {
   DeleteDirectoryResult outcome = DeleteDirectoryResult::failed;
 
   try {
-    outcome = _service.delete_empty_directory({user_id, username, directory}, directory_name);
+    outcome = _service.delete_empty_directory({principal, directory}, directory_name);
   } catch (...) {
     // MetadataService 已记录失败指标。
     // 在任务入口捕获异常，避免异常逃出业务线程。
     outcome = DeleteDirectoryResult::failed;
   }
-  auto check_task = [this, original, connection, username, directory, outcome] {
+  auto check_task = [this, original, connection, principal, directory, outcome] {
     auto session = original.lock();
     auto conn = connection.lock();
 
@@ -1544,7 +1559,7 @@ void TcpStorageServer::remove_empty_directory_by_current_dir(
     }
 
     // 丢弃已经不适用于当前会话状态的结果。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != directory || !session->directory_change_pending) {
       return;
     }
@@ -1585,19 +1600,19 @@ void TcpStorageServer::remove_empty_directory_by_current_dir(
 }
 
 void TcpStorageServer::remove_directory_tree_by_current_dir(
-    std::uint64_t user_id, const std::string& username, const std::string& directory,
+    AUTH::PrincipalHandle principal, const std::string& directory,
     const std::string& directory_name, const std::weak_ptr<ConnectionSession>& original,
     const std::weak_ptr<NET::TcpConnection>& connection, NET::EventLoop* io_loop) {
   DeleteDirectoryTreeResult outcome = DeleteDirectoryTreeResult::failed;
 
   try {
-    outcome = _service.delete_directory_tree({user_id, username, directory}, directory_name);
+    outcome = _service.delete_directory_tree({principal, directory}, directory_name);
   } catch (...) {
     // MetadataService 已记录失败指标。
     // 在任务入口捕获异常，避免异常逃出业务线程。
     outcome = DeleteDirectoryTreeResult::failed;
   }
-  auto check_task = [this, original, connection, username, directory, outcome] {
+  auto check_task = [this, original, connection, principal, directory, outcome] {
     auto session = original.lock();
     auto conn = connection.lock();
 
@@ -1616,7 +1631,7 @@ void TcpStorageServer::remove_directory_tree_by_current_dir(
     }
 
     // 丢弃已经不适用于当前会话状态的结果。
-    if (session->login_state != LoginState::k_authenticated || session->name != username ||
+    if (session->login_state != LoginState::k_authenticated || session->principal != principal ||
         session->current_directory != directory || !session->directory_change_pending) {
       return;
     }

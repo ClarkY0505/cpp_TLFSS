@@ -267,7 +267,11 @@ foreach(scenario IN ITEMS
         cd_command_query_exception cd_command_nonstandard_exception
         cd_command_stale_session cd_command_expired_session cd_command_missing_session
         cd_command_stale_identity cd_command_stale_directory cd_command_stale_login cd_command_stale_pending
-        cd_command_disconnect cd_command_stopping)
+        cd_command_disconnect cd_command_stopping cd_command_stale_principal
+        mkdir_stale_principal principal_ls_reauth principal_transfer_reauth principal_disconnect_lifetime
+        mkdir_committed_after_cd mkdir_unknown_after_cd principal_ls_after_cd
+        auth_identity_success auth_identity_missing auth_identity_foreign
+        auth_identity_failed auth_identity_stale)
     add_test(NAME ftp_transfer_${scenario} COMMAND test_ftp_transfer ${scenario})
     set_tests_properties(ftp_transfer_${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
@@ -692,3 +696,15 @@ if(Python3_Interpreter_FOUND)
                 $<TARGET_FILE:storage-monitor-collector>)
     set_tests_properties(storage_collector_smoke PROPERTIES TIMEOUT 30)
 endif()
+
+# Real authentication and password hashing with an in-process user repository.
+add_executable(test_authenticated_principal
+    test_authenticated_principal.cpp
+    ${PROJECT_SOURCE_DIR}/src/auth/auth_service.cpp
+    ${PROJECT_SOURCE_DIR}/src/auth/password_hasher.cpp
+)
+add_dependencies(test_authenticated_principal prepare_runtime_directories)
+target_include_directories(test_authenticated_principal PRIVATE ${PROJECT_SOURCE_DIR}/inc)
+target_link_libraries(test_authenticated_principal PRIVATE OpenSSL::Crypto)
+add_test(NAME authenticated_principal_test COMMAND test_authenticated_principal)
+set_tests_properties(authenticated_principal_test PROPERTIES TIMEOUT 15)

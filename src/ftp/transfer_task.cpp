@@ -15,8 +15,8 @@ TransferContext::Current TransferContext::current() const {
   }
   assert(conn->get_loop()->is_in_loop_thread());
   if (original->transfer_generation != generation ||
-      original->login_state != LoginState::k_authenticated || original->user_id != user_id ||
-      original->name != username || original->current_directory != directory) {
+      original->login_state != LoginState::k_authenticated || !principal ||
+      original->principal != principal || original->current_directory != directory) {
     return {};
   }
   return {std::move(conn), std::move(original)};

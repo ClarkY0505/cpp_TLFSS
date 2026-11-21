@@ -40,8 +40,7 @@ void UploadTask::start() {
   auto* loop = conn->get_loop();
   auto* service = &_service;
   const auto* stopping = &_stopping;
-  const auto context =
-      StorageRequestContext{_context.user_id, _context.username, _context.directory};
+  const auto context = StorageRequestContext{_context.principal, _context.directory};
   const bool accepted =
       _workers.try_run([weak, loop, service, stopping, context, request = _request] {
         StorageContext<std::string> parent;
@@ -86,8 +85,7 @@ void UploadTask::on_prepared(StorageContext<std::string> parent, std::string err
     return service->create_temporary_upload(size);
   };
   auto finalizer =
-      [service,
-       context = StorageRequestContext{_context.user_id, _context.username, _context.directory},
+      [service, context = StorageRequestContext{_context.principal, _context.directory},
        name = _request.name, parent_id = std::move(parent.result)](Transfer::Receiver& receiver) {
         return service->commit_upload(context, parent_id, name, receiver);
       };
@@ -194,10 +192,9 @@ void DownloadTask::start() {
     return;
   _started = true;
   metrics_start(false);
-  auto factory =
-      [service = &_service,
-       context = StorageRequestContext{_context.user_id, _context.username, _context.directory},
-       name = _name]() -> Transfer::AsyncFileSource::Opened {
+  auto factory = [service = &_service,
+                  context = StorageRequestContext{_context.principal, _context.directory},
+                  name = _name]() -> Transfer::AsyncFileSource::Opened {
     auto object = service->open_download(context, name);
     return {std::move(object.source), std::move(object.hash)};
   };

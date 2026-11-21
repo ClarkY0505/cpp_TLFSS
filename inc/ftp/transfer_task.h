@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "auth/authenticated_principal.h"
 #include "common/net/tcp_connection.h"
 #include "observability/storage_metrics.h"
 
@@ -29,8 +30,7 @@ struct TransferContext {
   std::weak_ptr<NET::TcpConnection> connection;
   std::weak_ptr<ConnectionSession> session;
   std::uint64_t generation = 0;
-  std::uint64_t user_id = 0;
-  std::string username;
+  AUTH::PrincipalHandle principal;
   std::string directory;
   std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics;
 

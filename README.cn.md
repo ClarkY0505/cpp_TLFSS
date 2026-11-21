@@ -336,6 +336,12 @@ signup → 用户名 → 密码 → 确认密码 → registering
 
 [AuthService](src/auth/auth_service.cpp) 负责输入校验、用户名规范化和结果映射，[MySqlUserRepository](src/auth/user_repository.cpp) 负责用户数据访问。注册用户名为 3–64 个 ASCII 字母、数字或下划线，存储前转换为小写；密码为 8–128 字节，不裁剪空格，拒绝控制字符。
 
+密码验证成功后，`AuthService` 签发只读的 [AuthenticatedPrincipal](inc/auth/authenticated_principal.h)，绑定数据库返回的用户 ID 和规范化用户名。`AuthResult` 携带对应的 `PrincipalHandle`；注册回执不能作为登录身份。每个 AuthService 都有独立的私有签发标识，`owns()` 无需查询用户表即可验证身份句柄。TCP 登录完成时同时检查成功状态和身份是否来自预期的签发方。
+
+[StorageRequestContext](inc/ftp/storage_request.h) 只携带该身份句柄和请求目录，不再包含可自行填写的用户 ID 或用户名。StorageService 及上传/下载引擎在访问元数据或发布对象前检查签发方和目录格式；元数据查询仍然优先命中缓存。IO 完成回调比较身份句柄，即使同一用户重新登录，旧登录的回调也会失效。
+
+连接断开时取消未完成的传输，并释放会话持有的身份引用；已接纳的异步任务保留自己的引用，最后一个引用释放时自动销毁身份对象。已经开始执行的上传最终提交仍按现有规则收尾。这是进程内身份对象，尚无过期或撤销注册表，也不是可通过网络传递的令牌；未来 RPC 入口仍需先认证远程调用者，再取得身份句柄。
+
 [PasswordHasher](src/auth/password_hasher.cpp) 使用 16 字节随机盐、600000 次 PBKDF2-HMAC-SHA256 迭代、32 字节派生结果，以及带版本和迭代次数的编码格式；校验通过 `CRYPTO_memcmp` 比较。哈希计算先于注册事务借用数据库连接，减少连接占用时间。
 
 并发注册由数据库用户名唯一索引裁决。提交确认丢失时返回“结果未知”，提示先尝试登录；不自动重试注册。认证完成回调使用弱引用、会话匹配和 `auth_attempt` 检查，避免过期结果覆盖当前状态。
@@ -1103,7 +1109,7 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 | 文件传输与服务处理器 | 真实服务端/客户端传输处理器，以及文件/目录修改和启动恢复；分块读写、哈希、发布、失败、取消、过期回调与停机；使用数据库/认证替代实现 |
 | 交互客户端 | `test_ftp_client.py` 使用伪终端与测试服务端交互，目前未注册到 CTest |
 | 业务分层 | 无 socket 的 `storage_workflows_test` 验证业务协调、非法上下文、真实对象复用/读取、提交结果和指标；Python `storage_business_boundaries` 验证公共头依赖闭包 |
-| 认证和数据库 | 已注册 `signup_transaction_boundary_test`，以数据库替代实现验证真实仓储和根目录创建共用事务、回滚及提交结果未知；其余认证服务、仓储、注册、事务和预处理语句测试源码尚未注册，部分要求真实测试数据库 |
+| 认证和数据库 | [authenticated_principal_test](tests/test_authenticated_principal.cpp) 使用真实密码验证，覆盖身份签发、签发方隔离、凭据拒绝和共享身份生命周期。已注册 `signup_transaction_boundary_test`，以数据库替代实现验证真实仓储和根目录创建共用事务、回滚及提交结果未知；其余认证服务、仓储、注册、事务和预处理语句测试源码尚未注册，部分要求真实测试数据库 |
 | 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke；业务指标、资源采样、运行时 schema/阈值/生命周期与 Collector 进程 smoke |
 | 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
 
@@ -1124,7 +1130,7 @@ ctest --test-dir build-tests --output-on-failure -R '^(storage_metrics_test|syst
 
 可使用 `ctest --test-dir build-tests -N` 查看该构建目录注册的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake。
 
-**本地验证快照 — 2026-11-21：** 全部 Debug 目标构建成功；环境提供 Python 3、未找到 GoogleTest，全部 946 项已注册 CTest 用例通过，包括 310 项 FTP 传输/服务场景，以及新增的无 socket 业务工作流和公共头依赖检查。网络与监控用例在允许本机套接字的环境运行。测试使用临时文件和数据库替代实现；未运行真实 MySQL/客户端端到端测试、Sanitizer 或性能基准。快照对应包含未提交改动的已核查工作区，数量随配置和版本变化。
+**本地验证快照 — 2026-11-21：** 全部 Debug 目标构建成功；环境提供 Python 3、未找到 GoogleTest，全部 960 项已注册 CTest 用例通过，包括 323 项 FTP 传输/服务场景、认证身份签发检查，以及无 socket 业务工作流和公共头依赖检查。网络与监控用例在允许本机套接字的环境运行。测试使用临时文件和数据库替代实现；未运行真实 MySQL/客户端端到端测试、Sanitizer 或性能基准。快照对应包含未提交改动的已核查工作区，数量随配置和版本变化。
 
 未注册的 MySQL 集成测试源码使用 `TLSS_TEST_MYSQL_HOST`、`TLSS_TEST_MYSQL_USER`、`TLSS_TEST_MYSQL_PASSWORD`、`TLSS_TEST_MYSQL_DATABASE`，以及可选的 `TLSS_TEST_MYSQL_PORT`。注册端到端测试另需 `TLSS_TEST_FTP_SIGNUP=1`，并使用服务连接池配置。请使用专门的测试数据库；未配置环境时部分用例会跳过，跳过不等于验证成功。当前仍有旧测试接口失配，见[待收尾事项](#当前限制与待收尾事项)。
 
@@ -1142,6 +1148,8 @@ ctest --test-dir build-tests --output-on-failure -R '^(storage_metrics_test|syst
 10. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
 
 本次重构新增 `storage_workflows_test` 和 `storage_business_boundaries`，可用 `ctest --test-dir build-tests --output-on-failure -R "^storage_(workflows_test|business_boundaries)$"` 运行。可执行程序入口现构造 `StorageRuntime`；使用旧网络版 StorageService 构造函数的 C++ 调用方需要迁移到 StorageRuntime，或显式注入引擎来构造纯业务服务；注入的引擎必须活到业务服务及调用它的任务结束。
+
+C++ 业务调用方现在应从成功的 `StorageService::authenticate()` 结果构造 `StorageRequestContext{login.principal, directory}`，不再支持原始的 `{user_id, username, directory}`。UploadEngine 和 DownloadEngine 的首个构造参数须注入同一个 AuthService，并保证它活到引擎使用结束。`ConnectionSession` 改为保存 `principal`，通过只读的 `username()` 访问用户名。可用 `ctest --test-dir build-tests --output-on-failure -R "^(authenticated_principal_test|storage_workflows_test|storage_business_boundaries)$"` 运行独立的身份签发和业务检查。
 
 部分导学笔记描述的是早期版本；内容有差异时，请核对其标注的源码基线，并以当前实现和 CMake 注册项为准。
 

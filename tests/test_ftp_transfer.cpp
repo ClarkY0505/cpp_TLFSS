@@ -141,6 +141,7 @@ std::thread::id rm_io_thread;
 const std::string rm_filename = "report with spaces.txt";
 // mkdir 使用独立替代状态，验证新三态接口从命令分发一直传递到网络响应。
 std::atomic<bool> mkdir_mode{false}, mkdir_exists{false}, mkdir_pending_insert{false};
+bool ls_directory_change = false;
 std::atomic<int> mkdir_borrows{0}, mkdir_queries{0}, mkdir_inserts{0};
 int mkdir_failure = 0;  // 1 SQL 失败，2 零行，3 标准异常，4 非标准异常，5 父目录不存在。
 bool mkdir_unknown_applies = false;
@@ -508,6 +509,17 @@ DbQueryResult DbConnection::query_prepared(const std::string& sql,
   if (sql.find("f.object_hash") != std::string::npos) {
     return {true, {{abc_hash}}};
   }
+  if (ls_directory_change) {
+    if (sql.find("SELECT id FROM virtual_files ") == 0) {
+      check(params == std::vector<DbValue>{"test_user", "/"},
+            "ls did not query the captured directory");
+      return {true, {{"42"}}};
+    }
+    check(sql.find("select file_name , file_type , created_at , updated_at ") == 0 &&
+              params == std::vector<DbValue>{"test_user", "42"},
+          "ls did not list children of the captured directory");
+    return {true, {{"entry.bin", "file", "created", "updated"}}};
+  }
   return {true, {{std::string("42")}}};
 }
 bool DbConnection::update_prepared(const std::string&, const std::vector<DbValue>&) {
@@ -763,8 +775,15 @@ UserCreateResult MySqlUserRepository::create_user_with_root(const std::string&,
 }
 AuthService::AuthService(UserRepository& users)
     : users_(users) {}
-AuthResult AuthService::authenticate(const LoginRequest&) const {
-  return {static_cast<AuthStatus>(auth_status.load()), 1, "test_user"};
+AuthResult AuthService::authenticate(const LoginRequest& request) const {
+  const auto status = static_cast<AuthStatus>(auth_status.load());
+  if (status != AuthStatus::k_authenticated)
+    return {status, {}};
+  const bool second = request.username == "second_user";
+  const auto name = request.username == "another_user" ? "another_user"
+                    : second                           ? "second_user"
+                                                       : "test_user";
+  return {status, PrincipalHandle(new AuthenticatedPrincipal(second ? 2 : 1, name, _issuer))};
 }
 SignupResult AuthService::signup(const SignupRequest&) const {
   return {static_cast<SignupStatus>(signup_status.load()), 1, "test_user"};
@@ -830,8 +849,7 @@ struct Fixture {
     conn->connect_established();
     session = service._server._sessions.at(conn.get());
     session->login_state = LoginState::k_authenticated;
-    session->name = "test_user";
-    session->user_id = 1;
+    session->principal = authenticated_identity();
     drain();
     read_wire();
   }
@@ -846,6 +864,15 @@ struct Fixture {
     service._server._sessions.clear();
     if (peer >= 0)
       ::close(peer);
+  }
+
+  AUTH::PrincipalHandle authenticated_identity(const std::string& name = "test_user") {
+    const auto old_status = auth_status.exchange(0);
+    auto result = service._auth_service.authenticate({name, "password1"});
+    auth_status.store(old_status);
+    check(result.principal && service._service.accepts_identity(result.principal),
+          "fixture failed to authenticate an identity");
+    return std::move(result.principal);
   }
 
   void drain() {
@@ -1614,7 +1641,7 @@ void check_rm(const std::string& scenario, const std::string& directory) {
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rm_stale_identity") {
-      fixture.session->name = "another_user";
+      fixture.session->principal = fixture.authenticated_identity("another_user");
     } else if (scenario == "rm_stale_directory") {
       fixture.session->current_directory = "/changed";
     } else if (scenario == "rm_stale_login") {
@@ -1875,9 +1902,9 @@ void check_rename_task(const std::string& requested_scenario, const std::string&
     const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
     const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
     auto task =
-        std::bind(&TcpStorageServer::rename_file_by_current_dir, &fixture.service._server, fixture.session->user_id,
-                  fixture.session->name, fixture.session->current_directory, rename_task_old_name,
-                  rename_task_new_name, original, connection, &fixture.loop);
+        std::bind(&TcpStorageServer::rename_file_by_current_dir, &fixture.service._server,
+                  fixture.session->principal, fixture.session->current_directory,
+                  rename_task_old_name, rename_task_new_name, original, connection, &fixture.loop);
     // 直接测试任务时模拟 IO 入口：提交之前设置 pending。
     fixture.session->directory_change_pending = true;
     check(fixture.service._th_pool.try_run(std::move(task)),
@@ -1910,7 +1937,7 @@ void check_rename_task(const std::string& requested_scenario, const std::string&
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rename_task_stale_identity") {
-      fixture.session->name = "another_user";
+      fixture.session->principal = fixture.authenticated_identity("another_user");
     } else if (scenario == "rename_task_stale_directory") {
       fixture.session->current_directory = "/changed";
     } else if (scenario == "rename_task_stale_login") {
@@ -2164,7 +2191,9 @@ void check_cd_command(const std::string& scenario) {
       std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
       fixture.service._server._sessions.erase(fixture.conn.get());
     } else if (scenario == "cd_command_stale_identity") {
-      fixture.session->name = "another_user";
+      fixture.session->principal = fixture.authenticated_identity("another_user");
+    } else if (scenario == "cd_command_stale_principal") {
+      fixture.session->principal = fixture.authenticated_identity();
     } else if (scenario == "cd_command_stale_directory") {
       fixture.session->current_directory = "/changed";
     } else if (scenario == "cd_command_stale_login") {
@@ -2183,7 +2212,7 @@ void check_cd_command(const std::string& scenario) {
   }
   // 所有会话修改都在 IO 线程进行；数据库完成后只能由排队的 IO 回调消费结果。
   const auto directory_before = fixture.session->current_directory;
-  const auto name_before = fixture.session->name;
+  const auto name_before = fixture.session->username();
   const auto login_before = fixture.session->login_state;
   const bool pending_before = fixture.session->directory_change_pending;
   fixture.service._th_pool.stop();
@@ -2200,7 +2229,7 @@ void check_cd_command(const std::string& scenario) {
     check(fixture.read_wire().empty(), "obsolete cd completion replied through an invalid session");
     if (stale) {
       check(fixture.session->current_directory == directory_before &&
-                fixture.session->name == name_before &&
+                fixture.session->username() == name_before &&
                 fixture.session->login_state == login_before &&
                 fixture.session->directory_change_pending == pending_before,
             "obsolete cd completion changed the current session");
@@ -2316,7 +2345,7 @@ void check_move_parse(const std::string& scenario) {
             move_task.updates.load() == 0 && upload_commits.load() == 0 &&
             upload_rollbacks.load() == 0,
         "rejected move input reached the database");
-  check(fixture.session->name == "test_user" && fixture.session->current_directory == "/" &&
+  check(fixture.session->username() == "test_user" && fixture.session->current_directory == "/" &&
             fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 0,
         "rejected move input changed identity, current directory or metadata failure metrics");
 }
@@ -2464,8 +2493,8 @@ void check_move_task(const std::string& requested_scenario, const std::string& d
   } else {
     const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
     const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
-    auto task = std::bind(&TcpStorageServer::move_file_to_directory, &fixture.service._server, fixture.session->user_id,
-                          fixture.session->name, fixture.session->current_directory,
+    auto task = std::bind(&TcpStorageServer::move_file_to_directory, &fixture.service._server,
+                          fixture.session->principal, fixture.session->current_directory,
                           move_task.target, rm_filename, original, connection, &fixture.loop);
     // 直接测试业务任务时，模拟 IO 入口在提交前设置 pending。
     fixture.session->directory_change_pending = true;
@@ -2499,7 +2528,7 @@ void check_move_task(const std::string& requested_scenario, const std::string& d
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "move_task_stale_identity") {
-      fixture.session->name = "another_user";
+      fixture.session->principal = fixture.authenticated_identity("another_user");
     } else if (scenario == "move_task_stale_directory") {
       fixture.session->current_directory = "/changed";
     } else if (scenario == "move_task_stale_login") {
@@ -2770,7 +2799,7 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rmdir_stale_identity") {
-      fixture.session->name = "another_user";
+      fixture.session->principal = fixture.authenticated_identity("another_user");
     } else if (scenario == "rmdir_stale_directory") {
       fixture.session->current_directory = "/changed";
     } else if (scenario == "rmdir_stale_login") {
@@ -2873,7 +2902,9 @@ void check_mkdir(const std::string& scenario) {
   mkdir_io_thread = std::this_thread::get_id();
   Fixture fixture(1, 1);  // 使用真实业务线程，禁止借用零线程同步模式掩盖 IO 阻塞。
   CommitRelease release;
-  const std::string prompt = "tlss@test_user:/>";
+  const bool changed_directory = scenario == "mkdir_committed_after_cd" ||
+                                 scenario == "mkdir_unknown_after_cd";
+  const std::string prompt = changed_directory ? "tlss@test_user:/changed>" : "tlss@test_user:/>";
   if (scenario == "mkdir_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
     fixture.receive("mkdir drafts\n");
@@ -2905,8 +2936,9 @@ void check_mkdir(const std::string& scenario) {
     return;
   }
 
-  const bool unknown =
-      scenario == "mkdir_unknown_applied" || scenario == "mkdir_unknown_not_applied";
+  const bool unknown = scenario == "mkdir_unknown_applied" ||
+                       scenario == "mkdir_unknown_not_applied" ||
+                       scenario == "mkdir_unknown_after_cd";
   upload_outcome_unknown.store(unknown);
   mkdir_unknown_applies = scenario == "mkdir_unknown_applied";
   if (scenario == "mkdir_sql_failure")
@@ -2920,7 +2952,8 @@ void check_mkdir(const std::string& scenario) {
   if (scenario == "mkdir_missing_parent")
     mkdir_failure = 5;
   const bool invalid = scenario == "mkdir_invalid";
-  const bool gated = scenario == "mkdir_pending" || scenario == "mkdir_disconnect";
+  const bool gated = scenario == "mkdir_pending" || scenario == "mkdir_disconnect" ||
+                     scenario == "mkdir_stale_principal" || changed_directory;
   if (gated)
     commit_gate.enabled = true;
   fixture.receive(invalid ? "mkdir ../drafts\n" : "mkdir drafts\n");
@@ -2936,6 +2969,10 @@ void check_mkdir(const std::string& scenario) {
       const auto wire = fixture.await_wire(prompt);
       check(wire.find("Directory created.") == std::string::npos,
             "mkdir replied before the blocked transaction finished");
+    } else if (scenario == "mkdir_stale_principal") {
+      fixture.session->principal = fixture.authenticated_identity();
+    } else if (changed_directory) {
+      fixture.session->current_directory = "/changed";
     } else {
       fixture.conn->force_close();
       fixture.until([&] {
@@ -2946,10 +2983,14 @@ void check_mkdir(const std::string& scenario) {
   }
 
   const bool failed = invalid || mkdir_failure != 0;
-  if (scenario == "mkdir_disconnect") {
+  if (scenario == "mkdir_disconnect" || scenario == "mkdir_stale_principal") {
     fixture.service._th_pool.stop();
     fixture.drain();
-    check(fixture.read_wire().empty(), "mkdir replied through a disconnected connection");
+    fixture.until([&] {
+      return !fixture.conn->_channel->is_writing();
+    });
+    check(fixture.read_wire().empty(),
+          "mkdir replied through a disconnected or reauthenticated session");
   } else {
     // send() 还需要 IO loop 排空发送队列，必须等到完整提示符再检查响应。
     const auto wire = fixture.await_wire(prompt);
@@ -3298,7 +3339,90 @@ void run(const std::string& scenario, const std::string& directory) {
     return;
   }
 
-  Fixture fixture(scenario == "metrics_auth" ? 1 : 0);
+  ls_directory_change = scenario == "principal_ls_after_cd";
+  const bool ls_reauth = scenario == "principal_ls_reauth";
+  Fixture fixture(scenario == "metrics_auth" || ls_reauth || ls_directory_change ? 1 : 0);
+  if (ls_reauth || ls_directory_change) {
+    fixture.service._server.handle_ls(fixture.conn, fixture.session);
+    fixture.service._th_pool.stop();
+    if (ls_reauth)
+      fixture.session->principal = fixture.authenticated_identity();
+    else
+      fixture.session->current_directory = "/changed";
+    fixture.drain();
+    fixture.until([&] {
+      return !fixture.conn->_channel->is_writing();
+    });
+    const auto wire = fixture.read_wire();
+    if (ls_reauth) {
+      check(wire.empty(), "ls replied to a new login with an old login's result");
+    } else {
+      check(wire == "entry.bin  file       created  updated\r\ntlss@test_user:/changed>",
+            "ls did not send the captured directory listing with the current directory prompt");
+    }
+    return;
+  }
+  if (scenario.rfind("auth_identity_", 0) == 0) {
+    const auto original = fixture.session->principal;
+    auto issued = fixture.authenticated_identity();
+    AUTH::AuthResult result{AUTH::AuthStatus::k_authenticated, issued};
+    if (scenario == "auth_identity_missing") {
+      result.principal.reset();
+    } else if (scenario == "auth_identity_foreign") {
+      AUTH::AuthService foreign(fixture.service._user_repository);
+      auth_status.store(0);
+      result = foreign.authenticate({"test_user", "password1"});
+      check(result.principal && !fixture.service._service.accepts_identity(result.principal),
+            "foreign identity test did not produce a foreign principal");
+    } else if (scenario == "auth_identity_failed") {
+      result.status = AUTH::AuthStatus::k_invalid_credentials;
+    }
+    fixture.session->login_state = LoginState::k_verifying;
+    fixture.session->auth_attempt = 7;
+    fixture.service._server.finish_authentication(
+        fixture.session, fixture.conn, scenario == "auth_identity_stale" ? 6 : 7, result);
+    fixture.drain();
+    const auto wire = fixture.read_wire();
+    if (scenario == "auth_identity_success") {
+      check(fixture.session->login_state == LoginState::k_authenticated &&
+                fixture.session->principal == issued && wire.find("AUTH_OK") != std::string::npos,
+            "valid authenticated identity did not establish the session");
+    } else if (scenario == "auth_identity_stale") {
+      check(fixture.session->principal == original &&
+                fixture.session->login_state == LoginState::k_verifying && wire.empty(),
+            "stale authentication callback replaced the session identity");
+    } else {
+      check(fixture.session->login_state != LoginState::k_authenticated &&
+                !fixture.session->principal && wire.find("AUTH_OK") == std::string::npos,
+            "unauthenticated or foreign identity established a session");
+    }
+    return;
+  }
+  if (scenario == "principal_transfer_reauth") {
+    const auto captured = fixture.service._server.transfer_context(fixture.conn, fixture.session);
+    check(captured.current().first == fixture.conn, "current principal was rejected");
+    const auto old = fixture.session->principal;
+    fixture.session->principal = fixture.authenticated_identity();
+    check(old != fixture.session->principal &&
+              old->user_id() == fixture.session->principal->user_id() &&
+              old->username() == fixture.session->username(),
+          "test did not simulate same-user login");
+    check(!captured.current().first, "old transfer accepted a new login of the same user");
+    return;
+  }
+  if (scenario == "principal_disconnect_lifetime") {
+    std::weak_ptr<const AUTH::AuthenticatedPrincipal> observed = fixture.session->principal;
+    StorageRequestContext admitted{fixture.session->principal, "/"};
+    fixture.conn->force_close();
+    fixture.until([&] {
+      return fixture.conn->disconnected();
+    });
+    fixture.session.reset();
+    check(!observed.expired(), "disconnect destroyed an identity still used by admitted work");
+    admitted.principal.reset();
+    check(observed.expired(), "unused disconnected identity was retained");
+    return;
+  }
   if (scenario == "cold_send" || scenario == "source_cancel") {
     check_cold_send(fixture, directory, scenario == "source_cancel");
     return;
@@ -3530,8 +3654,7 @@ void run(const std::string& scenario, const std::string& directory) {
     second->connect_established();
     auto session = fixture.service._server._sessions.at(second.get());
     session->login_state = LoginState::k_authenticated;
-    session->name = "second_user";
-    session->user_id = 2;
+    session->principal = fixture.authenticated_identity("second_user");
     fixture.read_wire(sockets[1]);
     fixture.service._server.handle_upload(fixture.conn, fixture.session, "3 \"first.bin\"");
     fixture.service._server.handle_upload(second, session, "3 \"second.bin\"");

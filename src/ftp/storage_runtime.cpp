@@ -24,8 +24,9 @@ StorageRuntime::StorageRuntime(NET::EventLoop* loop, const NET::InetAddress& add
     , _object_gc(*_db_conn_pool, _object_storage, _object_coordinator)
     , _object_gc_worker(_object_gc)
     , _recovery(*_db_conn_pool, _object_storage, _object_coordinator, _object_gc)
-    , _upload_engine(_metadata_service, _object_storage, _object_coordinator, _metrics)
-    , _download_engine(_metadata_service, _object_storage)
+    , _upload_engine(_auth_service, _metadata_service, _object_storage, _object_coordinator,
+                     _metrics)
+    , _download_engine(_auth_service, _metadata_service, _object_storage)
     , _service(_auth_service, _metadata_service, _upload_engine, _download_engine)
     , _server(loop, address, name, io_threads, _th_pool, _disk_executor, _service, _stopping,
               _metrics) {
