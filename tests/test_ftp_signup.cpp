@@ -1,5 +1,5 @@
 #include "common/base/mysql_connection.h"
-#include "ftp/server.h"
+#include "ftp/storage_runtime.h"
 #include "logger/logger.h"
 
 #include <arpa/inet.h>
@@ -149,7 +149,7 @@ TEST(FtpSignupIntegrationTest, RegistersLogsInListsAndSerializesDuplicateNames) 
   {
     TLSS::NET::EventLoop loop;
     const auto port = available_port();
-    TLSS::FileStorage::StorageService server(&loop, TLSS::NET::InetAddress(port), "signup-test", 2,
+    TLSS::FileStorage::StorageRuntime server(&loop, TLSS::NET::InetAddress(port), "signup-test", 2,
                                              2, 16);
     server.start();
     std::thread controller([&] {

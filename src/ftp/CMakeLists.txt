@@ -25,14 +25,22 @@ add_library(metadata_lib
 )
 target_link_libraries(metadata_lib PUBLIC common_lib)
 
+add_library(storage_business_lib
+    server.cpp
+    upload_engine.cpp
+    download_engine.cpp
+)
+target_link_libraries(storage_business_lib PUBLIC auth_lib metadata_lib transfer_lib)
+
 add_library(ftp_lib
     object_gc_worker.cpp
     object_garbage_collector.cpp
     object_backfill.cpp
     transfer_task.cpp
-    upload_engine.cpp
-    download_engine.cpp
-    server.cpp
+    tcp_storage_server.cpp
+    tcp_transfer_tasks.cpp
+    storage_runtime.cpp
+    storage_recovery_engine.cpp
     client.cpp
 )
-target_link_libraries(ftp_lib PUBLIC metadata_lib transfer_lib common_lib auth_lib rpc_lib OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(ftp_lib PUBLIC storage_business_lib metadata_lib transfer_lib common_lib auth_lib rpc_lib OpenSSL::SSL OpenSSL::Crypto)

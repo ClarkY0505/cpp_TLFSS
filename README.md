@@ -182,24 +182,34 @@ The collector is started separately. Its management CLI and the business client'
 ```mermaid
 flowchart TD
     Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
-    Network --> Service[StorageService]
-    Service --> Session[ConnectionSession / active TransferTask]
+    Network --> Adapter[TcpStorageServer]
+    Adapter --> Service[StorageService]
+    Adapter --> Tasks[UploadTask / DownloadTask]
+    Tasks --> Service
+    ApplicationRuntime[StorageRuntime] -.owns.-> Adapter
+    ApplicationRuntime -.assembles.-> Service
+    ApplicationRuntime --> Recovery[StorageRecoveryEngine]
+    Recovery --> Pool
+    Recovery --> Objects
+    Adapter --> Session[ConnectionSession / active TransferTask]
     Service --> Auth[AuthService / UserRepository]
-    Service --> Upload[UploadEngine / UploadTask]
-    Service --> Download[DownloadEngine / DownloadTask]
+    Service --> Upload[UploadEngine]
+    Service --> Download[DownloadEngine]
     Service --> Metadata[MetadataService]
     Upload --> Metadata
+    Upload --> Objects
     Download --> Metadata
+    Download --> Objects
     Auth --> Root[create_root_in_transaction]
-    Upload --> Receiver[AsyncReceiver]
-    Download --> Source[AsyncFileSource / send_file_async]
+    Tasks --> Receiver[AsyncReceiver]
+    Tasks --> Source[AsyncFileSource / send_file_async]
     Receiver --> Objects[ObjectStorageEngine / VerifyEngine]
     Source --> Objects
     Objects --> Filesystem[Local SHA-256 objects]
     Metadata --> Cache[MetadataCache / HashArcCache]
     Cache --> Scopes[Directory gates / subtree coordination]
     Metadata --> Pool[DbConnectionPool]
-    Service --> GC[ObjectGcWorker / ObjectGarbageCollector]
+    ApplicationRuntime --> GC[ObjectGcWorker / ObjectGarbageCollector]
     GC --> Objects
     GC --> Pool
     Upload --> ObjectLock[ObjectCoordinator / hash locks]
@@ -209,7 +219,7 @@ flowchart TD
     Root -->|same transaction connection| MySQL
     Network --> Writes[WriteScheduler / outbound FIFO]
     Source --> Writes
-    Service --> Metrics[Atomic business metrics]
+    ApplicationRuntime --> Metrics[Atomic business metrics]
     Metadata --> Metrics
     Objects --> Metrics
     Metrics --> Runtime[StorageMonitorRuntime]
@@ -223,7 +233,7 @@ flowchart TD
 
 The diagram shows the current implementation. The main service uses the custom TCP library directly; `src/gateway/` does not participate in request handling. `MetadataService` checks its cache before borrowing a database connection and executing SQL on a miss. Signup creates the root directory using the transaction connection already borrowed by the user repository, bypassing ordinary cache operations.
 
-The networking layer handles connections and message callbacks. `StorageService` parses commands and maintains sessions. Each connection's `ConnectionSession` stores its authentication state, user identity, current directory, and an active transfer task handle. The task owns the transfer state; both are accessed by the owning IO thread. Authentication, directory operations, and upload preflight checks run in the business pool. File IO, download lookups, and final upload metadata insertion run in disk tasks. Authentication, directory change, and transfer results return to the connection's EventLoop through `queue_in_loop`.
+The networking layer handles connections and message callbacks. `TcpStorageServer` parses commands and maintains sessions. The injected `StorageService` accepts structured identity/directory requests and coordinates AuthService, MetadataService, UploadEngine, and DownloadEngine; its public API has no TCP or resource-pool dependency. `StorageRuntime` assembles these components and owns execution resources, recovery, metrics snapshots, and shutdown. Each connection's `ConnectionSession` stores its authentication state, user identity, current directory, and an active transfer task handle. The task owns the transfer state; both are accessed by the owning IO thread. Authentication, directory operations, and upload preflight checks run in the business pool. File IO, download lookups, and final upload metadata insertion run in disk tasks. Authentication, directory change, and transfer results return to the connection's EventLoop through `queue_in_loop`.
 
 Server defaults are 4 IO threads, 8 business worker threads, 256 business execution queue slots, and 128 asynchronous wait queue slots. A separate disk pool uses 2 threads by default. Directory operations use `try_run` and report a busy server when the queue is full. Login and signup use `submit_async` with a 2-second queue wait deadline.
 
@@ -246,10 +256,14 @@ Before startup, main holds an exclusive lock on the object root and calls `prepa
 
 | Component and source | Responsibilities | Boundary |
 | --- | --- | --- |
-| [StorageService](src/ftp/server.cpp) | Authentication dialogue, command/control framing, session index, task creation, responses, shutdown coordination | Delegates object persistence and digest computation |
+| [StorageService](src/ftp/server.cpp) | Protocol-independent authentication, directory/file operations, and upload/download coordination | Injected engine references; no sockets, sessions, connection pool, worker pool, or lifecycle ownership |
+| [TcpStorageServer](src/ftp/tcp_storage_server.cpp) | Authentication dialogue, framing, session index, TCP task creation, and responses | Borrows the business service and execution resources; owns only the TCP adapter and sessions |
+| [StorageRuntime](src/ftp/storage_runtime.cpp) | Dependency assembly, execution resources, metrics snapshots, start/stop | Keeps service/engines alive through task cleanup and network barriers |
+| [StorageRecoveryEngine](src/ftp/storage_recovery_engine.cpp) | Temporary cleanup, object-table checks, backfill, and DELETING recovery | Blocking startup work before business listeners and workers |
 | [TransferTask / TransferContext](inc/ftp/transfer_task.h) | Per-transfer phase, cancellation, events, identity and directory snapshots | Validates connection, session, user, directory, and generation on the IO loop to discard stale results |
-| [UploadEngine / UploadTask](src/ftp/upload_engine.cpp) | Preflight checks, receiver setup, object publication followed by metadata insertion | The engine creates per-transfer tasks that share execution resources |
-| [DownloadEngine / DownloadTask](src/ftp/download_engine.cpp) | Resolve file mappings, open objects, queue sends, wait for client ACK | Socket send completion still requires peer persistence acknowledgment |
+| [UploadEngine](src/ftp/upload_engine.cpp) | Preflight, temporary receiver creation, object publication and metadata commit | Protocol-independent; hash lock spans publication and commit |
+| [UploadTask / DownloadTask](src/ftp/tcp_transfer_tasks.cpp) | TCP transfer phases, async adapters, cancellation, events, sends, and ACK | Call StorageService with immutable identity/directory snapshots on existing execution resources |
+| [DownloadEngine](src/ftp/download_engine.cpp) | Resolve metadata and open objects, returning a source handle and hash | Does not send socket data or manage ACK state |
 | [MetadataService](src/ftp/metadata_service.cpp) | Directory queries and mutations, file deletion/rename/move, upload registration, download hashes, and cache coordination | Holds no file contents; transaction helpers share the borrowed connection; `prepare_upload()` queries the database directly |
 | [ObjectStorageEngine](src/ftp/object_storage_engine.cpp) | Temporary objects, publication, validation, reads, removal, temporary cleanup, and object enumeration | Synchronous filesystem primitives without database, protocol, or session state; callers choose execution threads |
 | [ObjectRepository](src/ftp/object_repository.cpp) / [GC transactions](src/ftp/object_gc_transaction.cpp) | Object states, reference checks, unreferenced timestamps, and deletion preparation/finalization | Use the caller's database connection; physical removal follows confirmed DELETING commit |
@@ -258,7 +272,7 @@ Before startup, main holds an exclusive lock on the object root and calls `prepa
 | [VerifyEngine](src/ftp/verify_engine.cpp) | Exact-length validation, incremental SHA-256, expected digest comparison | File integrity, separate from user authentication |
 | [DiskExecutor](inc/ftp/disk_executor.h) / [async adapters](inc/ftp/async_file_receiver.h) | Disk scheduling, active resource tracking, cancellation, cleanup, result delivery to IO loops | Execution and adaptation, without business permissions or virtual directories |
 
-Uploads follow `StorageService → UploadTask → preflight → AsyncReceiver → publish object → insert metadata → UOK`. Downloads follow `StorageService → DownloadTask → metadata/cache → AsyncFileSource → send_file_async → DONE → ACK → OK`. The client sends ACK only after local verification, sync, and publication succeed.
+Uploads follow `TcpStorageServer → UploadTask → StorageService / UploadEngine → AsyncReceiver → publish object + metadata commit → UOK`. Downloads follow `TcpStorageServer → DownloadTask → StorageService / DownloadEngine → AsyncFileSource → send_file_async → DONE → ACK → OK`. The client sends ACK only after local verification, sync, and publication succeed.
 
 Signup still starts a transaction through `AuthService → MySqlUserRepository` and calls `MetadataService::create_root_in_transaction()` to create the root directory. This function neither borrows another connection nor commits independently: the user and root share one transaction. `StorageEngine` in the compatibility header [service_engine.h](inc/ftp/service_engine.h) aliases `MetadataService`.
 
@@ -283,7 +297,7 @@ Cross-thread calls use `queue_in_loop()` and wake the target loop through `event
 
 `Buffer::read_fd()` uses `readv` with its internal writable region and a 64 KiB stack buffer. The service configures a 256 KiB output high-water mark: reaching it pauses reads, which resume after the output buffer drains. Connections also have a 1 MiB pending memory limit, including reservations for asynchronous file chunks, rather than buffering entire files. These mechanisms do not replace capacity limits on all upstream task queues.
 
-[StorageService::on_message()](src/ftp/server.cpp) splits control input on `\n`, accepts `\r\n`, retains incomplete commands, and processes complete commands in a loop. A control command may contain at most 4096 bytes; exceeding the limit closes the connection. Upload bodies are consumed by their declared length, not split on newlines. The `ftp/` module implements a custom TCP storage protocol, not standard FTP.
+[TcpStorageServer::on_message()](src/ftp/tcp_storage_server.cpp) splits control input on `\n`, accepts `\r\n`, retains incomplete commands, and processes complete commands in a loop. A control command may contain at most 4096 bytes; exceeding the limit closes the connection. Upload bodies are consumed by their declared length, not split on newlines. The `ftp/` module implements a custom TCP storage protocol, not standard FTP.
 
 ### Write scheduling and backpressure
 
@@ -429,7 +443,7 @@ Still unreferenced after the grace period
 
 [GC transactions](src/ftp/object_gc_transaction.cpp) recheck state and references. Physical removal requires confirmed DELETING commit; an unknown commit outcome stops that attempt. An already-DELETING object can resume removal and finalization. A DELETING object that still has references is an error, not permission to delete. [ObjectCoordinator](inc/ftp/object_coordinator.h) shares 256 hash-sharded mutexes between uploads and GC.
 
-Before starting business, disk, or GC workers or listening, main holds [StorageRootLock](src/ftp/storage_root_lock.cpp), a nonblocking exclusive `flock` on `.tlss.lock` in the object directory, and invokes `StorageService::prepare_storage()`:
+Before starting business, disk, or GC workers or listening, main holds [StorageRootLock](src/ftp/storage_root_lock.cpp), a nonblocking exclusive `flock` on `.tlss.lock` in the object directory, and invokes `StorageRuntime::prepare_storage()`:
 
 1. Remove recognized `.tlss-part-*` temporary files and sync the object directory.
 2. Verify that `storage_objects` is accessible.
@@ -688,15 +702,15 @@ Networking `Buffer::append()` now calls `TLSS::MEMORY::memcpy` with `Auto / Defa
 
 ## Network service lifecycle and threading requirements
 
-This section documents the current usage contract for `TcpServer` and `StorageService`. Safe operation requires **correct call ordering, thread ownership, and object lifetimes** together. Atomic variables and queued tasks do not make arbitrary concurrent calls safe. The following flow applies to a successfully started service; applications using `TcpServer` directly must coordinate the corresponding shutdown steps themselves.
+This section documents the current usage contract for `TcpServer` and `StorageRuntime`. Safe operation requires **correct call ordering, thread ownership, and object lifetimes** together. Atomic variables and queued tasks do not make arbitrary concurrent calls safe. The following flow applies to a successfully started service; applications using `TcpServer` directly must coordinate the corresponding shutdown steps themselves.
 
 ### Complete startup and runtime flow
 
-See [main.cpp](src/main.cpp) for the entry point and [StorageService](src/ftp/server.cpp) for service coordination.
+See [main.cpp](src/main.cpp) for the entry point and [StorageRuntime](src/ftp/storage_runtime.cpp) for service coordination.
 
 1. Before creating any worker threads, the **main thread** blocks `SIGINT` and `SIGTERM` through `pthread_sigmask`, then initializes logging. A control thread created later receives shutdown signals synchronously through `sigwait`.
-2. The **main thread** resolves the object root and acquires `StorageRootLock`, then constructs `EventLoop` and the `StorageService` that references it. Service construction obtains the database pool and configures callbacks, IO threads, and queue capacity. While holding the root lock and before any transfers, main calls `prepare_storage()` for cleanup, backfill, and deletion recovery. Failure stops startup. Only after preparation succeeds does main construct the monitor runtime and start monitoring/resource sampling when enabled.
-3. The **main thread** calls `StorageService::start()`: it starts the business pool, disk executor, and object GC worker before `TcpServer::start()` starts IO threads and begins listening. Configuration must finish before startup; startup must not run concurrently with shutdown or destruction.
+2. The **main thread** resolves the object root and acquires `StorageRootLock`, then constructs `EventLoop` and the `StorageRuntime` that references it. Service construction obtains the database pool and configures callbacks, IO threads, and queue capacity. While holding the root lock and before any transfers, main calls `prepare_storage()` for cleanup, backfill, and deletion recovery. Failure stops startup. Only after preparation succeeds does main construct the monitor runtime and start monitoring/resource sampling when enabled.
+3. The **main thread** calls `StorageRuntime::start()`: it starts the business pool, disk executor, and object GC worker before `TcpServer::start()` starts IO threads and begins listening. Configuration must finish before startup; startup must not run concurrently with shutdown or destruction.
 4. After startup completes, a **dedicated control thread** starts waiting for shutdown signals, while the main thread enters `EventLoop::loop()`. The control thread may request shutdown and wait for completion, but the main loop must keep running to process those requests.
 5. During normal operation, the **main loop** accepts connections, assigns IO loops, and maintains `_connections`. Each connection's **owning IO loop** handles reads, writes, connection state, and application callbacks. The **business worker pool** performs authentication and directory operations. The **disk pool** handles file operations and associated metadata callbacks. Results return to IO loops through queued tasks.
 
@@ -708,7 +722,7 @@ The current main program follows this call chain:
 
 ```text
 Control thread receives SIGINT / SIGTERM through sigwait()
-  → StorageService::stop(grace_period)
+  → StorageRuntime::stop(grace_period)
   → Mark the service as stopping and serialize shutdown requests
   → TcpServer::stop_accepting(done)
   → Wait for done: listener closed and existing connections' reads paused
@@ -721,14 +735,14 @@ Control thread receives SIGINT / SIGTERM through sigwait()
   → TcpServer::stop_io_threads(): exit and join IO threads
   → Shut down the database connection pool
   → Quit the main EventLoop
-  → Publish the StorageService shutdown result
+  → Publish the StorageRuntime shutdown result
   → Stop and join the resource sampler
   → Take the final monitor snapshot, stop and join the monitor Engine thread
   → Finish the control thread
 
 Main thread returns from EventLoop::loop()
   → Join the control thread
-  → Destroy the monitor runtime, then StorageService / TcpServer
+  → Destroy the monitor runtime, then StorageRuntime / TcpServer
   → Destroy the main EventLoop and release the object-root lock after service cleanup
   → Logger::shutdown()
 ```
@@ -737,7 +751,7 @@ Each stage must meet its completion condition before the next stage begins:
 
 | Stage | Thread and operation | Condition for proceeding |
 | --- | --- | --- |
-| Mark shutdown | The control thread sets `StorageService::_stopping`; stop accepting new application work | Startup has finished, and the application no longer produces new tasks |
+| Mark shutdown | The control thread sets `StorageRuntime::_stopping`; stop accepting new application work | Startup has finished, and the application no longer produces new tasks |
 | Stop accepting | The control thread calls `stop_accepting()`; the main loop releases Acceptor, and each IO loop executes `pause_read_for_shutdown()` | `done` runs on the main loop and notifies the control thread through a future or equivalent synchronization |
 | Finish worker tasks | The control thread calls the worker pool's `stop()`; reject new submissions, cancel tasks still in the asynchronous wait queue, finish tasks already in the execution queue, and join workers | Worker pool `stop()` returns; IO loops and the database are still available at this stage |
 | Finish disk work | The control thread calls `DiskExecutor::stop()`, cancels active sources/receivers, waits for file cleanup, and joins disk workers | Disk executor shutdown has completed; IO loops and the database must remain alive throughout this stage |
@@ -748,11 +762,11 @@ Each stage must meet its completion condition before the next stage begins:
 | Release resources | The dedicated control thread calls `stop_io_threads()`, shuts down the database pool, and finally calls `quit()` on the main loop | IO threads have been joined; the control thread completes shutdown and publishes its result |
 | Destroy objects | The main thread returns from `loop()`, joins the control thread, destroys the service and main loop, then shuts down logging | No remaining tasks, callbacks, or external calls can access the service or a destroyed loop |
 
-`StorageService::stop()` defaults to a 5-second connection grace period and accepts a nonnegative duration. This limits only the wait for connections to close naturally, not the entire shutdown: business and disk work, the current GC batch, cleanup after forced closure, and database thread joins may still wait. The return value reports whether the database connection pool shut down successfully under its shutdown policy; it does not mean the entire process completed within `grace_period`.
+`StorageRuntime::stop()` defaults to a 5-second connection grace period and accepts a nonnegative duration. This limits only the wait for connections to close naturally, not the entire shutdown: business and disk work, the current GC batch, cleanup after forced closure, and database thread joins may still wait. The return value reports whether the database connection pool shut down successfully under its shutdown policy; it does not mean the entire process completed within `grace_period`.
 
 ### Waiting for completion when using TcpServer directly
 
-When using `StorageService`, call its `stop()` from a dedicated control thread instead of also manipulating its internal `TcpServer`. If you compose `TcpServer`, a worker pool, and a database connection pool directly, the following illustrates shutdown on the control thread. Startup has already completed, the main loop remains running, and the caller keeps all participating objects alive throughout the flow.
+When using `StorageRuntime`, call its `stop()` from a dedicated control thread instead of also manipulating its internal `TcpServer`. If you compose `TcpServer`, a worker pool, and a database connection pool directly, the following illustrates shutdown on the control thread. Startup has already completed, the main loop remains running, and the caller keeps all participating objects alive throughout the flow.
 
 ```cpp
 // Run on a dedicated control thread, never in the main loop, an IO callback, or a worker task.
@@ -779,7 +793,7 @@ base_loop.quit();
 // The main thread joins this control thread after loop() returns, then destroys the service and loop.
 ```
 
-If the application also owns a disk executor, cancel and wait for it after `worker_pool.stop()` and before `shutdown_connections()`, then stop any GC worker before database teardown, as in `StorageService::stop()`. Here, `worker_pool`, `db_pool`, and `base_loop` represent the corresponding objects owned by the caller. Include `<future>`, `<memory>`, and `<chrono>`. Do not use `sleep()` to guess whether asynchronous work has finished, and do not stop EventLoop before waiting on the control thread: completion callbacks need the loop to execute.
+If the application also owns a disk executor, cancel and wait for it after `worker_pool.stop()` and before `shutdown_connections()`, then stop any GC worker before database teardown, as in `StorageRuntime::stop()`. Here, `worker_pool`, `db_pool`, and `base_loop` represent the corresponding objects owned by the caller. Include `<future>`, `<memory>`, and `<chrono>`. Do not use `sleep()` to guess whether asynchronous work has finished, and do not stop EventLoop before waiting on the control thread: completion callbacks need the loop to execute.
 
 ### Required threading and lifetime constraints
 
@@ -790,16 +804,16 @@ If the application also owns a disk executor, cancel and wait for it after `work
 | `_connections` and connection IDs | Maintain them on the main loop; complete shutdown before destruction so another thread cannot access the map concurrently | Container data races and invalidated iterators |
 | TcpConnection / Channel | Direct operations on IO state, buffers, and Channels belong to the owning IO loop; cross-thread callers must use interfaces that provide dispatch | Races with event dispatch and Channel removal; `shared_ptr` preserves lifetime but does not synchronize member access |
 | Shutdown callback `done` | Runs on the main loop; notify waiters or perform lightweight work without blocking on that same loop | The main loop cannot advance, so shutdown cannot complete |
-| `StorageService::stop()` and `stop_io_threads()` | Run on a dedicated control thread outside the main loop, IO pool, business worker pool, and disk pool | Waiting for the current thread to process a barrier, or joining the current thread; existing thread checks do not catch every misuse |
+| `StorageRuntime::stop()` and `stop_io_threads()` | Run on a dedicated control thread outside the main loop, IO pool, business worker pool, and disk pool | Waiting for the current thread to process a barrier, or joining the current thread; existing thread checks do not catch every misuse |
 | Asynchronous file work | Keep the disk executor, owning IO loop, and database alive until cancellation and worker cleanup finish; access session and receiver interfaces on the IO loop | Disk tasks or result callbacks access destroyed resources |
-| Tasks capturing raw `this` | Keep TcpServer, StorageService, and objects referenced by application callbacks alive until the relevant tasks and callbacks finish | Close callbacks, barriers, or other queued tasks access destroyed objects |
+| Tasks capturing raw `this` | Keep TcpServer, StorageRuntime, and objects referenced by application callbacks alive until the relevant tasks and callbacks finish | Close callbacks, barriers, or other queued tasks access destroyed objects |
 | Loop lifetimes | Finish IO cleanup before joining IO threads; keep the main loop alive through shutdown notification and service destruction | Shutdown tasks cannot execute, or connections/tasks access a destroyed loop through a raw pointer |
 | Externally held connections and tasks | Coordinate all external producers before shutdown; after IO thread teardown, do not submit work through old connections or use their loops | Holding a `TcpConnectionPtr` does not extend the lifetime of its referenced EventLoop |
-| Multiple shutdown callers | Coordinate through the mutex and completion notification in `StorageService::stop()`; direct TcpServer users must arrange a single shutdown flow | Repeated `shutdown_connections()` calls may overwrite the completion callback; thread pool teardown may interleave with other operations |
+| Multiple shutdown callers | Coordinate through the mutex and completion notification in `StorageRuntime::stop()`; direct TcpServer users must arrange a single shutdown flow | Repeated `shutdown_connections()` calls may overwrite the completion callback; thread pool teardown may interleave with other operations |
 
 `when_io_idle()` queues a barrier on each IO loop and collects their notifications on the main loop. It confirms that relevant earlier tasks have reached the barrier, but **does not prevent future submissions from other threads or recursively wait for all follow-up tasks spawned by earlier work**. Stop task producers first, then wait for worker completion and connection cleanup. This barrier alone is not proof that the server can be destroyed safely at an arbitrary point.
 
-`TcpServer::~TcpServer()` does not automatically perform the complete shutdown flow above or extend the lifetimes of objects referenced by raw `this` callbacks. A started `StorageService` must explicitly complete `stop()` before destruction; otherwise its destructor terminates the process. Do not directly delete a running server inside an application callback, and do not equate requesting shutdown with completing it.
+`TcpServer::~TcpServer()` does not automatically perform the complete shutdown flow above or extend the lifetimes of objects referenced by raw `this` callbacks. A started `StorageRuntime` must explicitly complete `stop()` before destruction; otherwise its destructor terminates the process. Do not directly delete a running server inside an application callback, and do not equate requesting shutdown with completing it.
 
 Implementation entry points: [TcpServer](src/common/net/tcp_server.cpp), [EventLoop](src/common/net/event_loop.cpp), [EventLoopThread](src/common/net/event_loop_thread.cpp), and [worker pool](src/common/base/tlss_thread_pool.cpp). Existing [shutdown regression tests](tests/test_tcp_server_shutdown.cpp) cover waiting for peer FIN and forced closure with zero IO worker threads, among other paths. They do not establish safety for arbitrary interleavings of startup, shutdown, and destruction.
 
@@ -841,10 +855,10 @@ cpp_TLFSS/
 | `scripts/build.sh` | Wrapper for configuration, compilation, and tests |
 | `third/`, `third_party/` | Bundled dependencies and upstream submodules; do not commit their build output |
 | `inc/common/cache/`, `inc/ftp/metadata_cache.h`, `src/ftp/subtree_*.cpp` | Header-only cache storage and metadata facade, backed by subtree coordination/version implementations |
-| `src/ftp/` | `metadata_lib` owns metadata transactions, object repository, and subtree coordination; `transfer_lib` provides object, verification, locking, and async disk primitives; `ftp_lib` combines transfer tasks, GC/backfill orchestration, protocol handling, and the client |
+| `src/ftp/` | `storage_business_lib` provides the injected business facade and protocol-independent workflows; `metadata_lib` owns transactions/cache coordination; `transfer_lib` provides object/disk primitives; `ftp_lib` combines TCP adapters, runtime/recovery, GC, and the client |
 | `doc/` | Memory copy design report and tutorial, plus local technical notes |
 
-The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_lib`, `transfer_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `observability_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
+The top-level CMake configuration organizes `common_lib`, `auth_lib`, `metadata_lib`, `transfer_lib`, `storage_business_lib`, `ftp_lib`, `logger_lib`, `monitor_lib`, `observability_lib`, `rpc_lib`, `gateway_lib`, `proto_lib`, and `tlss_memory`. The main service links several libraries, but `main.cpp` determines which components actually run. Additional infrastructure examples and checks live in `src/common/base/example/`; not all are registered with the top-level CTest setup.
 
 ## Build and run
 
@@ -860,7 +874,7 @@ Although RPC business services are not implemented, the top-level build still re
 
 ### Configure the database
 
-Constructing `StorageService` initializes the MySQL connection pool, which connects to a database named `tlss_db`. Create the database and tables locally, then adjust the connection settings for your environment:
+Constructing `StorageRuntime` initializes the MySQL connection pool, which connects to a database named `tlss_db`. Create the database and tables locally, then adjust the connection settings for your environment:
 
 ```bash
 mysql -u root -p < sql/init_tlss_db.sql
@@ -887,8 +901,8 @@ Keys are case-sensitive, surrounding whitespace is not trimmed, and unknown keys
 | Setting | Current value | Configuration entry point |
 | --- | --- | --- |
 | Listening port | `9000` | `src/main.cpp`; no command line option |
-| IO / business threads, business queue capacity | 4 / 8 / 256 | `StorageService` constructor arguments |
-| Authentication wait queue capacity / admission deadline | 128 / 2 seconds | `src/ftp/server.cpp` |
+| IO / business threads, business queue capacity | 4 / 8 / 256 | `StorageRuntime` constructor arguments |
+| Authentication wait queue capacity / admission deadline | 128 / 2 seconds | `src/ftp/storage_runtime.cpp` / `src/ftp/tcp_storage_server.cpp` |
 | Disk threads / active file source and receiver limit | 2 / 64 combined per executor | `DiskExecutor::start()` argument / compile-time constant |
 | Object directory | `./data/objects` | Override with `TLSS_STORAGE_ROOT` before startup |
 | Object GC interval / grace period / batch size | 30 seconds / 10 minutes / at most 128 | `ObjectGcWorkerConfig` defaults / repository query limit; no main-program tuning interface |
@@ -1088,6 +1102,7 @@ Enable `BUILD_TESTS=ON` and build the test targets as shown above before running
 | Object lifecycle | Object/reference repositories, upload registration, GC prepare/finalize transactions, batching, worker shutdown, startup backfill/recovery, temporary cleanup, disk scans, root locking, and filesystem error injection |
 | File transfer and service handlers | Real server/client transfer handlers plus file/directory mutations and startup recovery; chunked IO, hashes, publication, failures, cancellation, stale callbacks, and shutdown; database/authentication substitutes are used |
 | Interactive client | `test_ftp_client.py` uses a pseudoterminal and test server; currently not registered with CTest |
+| Business separation | No-socket `storage_workflows_test` checks the facade, invalid contexts, real object reuse/readback, commit outcomes and metrics; Python `storage_business_boundaries` checks public-header dependency closure |
 | Authentication and database | Registered `signup_transaction_boundary_test` uses database substitutes with the real repository/root creation to verify a shared transaction, rollback, and unknown commit outcomes. Other service, repository, signup, transaction, and prepared-statement test sources remain unregistered; some require a real test database |
 | Monitoring | Engine, Store, policies, protocols, CLI, concurrency, reliable alarms, and demo smoke tests; storage metrics, resource sampling, runtime schema/thresholds/lifecycle, and collector process smoke checks |
 | Memory copy | Linking/basic correctness in CTest; deeper checks and benchmarks are spread across benchmark code and dedicated scripts |
@@ -1109,22 +1124,24 @@ Networking, transfer, and some monitoring tests create local TCP/UDP sockets; de
 
 Use `ctest --test-dir build-tests -N` to list tests registered in that build directory. This does not run tests or establish that they pass. Counts depend on configuration, dependencies, and whether CMake has been rerun.
 
-**Local verification snapshot — 2026-11-19:** The main Debug build succeeded. A fresh Debug configuration with `BUILD_TESTS=ON`, Python 3 available, and GoogleTest absent registered 944 tests. Eight representative test executables were rebuilt, and their selected 107 CTest cases passed: path validation/resolution, object engine behavior, removal/temporary cleanup/disk scans, root locking, subtree caching/versions, upload registration, and GC transactions. This was a subset run, not a full 944-test pass. The selected tests use temporary files, database substitutes, and fault injection; real MySQL/client end-to-end tests, sanitizer runs, and performance benchmarks were not performed. This records the inspected working tree, including uncommitted changes; counts and results are not guarantees for other configurations or revisions.
+**Local verification snapshot — 2026-11-21:** All Debug targets built successfully. With Python 3 available and GoogleTest absent, all 946 registered CTest cases passed, including 310 FTP transfer/service scenarios and the new no-socket workflow and public-header boundary checks. Network and monitoring cases ran with local socket permissions. The run uses temporary files and database substitutes; real MySQL/client end-to-end tests, sanitizer runs, and performance benchmarks were not performed. This records the inspected working tree, including uncommitted changes; counts depend on configuration and revision.
 
 The unregistered MySQL integration test sources use `TLSS_TEST_MYSQL_HOST`, `TLSS_TEST_MYSQL_USER`, `TLSS_TEST_MYSQL_PASSWORD`, and `TLSS_TEST_MYSQL_DATABASE`, with optional `TLSS_TEST_MYSQL_PORT`. The signup end-to-end test additionally requires `TLSS_TEST_FTP_SIGNUP=1` and uses the service connection pool configuration. Use a dedicated test database. Some cases skip when their environment is not configured; a skip is not successful validation. Some old tests still reference obsolete interfaces; see [remaining work](#current-limitations-and-remaining-work).
 
 Suggested source reading order:
 
-1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`: service entry point, command dispatch, session state, and shutdown flow.
+1. `src/main.cpp` → `src/ftp/storage_runtime.cpp` → `src/ftp/tcp_storage_server.cpp` → `src/ftp/server.cpp`: runtime ownership, protocol/session handling, then the protocol-independent business facade.
 2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp` → `src/common/net/write_scheduler.cpp`: connection/message handling, ordered sends, asynchronous read completion, and backpressure.
 3. `src/common/base/tlss_thread_pool.cpp`, `src/common/base/mysql_connection_pool.cpp`: task and database resource lifecycles.
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`: database operations for signup, login, and virtual directories.
 5. `inc/ftp/metadata_cache.h` → `src/ftp/subtree_coordinator.cpp` → `src/ftp/subtree_versions.cpp` → `inc/common/cache/arc_cache.h`: cache hits, directory/subtree invalidation, conflict scopes, load coalescing, and sharded capacities. Pair these with `tests/test_metadata_cache*.cpp`.
-6. Start with `src/ftp/transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp` and `src/common/net/write_scheduler.cpp`: task state, publication, verification, async adapters, and sending.
-7. `src/ftp/directory_deletion.cpp` → `file_rename.cpp` → `file_move.cpp` in the same directory: metadata transaction boundaries, conflict checks, and unknown outcomes. Then read `object_repository.cpp` → `object_gc_transaction.cpp` → `object_garbage_collector.cpp` → `object_gc_worker.cpp` → `object_backfill.cpp`, alongside `StorageService::prepare_storage()`, for object lifecycle and recovery.
+6. Start with `src/ftp/tcp_transfer_tasks.cpp`, `transfer_task.cpp`, `upload_engine.cpp`, and `download_engine.cpp`, then read `object_storage_engine.cpp`, `verify_engine.cpp`, `async_file_receiver.cpp`, and `async_file_source.cpp` in the same directory, followed by `src/common/net/tcp_connection.cpp` and `src/common/net/write_scheduler.cpp`: task state, publication, verification, async adapters, and sending.
+7. `src/ftp/directory_deletion.cpp` → `file_rename.cpp` → `file_move.cpp` in the same directory: metadata transaction boundaries, conflict checks, and unknown outcomes. Then read `object_repository.cpp` → `object_gc_transaction.cpp` → `object_garbage_collector.cpp` → `object_gc_worker.cpp` → `object_backfill.cpp`, alongside `StorageRuntime::prepare_storage()`, for object lifecycle and recovery.
 8. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`: integrated monitoring; `src/monitor/demo/` provides independent library examples.
 9. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`: client connection setup, retries, and shutdown.
 10. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp` (the last three paths are relative to `src/common/memory/`): copy policy and runtime behavior.
+
+The refactor adds `storage_workflows_test` and `storage_business_boundaries`; run them with `ctest --test-dir build-tests --output-on-failure -R "^storage_(workflows_test|business_boundaries)$"`. The executable entry now constructs `StorageRuntime`; C++ callers of the former network-owning StorageService constructor must migrate to StorageRuntime or explicitly inject engines into the business facade. Injected engines must outlive the facade and any tasks that call it.
 
 Some tutorial notes describe earlier revisions. Check their stated source baseline against the current implementation and CMake registrations when behavior differs.
 

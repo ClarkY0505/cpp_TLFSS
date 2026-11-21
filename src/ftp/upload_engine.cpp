@@ -1,190 +1,47 @@
 #include "ftp/upload_engine.h"
 
-#include <exception>
+#include "ftp/metadata_service.h"
+#include "ftp/object_coordinator.h"
+
 #include <mutex>
 #include <stdexcept>
 #include <utility>
 
-#include "common/net/event_loop.h"
-#include "ftp/metadata_types.h"
-#include "ftp/service_logger.h"
-
 namespace TLSS::FileStorage {
-std::shared_ptr<UploadTask> UploadEngine::create(TransferContext context, UploadRequest request,
-                                                 TransferTask::Notify notify) const {
-  return std::shared_ptr<UploadTask>(new UploadTask(std::move(context), std::move(request),
-                                                    _workers, _disk, _metadata, _objects,
-                                                    _coordinator, _stopping, std::move(notify)));
-}
-
-UploadTask::UploadTask(TransferContext context, UploadRequest request, BASE::ThreadPool& workers,
-                       Transfer::DiskExecutor& disk, MetadataService& metadata,
-                       ObjectStorageEngine& objects, ObjectCoordinator& coordinator,
-                       const std::atomic<bool>& stopping, Notify notify)
-    : TransferTask(std::move(context), stopping, std::move(notify), TransferPhase::preparing_upload)
-    , _request(std::move(request))
-    , _workers(workers)
-    , _disk(disk)
-    , _metadata(metadata)
+UploadEngine::UploadEngine(MetadataService& metadata, ObjectStorageEngine& objects,
+                           ObjectCoordinator& coordinator,
+                           std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics)
+    : _metadata(metadata)
     , _objects(objects)
-    , _coordinator(coordinator) {}
+    , _coordinator(coordinator)
+    , _metrics(std::move(metrics)) {}
 
-UploadTask::~UploadTask() {
-  cancel();
+StorageContext<std::string> UploadEngine::prepare(const StorageRequestContext& context,
+                                                  const UploadRequest& request) const {
+  if (!context.valid())
+    return {};
+  return _metadata.prepare_upload(context.username, context.directory, request.name);
 }
 
-void UploadTask::start() {
-  auto conn = current_connection();
-  if (!conn || _started) {
-    return;
-  }
-  _started = true;
-  metrics_start(true);
-  const auto weak = weak_from_this();
-  auto* loop = conn->get_loop();
-  auto* metadata = &_metadata;
-  const auto* stopping = &_stopping;
-  const auto username = _context.username;
-  const auto directory = _context.directory;
-  const auto name = _request.name;
-  const bool accepted =
-      _workers.try_run([weak, loop, metadata, stopping, username, directory, name] {
-        StorageContext<std::string> parent;
-        std::string error;
-        try {
-          if (stopping->load()) {
-            error = "server is stopping";
-          } else {
-            parent = metadata->prepare_upload(username, directory, name);
-          }
-        } catch (const std::exception& exception) {
-          error = exception.what();
-        } catch (...) {
-          error = "unexpected transfer failure";
-        }
-        loop->queue_in_loop([weak, parent = std::move(parent), error = std::move(error)]() mutable {
-          if (auto task = weak.lock()) {
-            task->on_prepared(std::move(parent), std::move(error));
-          }
-        });
-      });
-  if (!accepted) {
-    if (_context.metrics)
-      _context.metrics->add(OBSERVABILITY::Metric::commands_rejected);
-    on_failed("server is busy");
-  }
+ObjectStorageEngine::WriteHandle UploadEngine::create_temporary(std::uint64_t size) const {
+  return _objects.create_temporary(size);
 }
 
-void UploadTask::on_prepared(StorageContext<std::string> parent, std::string error) {
-  auto conn = current_connection();
-  if (!conn || _phase != TransferPhase::preparing_upload) {
-    return;
-  }
-  if (!error.empty() || !parent.success) {
-    on_failed(error.empty() ? "directory unavailable or filename already exists"
-                            : std::move(error));
-    return;
-  }
-  _parent_id = std::move(parent.result);
-  const auto weak = weak_from_this();
-  auto* objects = &_objects;
-  auto* coordinator = &_coordinator;
-  auto* metadata = &_metadata;
-  auto factory = [objects, size = _request.size] {
-    return objects->create_temporary(size);
-  };
-
-  auto finalizer = [objects, coordinator, metadata, username = _context.username,
-                    directory = _context.directory, name = _request.name, parent_id = _parent_id,
-                    metrics = _context.metrics](Transfer::Receiver& receiver) {
-    const auto object_hash = receiver.hash();
-    std::lock_guard<std::mutex> lock(coordinator->mutex_for(object_hash));
-    auto object = objects->publish(receiver);
-    const UploadCommitResult commit_res =
-        metadata->commit_upload(username, parent_id, directory, name, object.hash);
-    if (commit_res == UploadCommitResult::outcome_unknown) {
-      throw std::runtime_error("upload commit outcome unknown");
-    }
-    if (commit_res != UploadCommitResult::committed) {
-      throw std::runtime_error("file stored but metadata registration failed");
-    }
-    if (metrics) {
-      metrics->add(OBSERVABILITY::Metric::upload_committed);
-    }
-    return object.hash;
-  };
-  try {
-    _writer = Transfer::AsyncReceiver::create(
-        _disk, conn, _request.size, std::move(factory), std::move(finalizer),
-        [weak] {
-          if (auto task = weak.lock()) {
-            task->on_ready();
-          }
-        },
-        [weak](std::string hash) {
-          if (auto task = weak.lock()) {
-            task->on_done(std::move(hash));
-          }
-        },
-        [weak](std::string reason) {
-          if (auto task = weak.lock()) {
-            task->on_failed(std::move(reason));
-          }
-        });
-  } catch (const std::exception& exception) {
-    on_failed(exception.what());
-  }
-}
-
-void UploadTask::on_ready() {
-  if (!current_connection() || _phase != TransferPhase::preparing_upload) {
-    return;
-  }
-  _phase = TransferPhase::receiving_upload;
-  emit({TransferEvent::Kind::upload_ready, {}});
-  if (_request.size == 0 && !_cancelled) {
-    _phase = TransferPhase::finalizing_upload;
-    _writer->finish();
-  }
-}
-
-void UploadTask::consume(NET::Buffer& buffer) {
-  if (_phase != TransferPhase::receiving_upload || !_writer || _cancelled) {
-    throw std::runtime_error("upload receiver is missing or unavailable");
-  }
-  _writer->feed(buffer);
-  if (_writer->remaining() == 0) {
-    _phase = TransferPhase::finalizing_upload;
-    _writer->finish();
-  }
-}
-
-void UploadTask::on_done(std::string hash) {
-  if (!current_connection() || _phase != TransferPhase::finalizing_upload) {
-    return;
-  }
-  metrics_finish(OBSERVABILITY::Metric::upload_committed);
-  _phase = TransferPhase::idle;
-  emit({TransferEvent::Kind::upload_complete, std::move(hash)});
-}
-
-void UploadTask::on_failed(std::string error) {
-  metrics_finish(OBSERVABILITY::Metric::upload_failed);
-  if (!current_connection()) {
-    return;
-  }
-  const bool close = _phase == TransferPhase::receiving_upload;
-  if (close) {
-    service_logger()->error("upload disk write failed: {}", error);
-  }
-  emit({TransferEvent::Kind::failed, std::move(error), 0, close});
-}
-
-void UploadTask::cancel() noexcept {
-  metrics_finish(OBSERVABILITY::Metric::upload_cancelled);
-  _cancelled = true;
-  if (_writer) {
-    _writer->cancel();
-  }
+std::string UploadEngine::publish_and_commit(const StorageRequestContext& context,
+                                             const std::string& parent_id, const std::string& name,
+                                             Transfer::Receiver& receiver) const {
+  if (!context.valid())
+    throw std::runtime_error("invalid storage request context");
+  std::lock_guard<std::mutex> lock(_coordinator.mutex_for(receiver.hash()));
+  auto object = _objects.publish(receiver);
+  const auto result =
+      _metadata.commit_upload(context.username, parent_id, context.directory, name, object.hash);
+  if (result == UploadCommitResult::outcome_unknown)
+    throw std::runtime_error("upload commit outcome unknown");
+  if (result != UploadCommitResult::committed)
+    throw std::runtime_error("file stored but metadata registration failed");
+  if (_metrics)
+    _metrics->add(OBSERVABILITY::Metric::upload_committed);
+  return object.hash;
 }
 }  // namespace TLSS::FileStorage

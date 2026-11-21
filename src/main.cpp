@@ -1,5 +1,5 @@
 #include "common/base/tlss_thread.h"
-#include "ftp/server.h"
+#include "ftp/storage_runtime.h"
 #include "ftp/storage_root_lock.h"
 #include "logger/logger.h"
 #include "observability/storage_monitor_runtime.h"
@@ -80,11 +80,11 @@ int main() {
         SystemResourceSamplerConfig{storage_root, interval, "/proc"});
     TLSS::NET::EventLoop loop;
     TLSS::NET::InetAddress address(9000);
-    TLSS::FileStorage::StorageService server(&loop, address, "tlss_service", 4, 8, 256, metrics,
+    TLSS::FileStorage::StorageRuntime runtime(&loop, address, "tlss_service", 4, 8, 256, metrics,
                                              cache);
     bool storage_ready = false;
     try {
-      storage_ready = server.prepare_storage();
+      storage_ready = runtime.prepare_storage();
       if (!storage_ready) {
         TLSSLOG::Logger::get("storage_service")->error("prepare_storage failed");
       }
@@ -94,8 +94,8 @@ int main() {
     }
 
     if (storage_ready) {
-      StorageMonitorRuntime monitor(monitor_config, metrics, sampler, [&server] {
-        server.sample_metrics();
+      StorageMonitorRuntime monitor(monitor_config, metrics, sampler, [&runtime] {
+        runtime.sample_metrics();
       });
       if (monitoring) {
         if (!sampler->start()) {
@@ -107,12 +107,12 @@ int main() {
           sampler->finish_and_stop();
         }
       }
-      server.start();
+      runtime.start();
       TLSS::BASE::Thread control(
           [&] {
             int signal_number = 0;
             if (sigwait(&shutdown_signals, &signal_number) == 0) {
-              stopped = server.stop();
+              stopped = runtime.stop();
               sampler->finish_and_stop();
               monitor.finish_and_stop();
             }

@@ -87,6 +87,13 @@ target_link_libraries(test_thread_pool_async PRIVATE common_lib)
 add_test(NAME thread_pool_async_test COMMAND test_thread_pool_async)
 set_tests_properties(thread_pool_async_test PROPERTIES TIMEOUT 15)
 
+# Business workflows run without a TCP server, EventLoop, or real database.
+add_executable(test_storage_workflows test_storage_workflows.cpp)
+add_dependencies(test_storage_workflows prepare_runtime_directories)
+target_link_libraries(test_storage_workflows PRIVATE storage_business_lib)
+add_test(NAME storage_workflows_test COMMAND test_storage_workflows)
+set_tests_properties(storage_workflows_test PROPERTIES TIMEOUT 15)
+
 # 使用进程内数据库替代实现测试实际的存储引擎。
 # 通过查询和连接借用计数验证缓存命中，无需启动 MySQL 服务。
 add_executable(test_metadata_cache
@@ -145,6 +152,10 @@ add_executable(test_ftp_transfer
     ${PROJECT_SOURCE_DIR}/src/ftp/upload_engine.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/download_engine.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/server.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/tcp_storage_server.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/tcp_transfer_tasks.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/storage_runtime.cpp
+    ${PROJECT_SOURCE_DIR}/src/ftp/storage_recovery_engine.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/metadata_service.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/client.cpp
     ${PROJECT_SOURCE_DIR}/src/ftp/object_backfill.cpp
@@ -275,6 +286,8 @@ set_tests_properties(tcp_write_scheduler_test PROPERTIES TIMEOUT 15)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME storage_business_boundaries
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_storage_boundaries.py)
     add_test(NAME ftp_cd_lookup_test
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_ftp_cd.py)
 endif()

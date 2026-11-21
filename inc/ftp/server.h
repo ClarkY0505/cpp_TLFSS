@@ -1,179 +1,51 @@
-#ifndef __INC_FTP_SERVER_H__
-#define __INC_FTP_SERVER_H__
+#ifndef TLSS_FTP_SERVER_H
+#define TLSS_FTP_SERVER_H
 
 #include "auth/auth_service.h"
-#include "auth/user_repository.h"
-#include "common/base/mysql_connection_pool.h"
-#include "common/base/tlss_thread_pool.h"
-#include "common/net/tcp_server.h"
-#include "ftp/context.h"
-#include "ftp/disk_executor.h"
 #include "ftp/download_engine.h"
-#include "ftp/metadata_service.h"
-#include "ftp/object_coordinator.h"
-#include "ftp/object_garbage_collector.h"
-#include "ftp/object_gc_worker.h"
 #include "ftp/upload_engine.h"
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <memory>
-#include <mutex>
-#include <string>
+#include <vector>
+
 namespace TLSS::FileStorage {
 class StorageService {
  public:
-  explicit StorageService(NET::EventLoop* loop, const NET::InetAddress& addr,
-                          const std::string& name = "tlss_service", int subloop_size = 4,
-                          int thread_pool_threads_num = 8, int thread_pool_queue_max_size = 256,
-                          std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics = {},
-                          std::shared_ptr<MetadataCache> cache = {});
-  ~StorageService();
-  void start();
-  void sample_metrics();
-  // 从主 EventLoop 线程以外调用；先排空任务和连接，再释放资源
-  // 重复调用等待同一次停机完成；返回数据库连接池是否在期限内关闭
-  bool stop(std::chrono::milliseconds grace_period = std::chrono::seconds(5));
-
-  // 调用者须持有对象目录独占锁，且当前没有活动传输
-  // true：所有启动准备完成；false：状态检查或数据库准备失败
-  // 文件系统等操作抛出的异常继续向上传播，调用者应停止启动
-  bool prepare_storage();
+  StorageService(AUTH::AuthService& auth, MetadataService& metadata, UploadEngine& uploads,
+                 DownloadEngine& downloads)
+      : _auth(auth)
+      , _metadata(metadata)
+      , _uploads(uploads)
+      , _downloads(downloads) {}
+  AUTH::AuthResult authenticate(const AUTH::LoginRequest& request) const;
+  AUTH::SignupResult signup(const AUTH::SignupRequest& request) const;
+  StorageContext<std::vector<FileInfo>> find_file_by_current_dir(
+      const StorageRequestContext& context) const;
+  StorageContext<std::string> move_dir_by_current_dir(const StorageRequestContext& context,
+                                                      const std::string& directory) const;
+  CreateDirectoryResult create_dir(const StorageRequestContext& context,
+                                   const std::string& name) const;
+  DeleteFileResult delete_file(const StorageRequestContext& context, const std::string& name) const;
+  DeleteDirectoryResult delete_empty_directory(const StorageRequestContext& context,
+                                               const std::string& name) const;
+  DeleteDirectoryTreeResult delete_directory_tree(const StorageRequestContext& context,
+                                                  const std::string& name) const;
+  RenameFileResult rename_file(const StorageRequestContext& context, const std::string& old_name,
+                               const std::string& new_name) const;
+  MoveFileResult move_file(const StorageRequestContext& context,
+                           const std::string& target_directory, const std::string& file_name) const;
+  StorageContext<std::string> prepare_upload(const StorageRequestContext& context,
+                                             const UploadRequest& request) const;
+  ObjectStorageEngine::WriteHandle create_temporary_upload(std::uint64_t size) const;
+  std::string commit_upload(const StorageRequestContext& context, const std::string& parent_id,
+                            const std::string& name, Transfer::Receiver& receiver) const;
+  DownloadObject open_download(const StorageRequestContext& context, const std::string& name) const;
 
  private:
-  void on_connection(const NET::TcpConnectionPtr& conn);
-  void on_message(const NET::TcpConnectionPtr& conn, NET::Buffer* buf, TIME::Timestamp);
-  bool dispatch_task(const NET::TcpConnectionPtr& conn,
-                     const std::shared_ptr<ConnectionSession>& session, std::string_view command);
-
-  bool handle_auth_command(const NET::TcpConnectionPtr& conn,
-                           const std::shared_ptr<ConnectionSession>& session,
-                           const std::string& command);
-
-  void finish_authentication(std::weak_ptr<ConnectionSession> original,
-                             std::weak_ptr<NET::TcpConnection> connection, std::uint64_t attempt,
-                             AUTH::AuthResult result);
-
-  void handle_signup_command(const NET::TcpConnectionPtr& conn,
-                             const std::shared_ptr<ConnectionSession>& session,
-                             const std::string& command);
-  void finish_signup(std::weak_ptr<ConnectionSession> original,
-                     std::weak_ptr<NET::TcpConnection> connection, std::uint64_t attempt,
-                     AUTH::SignupResult result);
-
-  void handle_file_query();
-
-  UploadRequest parse_upload_request(const std::string& args);
-  TransferContext transfer_context(const NET::TcpConnectionPtr& conn,
-                                   const std::shared_ptr<ConnectionSession>& session);
-  void on_transfer_event(const TransferContext& context, TransferEvent event);
-  void handle_upload(const NET::TcpConnectionPtr& conn,
-                     const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-
-  void handle_download(const NET::TcpConnectionPtr& conn,
-                       const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  void handle_transfer_control(const NET::TcpConnectionPtr& conn,
-                               const std::shared_ptr<ConnectionSession>& session,
-                               const std::string& line);
-  void transfer_failed(const NET::TcpConnectionPtr& conn,
-                       const std::shared_ptr<ConnectionSession>& session, const std::string& error);
-
-  void handle_cd(const NET::TcpConnectionPtr& conn,
-                 const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  void move_file_by_cur_dir(const std::string& username, const std::string& current_directory,
-                            const std::weak_ptr<ConnectionSession>& original,
-                            const std::weak_ptr<NET::TcpConnection>& connection,
-                            const std::string& directory, NET::EventLoop* io_loop);
-  void handle_ls(const NET::TcpConnectionPtr& conn,
-                 const std::shared_ptr<ConnectionSession>& session);
-  void lookup_file_by_cur_dir(const std::string& username, const std::string& current_directory,
-                              std::weak_ptr<NET::TcpConnection>& connection);
-  void handle_pwd(const NET::TcpConnectionPtr& conn,
-                  const std::shared_ptr<ConnectionSession>& session);
-  void handle_mkdir(const NET::TcpConnectionPtr& conn,
-                    const std::shared_ptr<ConnectionSession>& session,
-                    const std::string& directory);
-  // 在连接所属的 IO 线程中执行：解析参数、检查状态、提交任务
-  void handle_rm(const NET::TcpConnectionPtr& conn,
-                 const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  // IO 线程：校验参数和会话状态，提交业务任务
-  void handle_rmdir(const NET::TcpConnectionPtr& conn,
-                    const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  // IO 线程：检查会话、解析新旧文件名并提交重命名业务任务。
-  void handle_rename(const NET::TcpConnectionPtr& conn,
-                     const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-  // IO 线程：检查会话状态，解析文件名和目标绝对目录。
-  void handle_move(const NET::TcpConnectionPtr& conn,
-                   const std::shared_ptr<ConnectionSession>& session, const std::string& args);
-
-  // 业务线程：删除空目录，将结果投递回 IO 线程
-  void remove_empty_directory_by_current_dir(const std::string& username,
-                                             const std::string& directory,
-                                             const std::string& directory_name,
-                                             const std::weak_ptr<ConnectionSession>& original,
-                                             const std::weak_ptr<NET::TcpConnection>& connection,
-                                             NET::EventLoop* io_loop);
-  // 在业务线程中执行：删除元数据，再向 IO 线程投递结果
-  void remove_file_by_current_dir(const std::string& username, const std::string& directory,
-                                  const std::string& file_name,
-                                  const std::weak_ptr<ConnectionSession>& original,
-                                  const std::weak_ptr<NET::TcpConnection>& connection,
-                                  NET::EventLoop* io_loop);
-  // 业务线程：重命名文件，将三态结果投递回连接所属的 IO 线程
-  void rename_file_by_current_dir(const std::string& username, const std::string& directory,
-                                  const std::string& old_name, const std::string& new_name,
-                                  const std::weak_ptr<ConnectionSession>& original,
-                                  const std::weak_ptr<NET::TcpConnection>& connection,
-                                  NET::EventLoop* io_loop);
-  // 业务线程：移动文件，将三态结果投递回连接所属的 IO 线程。
-  void move_file_to_directory(const std::string& username, const std::string& source_directory,
-                              const std::string& target_directory, const std::string& file_name,
-                              const std::weak_ptr<ConnectionSession>& original,
-                              const std::weak_ptr<NET::TcpConnection>& connection,
-                              NET::EventLoop* io_loop);
-  void create_dir(const std::string& username, const std::string& current_directory,
-                  const std::string& directory, std::weak_ptr<NET::TcpConnection>& connection);
-  // 异步线程超时处理
-  void finish_username_wait_timeout(std::weak_ptr<ConnectionSession> original,
-                                    std::weak_ptr<NET::TcpConnection> connection);
-
-  // 业务线程：递归删除目录，将结果投递回 IO 线程
-  void remove_directory_tree_by_current_dir(const std::string& username,
-                                            const std::string& directory,
-                                            const std::string& directory_name,
-                                            const std::weak_ptr<ConnectionSession>& original,
-                                            const std::weak_ptr<NET::TcpConnection>& connection,
-                                            NET::EventLoop* io_loop);
-  std::shared_ptr<OBSERVABILITY::StorageMetrics> _metrics;
-  int _thread_pool_threads_num;
-  NET::EventLoop* _loop;
-  NET::TcpServer _tcp_server;
-  BASE::DbConnectionPool* _db_conn_pool;
-  BASE::ThreadPool _th_pool;
-  Transfer::DiskExecutor _disk_executor{"tlss_disk"};
-
-  std::atomic<bool> _stopping{false};
-  std::mutex _stop_mutex;
-  std::condition_variable _stop_done;
-  bool _started = false;
-  bool _stop_started = false;
-  bool _stopped = false;
-  bool _stop_succeeded = false;
-
-  AUTH::MySqlUserRepository _user_repository;
-  AUTH::AuthService _auth_service;
-  MetadataService _metadata_service;
-  ObjectStorageEngine _object_storage;
-  ObjectCoordinator _object_coordinator;
-  ObjectGarbageCollector _object_gc;
-  ObjectGcWorker _object_gc_worker;
-  UploadEngine _upload_engine;
-  DownloadEngine _download_engine;
-
-  std::mutex sessions_mutex_;
-  std::unordered_map<const NET::TcpConnection*, std::shared_ptr<ConnectionSession>> _sessions;
+  AUTH::AuthService& _auth;
+  MetadataService& _metadata;
+  UploadEngine& _uploads;
+  DownloadEngine& _downloads;
 };
 }  // namespace TLSS::FileStorage
 
-#endif  // __INC_FTP_SERVER_H__
+#endif  // TLSS_FTP_SERVER_H

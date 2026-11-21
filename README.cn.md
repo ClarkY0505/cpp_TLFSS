@@ -182,24 +182,34 @@ Collector 需要单独启动；其管理 CLI 与业务客户端的命令入口�
 ```mermaid
 flowchart TD
     Client[tlss-cli / nc] --> Network[TcpServer / TcpConnection]
-    Network --> Service[StorageService]
-    Service --> Session[ConnectionSession / active TransferTask]
+    Network --> Adapter[TcpStorageServer]
+    Adapter --> Service[StorageService]
+    Adapter --> Tasks[UploadTask / DownloadTask]
+    Tasks --> Service
+    ApplicationRuntime[StorageRuntime] -.owns.-> Adapter
+    ApplicationRuntime -.assembles.-> Service
+    ApplicationRuntime --> Recovery[StorageRecoveryEngine]
+    Recovery --> Pool
+    Recovery --> Objects
+    Adapter --> Session[ConnectionSession / active TransferTask]
     Service --> Auth[AuthService / UserRepository]
-    Service --> Upload[UploadEngine / UploadTask]
-    Service --> Download[DownloadEngine / DownloadTask]
+    Service --> Upload[UploadEngine]
+    Service --> Download[DownloadEngine]
     Service --> Metadata[MetadataService]
     Upload --> Metadata
+    Upload --> Objects
     Download --> Metadata
+    Download --> Objects
     Auth --> Root[create_root_in_transaction]
-    Upload --> Receiver[AsyncReceiver]
-    Download --> Source[AsyncFileSource / send_file_async]
+    Tasks --> Receiver[AsyncReceiver]
+    Tasks --> Source[AsyncFileSource / send_file_async]
     Receiver --> Objects[ObjectStorageEngine / VerifyEngine]
     Source --> Objects
     Objects --> Filesystem[Local SHA-256 objects]
     Metadata --> Cache[MetadataCache / HashArcCache]
     Cache --> Scopes[Directory gates / subtree coordination]
     Metadata --> Pool[DbConnectionPool]
-    Service --> GC[ObjectGcWorker / ObjectGarbageCollector]
+    ApplicationRuntime --> GC[ObjectGcWorker / ObjectGarbageCollector]
     GC --> Objects
     GC --> Pool
     Upload --> ObjectLock[ObjectCoordinator / hash locks]
@@ -209,7 +219,7 @@ flowchart TD
     Root -->|same transaction connection| MySQL
     Network --> Writes[WriteScheduler / outbound FIFO]
     Source --> Writes
-    Service --> Metrics[Atomic business metrics]
+    ApplicationRuntime --> Metrics[Atomic business metrics]
     Metadata --> Metrics
     Objects --> Metrics
     Metrics --> Runtime[StorageMonitorRuntime]
@@ -223,7 +233,7 @@ flowchart TD
 
 图中为当前实现。主服务直接使用自研 TCP 网络库，`src/gateway/` 尚未参与请求处理。`MetadataService` 先查缓存，未命中时通过连接池执行 SQL；注册创建根目录时复用用户仓储已借用的事务连接，不经过普通缓存读写入口。
 
-网络层负责连接与消息回调，`StorageService` 解析命令并维护会话。每个连接的 `ConnectionSession` 保存认证状态、用户身份、当前目录和活动传输任务句柄；具体传输状态由任务持有，均由所属 IO 线程读写。认证、目录操作和上传前置检查派发到业务线程池；文件读写、下载查询及上传最终登记由磁盘任务执行。认证结果、目录切换结果和传输结果通过 `queue_in_loop` 返回连接所属的 EventLoop。
+网络层负责连接与消息回调，`TcpStorageServer` 解析命令并维护会话。注入依赖的 `StorageService` 接收结构化身份/目录请求，协调 AuthService、MetadataService、UploadEngine 和 DownloadEngine，其公共接口不依赖 TCP 或资源池。`StorageRuntime` 装配组件，管理执行资源、恢复、指标快照和停机。每个连接的 `ConnectionSession` 保存认证状态、用户身份、当前目录和活动传输任务句柄；具体传输状态由任务持有，均由所属 IO 线程读写。认证、目录操作和上传前置检查派发到业务线程池；文件读写、下载查询及上传最终登记由磁盘任务执行。认证结果、目录切换结果和传输结果通过 `queue_in_loop` 返回连接所属的 EventLoop。
 
 服务端默认配置为 4 个 IO 线程、8 个业务线程、256 个业务执行队列槽位和 128 个异步等待队列槽位；独立磁盘线程池默认使用 2 个线程。目录操作通过 `try_run` 提交，队列已满时返回忙碌提示；登录与注册通过 `submit_async` 提交，排队等待期限为 2 秒。
 
@@ -246,10 +256,14 @@ flowchart TD
 
 | 组件与源码 | 负责的内容 | 边界 |
 | --- | --- | --- |
-| [StorageService](src/ftp/server.cpp) | 认证交互、命令/控制帧解析、会话索引、任务创建、响应和停机编排 | 不直接实现对象落盘与摘要计算 |
+| [StorageService](src/ftp/server.cpp) | 协议无关的认证、目录/文件操作及上传下载协调 | 注入引擎引用，不持有 socket、会话、连接池、线程池或生命周期 |
+| [TcpStorageServer](src/ftp/tcp_storage_server.cpp) | 认证交互、拆帧、会话索引、TCP 任务创建与响应 | 借用业务服务和执行资源，只持有 TCP 适配器与会话 |
+| [StorageRuntime](src/ftp/storage_runtime.cpp) | 装配依赖、管理执行资源、指标快照与启动停机 | 任务清理和网络屏障完成前保持服务/引擎存活 |
+| [StorageRecoveryEngine](src/ftp/storage_recovery_engine.cpp) | 临时清理、对象表检查、回填和 DELETING 恢复 | 业务监听和 worker 启动前执行的阻塞准备 |
 | [TransferTask / TransferContext](inc/ftp/transfer_task.h) | 每次传输的阶段、取消、事件通知；捕获身份和目录快照 | 在 IO loop 校验连接、会话、用户、目录和传输代次，过滤过期结果 |
-| [UploadEngine / UploadTask](src/ftp/upload_engine.cpp) | 上传预检查、接收器组装、先发布对象再登记元数据 | 引擎创建每次传输的 task；task 复用共享执行资源 |
-| [DownloadEngine / DownloadTask](src/ftp/download_engine.cpp) | 查询文件映射、打开对象、排队发送并等待客户端 ACK | 发送完成后仍需对端持久化确认 |
+| [UploadEngine](src/ftp/upload_engine.cpp) | 预检查、临时接收器创建、对象发布和元数据提交 | 协议无关；哈希锁覆盖发布与提交 |
+| [UploadTask / DownloadTask](src/ftp/tcp_transfer_tasks.cpp) | TCP 传输阶段、异步适配、取消、事件、发送和 ACK | 在现有执行资源上用不可变身份/目录快照调用 StorageService |
+| [DownloadEngine](src/ftp/download_engine.cpp) | 查询元数据、打开对象，返回源句柄和哈希 | 不发送 socket 数据、不管理 ACK 状态 |
 | [MetadataService](src/ftp/metadata_service.cpp) | 目录查询与修改、文件删除/重命名/移动、上传登记、下载哈希及缓存协调 | 不持有文件正文；事务辅助函数共用借入连接；`prepare_upload()` 直接查数据库 |
 | [ObjectStorageEngine](src/ftp/object_storage_engine.cpp) | 临时对象、发布、校验、读取、删除、临时清理和对象枚举 | 同步文件系统原语，不依赖数据库、协议或会话；调用方选择线程 |
 | [ObjectRepository](src/ftp/object_repository.cpp) / [GC 事务](src/ftp/object_gc_transaction.cpp) | 对象状态、引用检查、无引用时间，以及删除准备和收尾 | 使用调用方的数据库连接；确认 DELETING 提交后才物理删除 |
@@ -258,7 +272,7 @@ flowchart TD
 | [VerifyEngine](src/ftp/verify_engine.cpp) | 精确长度约束、增量 SHA-256 与预期摘要比对 | 文件完整性校验，与用户认证分开 |
 | [DiskExecutor](inc/ftp/disk_executor.h) / [异步适配器](inc/ftp/async_file_receiver.h) | 磁盘任务调度、活动资源登记、取消与清理，向 IO loop 回传结果 | 执行资源和异步适配层，不负责业务权限或虚拟目录 |
 
-上传链路为 `StorageService → UploadTask → 上传预检查 → AsyncReceiver → 对象发布 → 元数据登记 → UOK`；下载链路为 `StorageService → DownloadTask → 元数据/缓存 → AsyncFileSource → send_file_async → DONE → ACK → OK`。客户端只在本地校验、同步和发布成功后发送 ACK。
+上传链路为 `TcpStorageServer → UploadTask → StorageService / UploadEngine → AsyncReceiver → 对象发布 + 元数据提交 → UOK`；下载链路为 `TcpStorageServer → DownloadTask → StorageService / DownloadEngine → AsyncFileSource → send_file_async → DONE → ACK → OK`。客户端只在本地校验、同步和发布成功后发送 ACK。
 
 注册仍由 `AuthService → MySqlUserRepository` 发起事务，调用 `MetadataService::create_root_in_transaction()` 创建根目录；该函数不额外借连接、不独立提交，用户与根目录共用一次事务。旧头文件 [service_engine.h](inc/ftp/service_engine.h) 中的 `StorageEngine` 是 `MetadataService` 的源码兼容别名。
 
@@ -283,7 +297,7 @@ flowchart TD
 
 `Buffer::read_fd()` 使用 `readv`，组合内部可写区和 64 KiB 栈缓冲。服务为连接设置 256 KiB 输出高水位，达到水位后暂停读取，写缓冲排空后恢复；连接待发送内存（含异步文件块预留）另有 1 MiB 上限，而不是将整个文件装入该缓冲。这些措施不能替代所有上游任务队列的容量控制。
 
-[StorageService::on_message()](src/ftp/server.cpp) 在控制阶段按 `\n` 拆行，兼容 `\r\n`，保留未收齐的命令并循环处理完整命令；单条控制命令最多 4096 字节，超过限制关闭连接。上传正文按声明长度消费，不按换行拆分。`ftp/` 实现的是自定义 TCP 存储协议，不兼容标准 FTP。
+[TcpStorageServer::on_message()](src/ftp/tcp_storage_server.cpp) 在控制阶段按 `\n` 拆行，兼容 `\r\n`，保留未收齐的命令并循环处理完整命令；单条控制命令最多 4096 字节，超过限制关闭连接。上传正文按声明长度消费，不按换行拆分。`ftp/` 实现的是自定义 TCP 存储协议，不兼容标准 FTP。
 
 ### 发送调度与背压
 
@@ -429,7 +443,7 @@ signup → 用户名 → 密码 → 确认密码 → registering
 
 [GC 事务](src/ftp/object_gc_transaction.cpp) 重新检查状态和引用；只有确认 DELETING 提交成功才能物理删除，提交未知则停止本次尝试。已处于 DELETING 的对象可继续删除和收尾；DELETING 却仍有引用属于异常，不能据此删除。[ObjectCoordinator](inc/ftp/object_coordinator.h) 为上传和 GC 提供共用的 256 把哈希分片互斥锁。
 
-启动业务、磁盘、GC worker 和监听前，主入口持有 [StorageRootLock](src/ftp/storage_root_lock.cpp)，通过对象目录内 `.tlss.lock` 的非阻塞独占 `flock` 获取所有权，再调用 `StorageService::prepare_storage()`：
+启动业务、磁盘、GC worker 和监听前，主入口持有 [StorageRootLock](src/ftp/storage_root_lock.cpp)，通过对象目录内 `.tlss.lock` 的非阻塞独占 `flock` 获取所有权，再调用 `StorageRuntime::prepare_storage()`：
 
 1. 删除符合识别规则的 `.tlss-part-*` 临时文件并同步对象目录。
 2. 检查 `storage_objects` 可访问。
@@ -688,15 +702,15 @@ storage-monitor-collector 进程
 
 ## 网络服务生命周期与线程约束
 
-本节描述当前 `TcpServer` / `StorageService` 的使用契约。安全运行需要同时满足**调用顺序、线程归属和对象生命周期**；接口使用了原子变量或把任务放入队列，并不代表允许任意并发调用。以下流程适用于已成功启动的服务，直接使用 `TcpServer` 时也须由上层执行对应的停机步骤。
+本节描述当前 `TcpServer` / `StorageRuntime` 的使用契约。安全运行需要同时满足**调用顺序、线程归属和对象生命周期**；接口使用了原子变量或把任务放入队列，并不代表允许任意并发调用。以下流程适用于已成功启动的服务，直接使用 `TcpServer` 时也须由上层执行对应的停机步骤。
 
 ### 完整启动与运行路径
 
-当前入口见 [main.cpp](src/main.cpp)，服务编排见 [StorageService](src/ftp/server.cpp)。
+当前入口见 [main.cpp](src/main.cpp)，服务编排见 [StorageRuntime](src/ftp/storage_runtime.cpp)。
 
 1. **主线程**在创建工作线程前，通过 `pthread_sigmask` 阻塞 `SIGINT` / `SIGTERM`，然后初始化日志。退出信号由后续控制线程通过 `sigwait` 同步接收。
-2. **主线程**解析对象根目录并获取 `StorageRootLock`，再构造 `EventLoop` 和引用它的 `StorageService`。服务构造时获取数据库池，配置回调、IO 线程和队列容量。持有根锁、尚无传输时调用 `prepare_storage()`，完成清理、回填和删除恢复；失败则停止启动。准备成功后才构造监控运行时，并按开关启动监控和资源采样。
-3. **主线程**调用 `StorageService::start()`：先启动业务池、磁盘执行器和对象 GC worker，再由 `TcpServer::start()` 启动 IO 线程并开放监听。配置必须先于启动完成；启动不能与停机或析构并发。
+2. **主线程**解析对象根目录并获取 `StorageRootLock`，再构造 `EventLoop` 和引用它的 `StorageRuntime`。服务构造时获取数据库池，配置回调、IO 线程和队列容量。持有根锁、尚无传输时调用 `prepare_storage()`，完成清理、回填和删除恢复；失败则停止启动。准备成功后才构造监控运行时，并按开关启动监控和资源采样。
+3. **主线程**调用 `StorageRuntime::start()`：先启动业务池、磁盘执行器和对象 GC worker，再由 `TcpServer::start()` 启动 IO 线程并开放监听。配置必须先于启动完成；启动不能与停机或析构并发。
 4. 启动完成后创建**独立控制线程**，让它等待退出信号；主线程进入 `EventLoop::loop()`。控制线程可以提交停机请求并等待，但主 loop 必须继续运行以处理这些请求。
 5. 正常运行时，**主 loop**接受连接、分配 IO loop、维护 `_connections`；连接所属的 **IO loop**处理读写、连接状态和业务回调；**业务线程池**执行认证和目录等操作，**磁盘线程池**执行文件操作及相关元数据回调；结果通过事件循环任务返回 IO loop。
 
@@ -708,7 +722,7 @@ IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工�
 
 ```text
 控制线程 sigwait() 收到 SIGINT / SIGTERM
-  → StorageService::stop(grace_period)
+  → StorageRuntime::stop(grace_period)
   → 标记业务停机，串行化停机请求
   → TcpServer::stop_accepting(done)
   → 等待 done：监听关闭、已有连接暂停读取
@@ -721,14 +735,14 @@ IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工�
   → TcpServer::stop_io_threads()，退出并 join IO 线程
   → 数据库连接池 shutdown()
   → 主 EventLoop::quit()
-  → 发布 StorageService 停机结果
+  → 发布 StorageRuntime 停机结果
   → 停止并 join 资源采样器
   → 完成监控最后一轮快照，停止并 join 监控 Engine 线程
   → 控制线程结束
 
 主线程 EventLoop::loop() 返回
   → join 控制线程
-  → 先析构监控运行时，再析构 StorageService / TcpServer
+  → 先析构监控运行时，再析构 StorageRuntime / TcpServer
   → 析构主 EventLoop，服务清理后释放对象根锁
   → Logger::shutdown()
 ```
@@ -737,7 +751,7 @@ IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工�
 
 | 阶段 | 执行线程与实际操作 | 进入下一阶段的条件 |
 | --- | --- | --- |
-| 标记停机 | 控制线程设置 `StorageService::_stopping`；停止接受新的业务提交 | 上层不再产生新的业务任务；启动已经完成 |
+| 标记停机 | 控制线程设置 `StorageRuntime::_stopping`；停止接受新的业务提交 | 上层不再产生新的业务任务；启动已经完成 |
 | 停止接收 | 控制线程调用 `stop_accepting()`；主 loop 释放 Acceptor，各 IO loop 执行 `pause_read_for_shutdown()` | `done` 在主 loop 被调用，控制线程通过 future 等机制收到通知 |
 | 结束业务任务 | 控制线程调用业务线程池 `stop()`；拒绝新提交、取消异步等待队列中尚未进入执行队列的任务，执行完已入队任务并 join 工作线程 | 业务线程池 `stop()` 返回；此时 IO loop 和数据库仍可用 |
 | 结束磁盘任务 | 控制线程调用 `DiskExecutor::stop()`，取消活动文件源/接收器，等待文件资源释放并回收磁盘线程 | 磁盘执行器已停止；整个阶段 IO loop 和数据库仍须存活 |
@@ -748,11 +762,11 @@ IO 线程数为 `0` 时，连接也由主 loop 管理，没有独立的 IO 工�
 | 回收资源 | 独立控制线程调用 `stop_io_threads()`，再关闭数据库池，最后 `quit()` 主 loop | IO 线程已 join；控制线程完成停机并发布结果 |
 | 析构 | 主线程退出 `loop()`，join 控制线程，依次销毁服务与主 loop，最后关闭日志 | 没有仍会访问服务对象或已销毁 loop 的任务、回调及外部调用 |
 
-`StorageService::stop()` 默认的连接宽限期为 5 秒，可传入非负时长。它只限制等待连接自然关闭的阶段，不是整个停机过程的超时：业务/磁盘任务、当前 GC 批次、强制关闭后的清理和数据库线程 join 仍可能等待。返回值表示数据库连接池是否按其关闭策略成功结束，不应解释为整个停机过程一定在 `grace_period` 内完成。
+`StorageRuntime::stop()` 默认的连接宽限期为 5 秒，可传入非负时长。它只限制等待连接自然关闭的阶段，不是整个停机过程的超时：业务/磁盘任务、当前 GC 批次、强制关闭后的清理和数据库线程 join 仍可能等待。返回值表示数据库连接池是否按其关闭策略成功结束，不应解释为整个停机过程一定在 `grace_period` 内完成。
 
 ### 直接使用 TcpServer 时如何等待完成
 
-使用 `StorageService` 时，应由独立控制线程调用其 `stop()`，不要同时绕过它操作内部 `TcpServer`。若直接组合 `TcpServer`、业务线程池和数据库连接池，下面展示控制线程中的停机顺序；各对象已完成启动，主 loop 仍在运行，调用方在整个流程中保持它们存活。
+使用 `StorageRuntime` 时，应由独立控制线程调用其 `stop()`，不要同时绕过它操作内部 `TcpServer`。若直接组合 `TcpServer`、业务线程池和数据库连接池，下面展示控制线程中的停机顺序；各对象已完成启动，主 loop 仍在运行，调用方在整个流程中保持它们存活。
 
 ```cpp
 // 此代码运行在独立控制线程中；不能放进主 loop、IO 回调或业务线程池任务。
@@ -779,7 +793,7 @@ base_loop.quit();
 // 主线程在 loop() 返回后 join 此控制线程，再析构服务和 base_loop。
 ```
 
-若上层还持有磁盘执行器，应在 `worker_pool.stop()` 之后、`shutdown_connections()` 之前取消并等待其收尾，再确保 GC worker 在数据库销毁前停止，与 `StorageService::stop()` 一致。示例中的 `worker_pool`、`db_pool` 和 `base_loop` 代表调用方持有的对应对象，需包含 `<future>`、`<memory>` 和 `<chrono>`。不要用 `sleep()` 猜测异步操作是否完成，也不要在控制线程等待之前先停止 EventLoop，否则完成回调无法执行。
+若上层还持有磁盘执行器，应在 `worker_pool.stop()` 之后、`shutdown_connections()` 之前取消并等待其收尾，再确保 GC worker 在数据库销毁前停止，与 `StorageRuntime::stop()` 一致。示例中的 `worker_pool`、`db_pool` 和 `base_loop` 代表调用方持有的对应对象，需包含 `<future>`、`<memory>` 和 `<chrono>`。不要用 `sleep()` 猜测异步操作是否完成，也不要在控制线程等待之前先停止 EventLoop，否则完成回调无法执行。
 
 ### 必须遵守的线程与生命周期约束
 
@@ -790,16 +804,16 @@ base_loop.quit();
 | `_connections`、连接编号 | 由主 loop 维护；析构前先完成停机，避免其他线程与主 loop 同时访问连接表 | 容器数据竞争、迭代器失效 |
 | TcpConnection / Channel | 对读写状态、缓冲和 Channel 的直接操作归所属 IO loop；跨线程使用提供了调度的接口 | 与事件分发、Channel 注销产生竞态；`shared_ptr` 只保活，不自动同步成员访问 |
 | 停机回调 `done` | 在主 loop 执行；只做通知或轻量操作，不阻塞等待同一 loop 的任务 | 主 loop 无法推进，停机等待无法结束 |
-| `StorageService::stop()`、`stop_io_threads()` | 由主 loop、IO 线程池、业务线程池和磁盘线程池之外的独立控制线程执行 | 阻塞等待自身处理屏障，或 join 当前线程；当前代码的线程检查未覆盖所有误用 |
+| `StorageRuntime::stop()`、`stop_io_threads()` | 由主 loop、IO 线程池、业务线程池和磁盘线程池之外的独立控制线程执行 | 阻塞等待自身处理屏障，或 join 当前线程；当前代码的线程检查未覆盖所有误用 |
 | 文件异步任务 | 保持磁盘执行器、所属 IO loop 和数据库存活到取消及工作线程收尾完成；会话与接收器接口由 IO loop 操作 | 磁盘任务或结果回调访问已销毁资源 |
-| 捕获裸 `this` 的任务 | TcpServer、StorageService 以及用户回调引用的对象必须活到相关任务和回调执行完 | 关闭回调、屏障或其他排队任务访问已析构对象 |
+| 捕获裸 `this` 的任务 | TcpServer、StorageRuntime 以及用户回调引用的对象必须活到相关任务和回调执行完 | 关闭回调、屏障或其他排队任务访问已析构对象 |
 | loop 生命周期 | IO loop 清理完成后才能 join IO 线程；主 loop 活到停机通知完成及服务析构之后 | 停机任务无法执行，或连接/任务通过裸 loop 指针访问已销毁对象 |
 | 外部持有的连接和任务 | 停机前协调所有外部生产者；IO 线程回收后不能再通过旧连接提交任务或使用其 loop | 持有 `TcpConnectionPtr` 并不会延长它所引用的 EventLoop 生命周期 |
-| 多个停机调用者 | 使用 `StorageService::stop()` 的互斥与完成通知统一协调；直接使用 TcpServer 时由上层保证只有一个停机流程 | 重复 `shutdown_connections()` 可能覆盖完成回调；线程池回收可能与其他操作交错 |
+| 多个停机调用者 | 使用 `StorageRuntime::stop()` 的互斥与完成通知统一协调；直接使用 TcpServer 时由上层保证只有一个停机流程 | 重复 `shutdown_connections()` 可能覆盖完成回调；线程池回收可能与其他操作交错 |
 
 `when_io_idle()` 在各 IO loop 中排入屏障，再回主 loop 汇总结果。它保证相关先前任务已执行到屏障位置，**不保证其他线程今后不会继续提交任务，也不自动递归等待这些任务派生的所有后续任务**。因此必须先停止任务生产，再依次等待业务结束和连接清理；不能把这个函数当成任意时刻都能安全销毁服务器的证明。
 
-`TcpServer::~TcpServer()` 不会自动完成上述完整停机流程，也不会自动延长裸 `this` 回调引用的对象生命周期。已启动的 `StorageService` 必须显式完成 `stop()` 后再析构，否则其析构函数会终止进程。不要在业务回调里直接删除仍在运行的服务器，也不要把“已调用停止接口”等同于“已完成停止”。
+`TcpServer::~TcpServer()` 不会自动完成上述完整停机流程，也不会自动延长裸 `this` 回调引用的对象生命周期。已启动的 `StorageRuntime` 必须显式完成 `stop()` 后再析构，否则其析构函数会终止进程。不要在业务回调里直接删除仍在运行的服务器，也不要把“已调用停止接口”等同于“已完成停止”。
 
 实现入口：[TcpServer](src/common/net/tcp_server.cpp)、[EventLoop](src/common/net/event_loop.cpp)、[EventLoopThread](src/common/net/event_loop_thread.cpp)、[业务线程池](src/common/base/tlss_thread_pool.cpp)。现有[停机回归测试](tests/test_tcp_server_shutdown.cpp)覆盖等待对端 FIN、零 IO 工作线程下的强制关闭等路径；它不代表已经验证任意启动/停机/析构交错都安全。
 
@@ -841,10 +855,10 @@ cpp_TLFSS/
 | `scripts/build.sh` | 配置、编译、测试的封装脚本 |
 | `third/`、`third_party/` | 仓库内依赖与上游子模块；不要提交其构建产物 |
 | `inc/common/cache/`、`inc/ftp/metadata_cache.h`、`src/ftp/subtree_*.cpp` | 头文件缓存存储与元数据缓存入口，配套子树协调/版本实现 |
-| `src/ftp/` | `metadata_lib` 管理元数据事务、对象仓储和子树协调；`transfer_lib` 提供对象、校验、锁与异步磁盘原语；`ftp_lib` 组合传输任务、GC/回填编排、协议与客户端 |
+| `src/ftp/` | `storage_business_lib` 提供注入依赖的业务协调层和协议无关工作流；`metadata_lib` 管理事务/缓存协调；`transfer_lib` 提供对象/磁盘原语；`ftp_lib` 组合 TCP 适配、运行时/恢复、GC 和客户端 |
 | `doc/` | 内存拷贝子系统的设计报告与导读，以及本地技术笔记 |
 
-顶层 CMake 组织 `common_lib`、`auth_lib`、`metadata_lib`、`transfer_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`observability_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
+顶层 CMake 组织 `common_lib`、`auth_lib`、`metadata_lib`、`transfer_lib`、`storage_business_lib`、`ftp_lib`、`logger_lib`、`monitor_lib`、`observability_lib`、`rpc_lib`、`gateway_lib`、`proto_lib` 和 `tlss_memory`。主服务链接多个库，但实际启用的运行组件由 `main.cpp` 决定。额外的基础模块示例与验证代码位于 `src/common/base/example/`，并非全部由顶层 CTest 自动运行。
 
 ## 构建与运行
 
@@ -860,7 +874,7 @@ cpp_TLFSS/
 
 ### 配置数据库
 
-主程序构造 `StorageService` 时会初始化 MySQL 连接池，并连接固定的 `tlss_db` 数据库。先在本地 MySQL 中执行建库脚本，再按本机环境调整配置：
+主程序构造 `StorageRuntime` 时会初始化 MySQL 连接池，并连接固定的 `tlss_db` 数据库。先在本地 MySQL 中执行建库脚本，再按本机环境调整配置：
 
 ```bash
 mysql -u root -p < sql/init_tlss_db.sql
@@ -887,8 +901,8 @@ mysql -u root -p tlss_db < sql/migrations/001_create_storage_objects.sql
 | 设置 | 当前取值 | 配置入口 |
 | --- | --- | --- |
 | 服务监听端口 | `9000` | `src/main.cpp`，尚无命令行选项 |
-| IO / 业务线程数、业务队列容量 | 4 / 8 / 256 | `StorageService` 构造参数 |
-| 认证等待队列容量 / 入队期限 | 128 / 2 秒 | `src/ftp/server.cpp` |
+| IO / 业务线程数、业务队列容量 | 4 / 8 / 256 | `StorageRuntime` 构造参数 |
+| 认证等待队列容量 / 入队期限 | 128 / 2 秒 | `src/ftp/storage_runtime.cpp` / `src/ftp/tcp_storage_server.cpp` |
 | 磁盘线程数 / 活动文件源与接收器上限 | 2 / 每个执行器合计 64 | `DiskExecutor::start()` 参数 / 编译期常量 |
 | 对象目录 | `./data/objects` | 启动前设置 `TLSS_STORAGE_ROOT` 可覆盖 |
 | 对象 GC 间隔 / 宽限期 / 批大小 | 30 秒 / 10 分钟 / 最多 128 个 | `ObjectGcWorkerConfig` 默认值 / 仓储查询上限，主入口暂无调参入口 |
@@ -1088,6 +1102,7 @@ cmake --build --preset release --target memcpy_glibc_benchmark
 | 对象生命周期 | 对象/引用仓储、上传登记、GC 准备/收尾事务、批处理、worker 停机、启动回填/恢复、临时清理、磁盘扫描、根锁及文件系统错误注入 |
 | 文件传输与服务处理器 | 真实服务端/客户端传输处理器，以及文件/目录修改和启动恢复；分块读写、哈希、发布、失败、取消、过期回调与停机；使用数据库/认证替代实现 |
 | 交互客户端 | `test_ftp_client.py` 使用伪终端与测试服务端交互，目前未注册到 CTest |
+| 业务分层 | 无 socket 的 `storage_workflows_test` 验证业务协调、非法上下文、真实对象复用/读取、提交结果和指标；Python `storage_business_boundaries` 验证公共头依赖闭包 |
 | 认证和数据库 | 已注册 `signup_transaction_boundary_test`，以数据库替代实现验证真实仓储和根目录创建共用事务、回滚及提交结果未知；其余认证服务、仓储、注册、事务和预处理语句测试源码尚未注册，部分要求真实测试数据库 |
 | 监控 | Engine、Store、策略、协议、CLI、并发、可靠告警和 demo smoke；业务指标、资源采样、运行时 schema/阈值/生命周期与 Collector 进程 smoke |
 | 内存拷贝 | CTest 中的链接/基础正确性；更深入的验证与基准分散在 benchmark 和专项脚本中 |
@@ -1109,22 +1124,24 @@ ctest --test-dir build-tests --output-on-failure -R '^(storage_metrics_test|syst
 
 可使用 `ctest --test-dir build-tests -N` 查看该构建目录注册的测试；它不会执行测试，也不能证明测试通过。数量取决于配置、依赖和是否重新运行 CMake。
 
-**本地验证快照 — 2026-11-19：** 主程序 Debug 构建成功；独立 Debug 配置开启 `BUILD_TESTS=ON`，环境提供 Python 3、未找到 GoogleTest，共注册 944 项测试。重新构建 8 个代表性测试程序，其筛选出的 107 项 CTest 场景全部通过，覆盖路径校验/解析、对象引擎、删除/临时清理/磁盘扫描、根锁、子树缓存/版本、上传登记与 GC 事务。这是子集验证，不是全部 944 项通过。所选测试使用临时文件、数据库替代实现和错误注入；未运行真实 MySQL/客户端端到端测试、Sanitizer 或性能基准。快照对应包含未提交改动的已核查工作区，不保证其他配置或版本具有相同数量和结果。
+**本地验证快照 — 2026-11-21：** 全部 Debug 目标构建成功；环境提供 Python 3、未找到 GoogleTest，全部 946 项已注册 CTest 用例通过，包括 310 项 FTP 传输/服务场景，以及新增的无 socket 业务工作流和公共头依赖检查。网络与监控用例在允许本机套接字的环境运行。测试使用临时文件和数据库替代实现；未运行真实 MySQL/客户端端到端测试、Sanitizer 或性能基准。快照对应包含未提交改动的已核查工作区，数量随配置和版本变化。
 
 未注册的 MySQL 集成测试源码使用 `TLSS_TEST_MYSQL_HOST`、`TLSS_TEST_MYSQL_USER`、`TLSS_TEST_MYSQL_PASSWORD`、`TLSS_TEST_MYSQL_DATABASE`，以及可选的 `TLSS_TEST_MYSQL_PORT`。注册端到端测试另需 `TLSS_TEST_FTP_SIGNUP=1`，并使用服务连接池配置。请使用专门的测试数据库；未配置环境时部分用例会跳过，跳过不等于验证成功。当前仍有旧测试接口失配，见[待收尾事项](#当前限制与待收尾事项)。
 
 建议按以下顺序阅读源码：
 
-1. `src/main.cpp` → `src/ftp/server.cpp` → `inc/ftp/context.h`：了解服务入口、命令派发、会话状态与停机流程。
+1. `src/main.cpp` → `src/ftp/storage_runtime.cpp` → `src/ftp/tcp_storage_server.cpp` → `src/ftp/server.cpp`：先理解运行资源所有权、协议/会话，再看协议无关业务协调层。
 2. `src/common/net/event_loop.cpp` → `src/common/net/tcp_server.cpp` → `src/common/net/tcp_connection.cpp` → `src/common/net/write_scheduler.cpp`：追踪连接与消息处理、有序发送、异步读取完成及背压。
 3. `src/common/base/tlss_thread_pool.cpp`、`src/common/base/mysql_connection_pool.cpp`：查看任务与数据库资源的生命周期。
 4. `src/auth/auth_service.cpp` → `src/auth/user_repository.cpp` → `src/ftp/metadata_service.cpp`：追踪注册、登录与虚拟目录的数据库操作。
 5. `inc/ftp/metadata_cache.h` → `src/ftp/subtree_coordinator.cpp` → `src/ftp/subtree_versions.cpp` → `inc/common/cache/arc_cache.h`：理解命中、目录/子树失效、冲突范围、加载合并与分片容量，配合 `tests/test_metadata_cache*.cpp` 阅读。
-6. 从 `src/ftp/transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp` 和 `src/common/net/write_scheduler.cpp`：追踪任务状态、发布、校验、异步适配与发送。
-7. `src/ftp/directory_deletion.cpp` → 同目录的 `file_rename.cpp` → `file_move.cpp`：理解元数据事务边界、冲突校验与提交未知；再读 `object_repository.cpp` → `object_gc_transaction.cpp` → `object_garbage_collector.cpp` → `object_gc_worker.cpp` → `object_backfill.cpp`，配合 `StorageService::prepare_storage()` 追踪对象生命周期与恢复。
+6. 从 `src/ftp/tcp_transfer_tasks.cpp`、`transfer_task.cpp`、`upload_engine.cpp` 和 `download_engine.cpp` 开始，再读同目录的 `object_storage_engine.cpp`、`verify_engine.cpp`、`async_file_receiver.cpp`、`async_file_source.cpp`，最后读 `src/common/net/tcp_connection.cpp` 和 `src/common/net/write_scheduler.cpp`：追踪任务状态、发布、校验、异步适配与发送。
+7. `src/ftp/directory_deletion.cpp` → 同目录的 `file_rename.cpp` → `file_move.cpp`：理解元数据事务边界、冲突校验与提交未知；再读 `object_repository.cpp` → `object_gc_transaction.cpp` → `object_garbage_collector.cpp` → `object_gc_worker.cpp` → `object_backfill.cpp`，配合 `StorageRuntime::prepare_storage()` 追踪对象生命周期与恢复。
 8. `src/main.cpp` → `src/observability/storage_monitor_runtime.cpp` → `src/observability/system_resource_sampler.cpp` → `src/observability/collector_main.cpp`：追踪主服务监控；`src/monitor/demo/` 提供独立库示例。
 9. `src/client_main.cpp` → `src/ftp/client.cpp` → `src/common/net/tcp_client.cpp` → `src/common/net/connector.cpp`：追踪客户端连接、重试和退出。
 10. `src/common/memory/memcpy_dispatch.cpp` → `internal/copy_policy.cpp` → `internal/copy_executor.cpp` → `internal/memory_runtime.cpp`（后三者相对 `src/common/memory/`）：理解内存拷贝策略和运行时。
+
+本次重构新增 `storage_workflows_test` 和 `storage_business_boundaries`，可用 `ctest --test-dir build-tests --output-on-failure -R "^storage_(workflows_test|business_boundaries)$"` 运行。可执行程序入口现构造 `StorageRuntime`；使用旧网络版 StorageService 构造函数的 C++ 调用方需要迁移到 StorageRuntime，或显式注入引擎来构造纯业务服务；注入的引擎必须活到业务服务及调用它的任务结束。
 
 部分导学笔记描述的是早期版本；内容有差异时，请核对其标注的源码基线，并以当前实现和 CMake 注册项为准。
 

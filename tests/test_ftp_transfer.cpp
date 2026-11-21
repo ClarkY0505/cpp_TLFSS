@@ -2,7 +2,7 @@
 #include "common/net/event_loop.h"
 #include "ftp/async_file_source.h"
 #include "ftp/client.h"
-#include "ftp/server.h"
+#include "ftp/storage_runtime.h"
 #include "ftp/service_engine.h"
 #include "ftp/storage_root_lock.h"
 #include "ftp/transfer_validation.h"
@@ -801,7 +801,7 @@ struct Fixture {
   EventLoop loop;
   std::shared_ptr<OBSERVABILITY::StorageMetrics> metrics =
       std::make_shared<OBSERVABILITY::StorageMetrics>();
-  StorageService service;
+  StorageRuntime service;
   TcpConnectionPtr conn;
   std::shared_ptr<ConnectionSession> session;
   int peer = -1;
@@ -816,7 +816,7 @@ struct Fixture {
     peer = sockets[1];
     conn = std::make_shared<TcpConnection>(&loop, "test", sockets[0], InetAddress(), InetAddress());
     conn->set_connection_cb([this](const TcpConnectionPtr& connection) {
-      service.on_connection(connection);
+      service._server.on_connection(connection);
     });
     conn->set_close_cb([this](const TcpConnectionPtr& connection) {
       loop.queue_in_loop([connection] {
@@ -825,10 +825,10 @@ struct Fixture {
     });
     conn->set_message_cb(
         [this](const TcpConnectionPtr& connection, Buffer* buffer, TIME::Timestamp time) {
-          service.on_message(connection, buffer, time);
+          service._server.on_message(connection, buffer, time);
         });
     conn->connect_established();
-    session = service._sessions.at(conn.get());
+    session = service._server._sessions.at(conn.get());
     session->login_state = LoginState::k_authenticated;
     session->name = "test_user";
     session->user_id = 1;
@@ -843,7 +843,7 @@ struct Fixture {
     conn->set_close_cb({});
     conn->connect_destroyed();
     conn.reset();
-    service._sessions.clear();
+    service._server._sessions.clear();
     if (peer >= 0)
       ::close(peer);
   }
@@ -1249,7 +1249,7 @@ void check_source_eof(Fixture& fixture, const std::string& directory) {
 
 void check_shutdown_waits(const std::string& directory) {
   EventLoop loop;
-  StorageService service(&loop, InetAddress(0), "shutdown-regression", 0, 0, 32);
+  StorageRuntime service(&loop, InetAddress(0), "shutdown-regression", 0, 0, 32);
   service.start();
 
   int sockets[2];
@@ -1342,7 +1342,7 @@ void check_gc_startup_cleanup(const std::string& scenario) {
   bool gc_was_started = false;
   bool service_was_started = false;
   {
-    StorageService service(&loop, InetAddress(0), "gc-startup-regression", 0, 0, 32);
+    StorageRuntime service(&loop, InetAddress(0), "gc-startup-regression", 0, 0, 32);
     watched_gc_thread = &service._object_gc_worker._thread;
 
     if (scenario == "gc_start_failure") {
@@ -1351,7 +1351,7 @@ void check_gc_startup_cleanup(const std::string& scenario) {
       service._object_gc_worker.stop();
     } else if (scenario == "gc_late_start_failure") {
       // 零个 IO 子线程时，该回调由启动者同步执行，可以安全注入 TCP 启动异常。
-      service._tcp_server.set_thread_init_cb([](EventLoop*) {
+      service._server._tcp_server.set_thread_init_cb([](EventLoop*) {
         throw std::runtime_error("injected TCP startup failure");
       });
     }
@@ -1365,7 +1365,7 @@ void check_gc_startup_cleanup(const std::string& scenario) {
                                                      : "injected TCP startup failure");
       }
     }
-    listener_closed = !service._tcp_server._acceptor->listenning();
+    listener_closed = !service._server._tcp_server._acceptor->listenning();
     gc_was_started = service._object_gc_worker._thread.started();
     service_was_started = service._started;
     // 离开作用域走未启动完成的析构路径，主事件循环始终没有运行。
@@ -1394,7 +1394,7 @@ void check_gc_shutdown(bool active) {
   bool requested_before_release = !active;
   bool database_closed_while_blocked = false;
   {
-    StorageService service(&loop, InetAddress(0), "gc-stop-regression", 0, 0, 32);
+    StorageRuntime service(&loop, InetAddress(0), "gc-stop-regression", 0, 0, 32);
     watched_gc_thread = &service._object_gc_worker._thread;
     if (active) {
       // 只替换线程回调，保留真实的 Worker start/stop、BASE::Thread 和服务停机流程。
@@ -1502,7 +1502,7 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   if (scenario == "rm_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
     // 先验证处理函数的防御性检查，再验证线上分发仍受认证交互拦截。
-    fixture.service.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
+    fixture.service._server.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
     fixture.await_wire("Login required.");
     fixture.receive(request);
     fixture.drain();
@@ -1513,8 +1513,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
   if (scenario == "rm_transfer_busy" || scenario == "rm_directory_busy") {
     const auto generation = fixture.session->transfer_generation;
     if (scenario == "rm_transfer_busy") {
-      fixture.session->transfer = fixture.service._upload_engine.create(
-          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+      fixture.session->transfer = fixture.service._server.create_upload_task(
+          fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
           [](TransferEvent) {
           });
     } else {
@@ -1523,7 +1523,7 @@ void check_rm(const std::string& scenario, const std::string& directory) {
     auto transfer = fixture.session->transfer;
     const auto current_generation = fixture.session->transfer_generation;
     // 活动传输时 on_message 有更上层的协议检查，这里单独验证 handle_rm 不取消传输。
-    fixture.service.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
+    fixture.service._server.handle_rm(fixture.conn, fixture.session, Transfer::quote(rm_filename));
     fixture.await_wire("Please wait.");
     check(fixture.conn->connected() && fixture.session->transfer == transfer &&
               fixture.session->transfer_generation == current_generation && rm_borrows.load() == 0,
@@ -1609,8 +1609,8 @@ void check_rm(const std::string& scenario, const std::string& directory) {
         original_session = fixture.session;  // 保留旧对象，专门验证会话映射身份检查。
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
-        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-        fixture.service._sessions[fixture.conn.get()] = replacement;
+        std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+        fixture.service._server._sessions[fixture.conn.get()] = replacement;
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rm_stale_identity") {
@@ -1695,7 +1695,7 @@ void check_rename_parse(const std::string& scenario) {
       Transfer::quote(rm_filename) + " " + Transfer::quote(rename_task_new_name);
   if (scenario == "rename_parse_invalid") {
     const auto rejected = [&](const std::string& args, const std::string& expected) {
-      fixture.service.handle_rename(fixture.conn, fixture.session, args);
+      fixture.service._server.handle_rename(fixture.conn, fixture.session, args);
       const auto wire = fixture.await_wire(prompt);
       check(wire.find(expected) != std::string::npos && fixture.conn->connected() &&
                 !fixture.session->directory_change_pending && rename_task_borrows.load() == 0,
@@ -1713,13 +1713,13 @@ void check_rename_parse(const std::string& scenario) {
     }
   } else if (scenario == "rename_parse_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
-    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_rename(fixture.conn, fixture.session, valid);
     fixture.await_wire("Login required.");
     check(fixture.conn->connected() && !fixture.session->directory_change_pending,
           "unauthenticated rename changed the session or closed the connection");
   } else if (scenario == "rename_parse_stopping") {
     fixture.service._stopping.store(true);
-    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_rename(fixture.conn, fixture.session, valid);
     fixture.until([&] {
       return fixture.conn->disconnected();
     });
@@ -1729,8 +1729,8 @@ void check_rename_parse(const std::string& scenario) {
     check(scenario == "rename_parse_transfer_busy" || scenario == "rename_parse_directory_busy",
           "unknown rename parser scenario");
     if (scenario == "rename_parse_transfer_busy") {
-      fixture.session->transfer = fixture.service._upload_engine.create(
-          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+      fixture.session->transfer = fixture.service._server.create_upload_task(
+          fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
           [](TransferEvent) {
           });
     } else {
@@ -1739,7 +1739,7 @@ void check_rename_parse(const std::string& scenario) {
     const auto transfer = fixture.session->transfer;
     const auto generation = fixture.session->transfer_generation;
     const bool pending = fixture.session->directory_change_pending;
-    fixture.service.handle_rename(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_rename(fixture.conn, fixture.session, valid);
     fixture.await_wire("Please wait.");
     check(fixture.session->transfer == transfer &&
               fixture.session->transfer_generation == generation &&
@@ -1875,7 +1875,7 @@ void check_rename_task(const std::string& requested_scenario, const std::string&
     const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
     const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
     auto task =
-        std::bind(&StorageService::rename_file_by_current_dir, &fixture.service,
+        std::bind(&TcpStorageServer::rename_file_by_current_dir, &fixture.service._server, fixture.session->user_id,
                   fixture.session->name, fixture.session->current_directory, rename_task_old_name,
                   rename_task_new_name, original, connection, &fixture.loop);
     // 直接测试任务时模拟 IO 入口：提交之前设置 pending。
@@ -1905,8 +1905,8 @@ void check_rename_task(const std::string& requested_scenario, const std::string&
         retained_original = fixture.session;
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
-        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-        fixture.service._sessions[fixture.conn.get()] = replacement;
+        std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+        fixture.service._server._sessions[fixture.conn.get()] = replacement;
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rename_task_stale_identity") {
@@ -1992,19 +1992,19 @@ void check_cd_parse(const std::string& scenario) {
   if (scenario == "cd_parse_invalid") {
     for (const auto& args :
          std::vector<std::string>{"", "\"\"", "\"unterminated", "a b", "\"my docs\" extra"}) {
-      fixture.service.handle_cd(fixture.conn, fixture.session, args);
+      fixture.service._server.handle_cd(fixture.conn, fixture.session, args);
       check(fixture.await_wire(prompt) == "Usage: cd \"directory\"\r\n" + prompt &&
                 fixture.conn->connected() && !fixture.session->directory_change_pending,
             "invalid cd parameters were not rejected with a recoverable usage response");
     }
   } else if (scenario == "cd_parse_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
-    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    fixture.service._server.handle_cd(fixture.conn, fixture.session, "archive");
     check(fixture.await_wire("\r\n") == "Login required.\r\n" && fixture.conn->connected(),
           "unauthenticated cd was not rejected");
   } else if (scenario == "cd_parse_stopping") {
     fixture.service._stopping.store(true);
-    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    fixture.service._server.handle_cd(fixture.conn, fixture.session, "archive");
     fixture.until([&] {
       return fixture.conn->disconnected();
     });
@@ -2014,8 +2014,8 @@ void check_cd_parse(const std::string& scenario) {
     check(scenario == "cd_parse_transfer_busy" || scenario == "cd_parse_directory_busy",
           "unknown cd parser scenario");
     if (scenario == "cd_parse_transfer_busy") {
-      fixture.session->transfer = fixture.service._upload_engine.create(
-          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+      fixture.session->transfer = fixture.service._server.create_upload_task(
+          fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
           [](TransferEvent) {
           });
     } else {
@@ -2024,7 +2024,7 @@ void check_cd_parse(const std::string& scenario) {
     const auto transfer = fixture.session->transfer;
     const auto generation = fixture.session->transfer_generation;
     const bool pending = fixture.session->directory_change_pending;
-    fixture.service.handle_cd(fixture.conn, fixture.session, "archive");
+    fixture.service._server.handle_cd(fixture.conn, fixture.session, "archive");
     check(fixture.await_wire("\r\n") == "Please wait.\r\n" && fixture.conn->connected() &&
               fixture.session->transfer == transfer &&
               fixture.session->transfer_generation == generation &&
@@ -2154,15 +2154,15 @@ void check_cd_command(const std::string& scenario) {
         retained_original = fixture.session;
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
-        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-        fixture.service._sessions[fixture.conn.get()] = replacement;
+        std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+        fixture.service._server._sessions[fixture.conn.get()] = replacement;
       }
       fixture.session = std::move(replacement);
       if (scenario == "cd_command_expired_session")
         check(submitted_session.expired(), "queued cd task retained a strong session reference");
     } else if (scenario == "cd_command_missing_session") {
-      std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-      fixture.service._sessions.erase(fixture.conn.get());
+      std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+      fixture.service._server._sessions.erase(fixture.conn.get());
     } else if (scenario == "cd_command_stale_identity") {
       fixture.session->name = "another_user";
     } else if (scenario == "cd_command_stale_directory") {
@@ -2248,7 +2248,7 @@ void check_move_parse(const std::string& scenario) {
   const std::string prompt = "tlss@test_user:/>";
   const std::string valid = Transfer::quote(rm_filename) + " " + Transfer::quote(move_task.target);
   const auto rejected = [&](const std::string& args, const std::string& expected) {
-    fixture.service.handle_move(fixture.conn, fixture.session, args);
+    fixture.service._server.handle_move(fixture.conn, fixture.session, args);
     const auto wire = fixture.await_wire(prompt);
     check(wire == expected + "\r\n" + prompt && fixture.conn->connected() &&
               !fixture.session->directory_change_pending,
@@ -2278,13 +2278,13 @@ void check_move_parse(const std::string& scenario) {
                "Invalid target directory.");
   } else if (scenario == "move_parse_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
-    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_move(fixture.conn, fixture.session, valid);
     check(fixture.await_wire("Login required.\r\n") == "Login required.\r\n" &&
               fixture.conn->connected() && !fixture.session->directory_change_pending,
           "unauthenticated move changed session state or closed the connection");
   } else if (scenario == "move_parse_stopping") {
     fixture.service._stopping.store(true);
-    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_move(fixture.conn, fixture.session, valid);
     fixture.until([&] {
       return fixture.conn->disconnected();
     });
@@ -2294,8 +2294,8 @@ void check_move_parse(const std::string& scenario) {
     check(scenario == "move_parse_transfer_busy" || scenario == "move_parse_directory_busy",
           "unknown move parser scenario");
     if (scenario == "move_parse_transfer_busy") {
-      fixture.session->transfer = fixture.service._upload_engine.create(
-          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+      fixture.session->transfer = fixture.service._server.create_upload_task(
+          fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
           [](TransferEvent) {
           });
     } else {
@@ -2304,7 +2304,7 @@ void check_move_parse(const std::string& scenario) {
     const auto transfer = fixture.session->transfer;
     const auto generation = fixture.session->transfer_generation;
     const bool pending = fixture.session->directory_change_pending;
-    fixture.service.handle_move(fixture.conn, fixture.session, valid);
+    fixture.service._server.handle_move(fixture.conn, fixture.session, valid);
     check(fixture.await_wire("Please wait.\r\n") == "Please wait.\r\n" &&
               fixture.conn->connected() && fixture.session->transfer == transfer &&
               fixture.session->transfer_generation == generation &&
@@ -2408,7 +2408,7 @@ void check_move_task(const std::string& requested_scenario, const std::string& d
     if (command_route)
       fixture.receive(request);
     else
-      fixture.service.handle_move(fixture.conn, fixture.session, args);
+      fixture.service._server.handle_move(fixture.conn, fixture.session, args);
     const auto wire = fixture.await_wire(prompt);
     check(wire == "Server busy. Please retry.\r\n" + prompt && fixture.conn->connected() &&
               !fixture.session->directory_change_pending && move_task.borrows.load() == 0 &&
@@ -2457,14 +2457,14 @@ void check_move_task(const std::string& requested_scenario, const std::string& d
     check(fixture.session->directory_change_pending || move_task.borrows.load() != 0,
           "move command was not dispatched to its business task");
   } else if (submit_route) {
-    fixture.service.handle_move(fixture.conn, fixture.session, args);
+    fixture.service._server.handle_move(fixture.conn, fixture.session, args);
     // 尚未驱动 IO 回调，即使业务任务立即完成，pending 也应已经设置。
     check(fixture.session->directory_change_pending,
           "move handler did not set pending before returning");
   } else {
     const auto original = std::weak_ptr<ConnectionSession>(fixture.session);
     const auto connection = std::weak_ptr<TcpConnection>(fixture.conn);
-    auto task = std::bind(&StorageService::move_file_to_directory, &fixture.service,
+    auto task = std::bind(&TcpStorageServer::move_file_to_directory, &fixture.service._server, fixture.session->user_id,
                           fixture.session->name, fixture.session->current_directory,
                           move_task.target, rm_filename, original, connection, &fixture.loop);
     // 直接测试业务任务时，模拟 IO 入口在提交前设置 pending。
@@ -2494,8 +2494,8 @@ void check_move_task(const std::string& requested_scenario, const std::string& d
         retained_original = fixture.session;
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
-        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-        fixture.service._sessions[fixture.conn.get()] = replacement;
+        std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+        fixture.service._server._sessions[fixture.conn.get()] = replacement;
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "move_task_stale_identity") {
@@ -2635,7 +2635,7 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
   }
   if (scenario == "rmdir_unauthenticated") {
     fixture.session->login_state = LoginState::k_await_choice;
-    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.service._server.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
     fixture.await_wire("Login required.");
     fixture.receive(request);
     fixture.await_wire("login or signup");
@@ -2645,7 +2645,7 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
   }
   if (scenario == "rmdir_stopping_entry") {
     fixture.service._stopping.store(true);
-    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.service._server.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
     fixture.until([&] {
       return fixture.conn->disconnected();
     });
@@ -2656,8 +2656,8 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
   }
   if (scenario == "rmdir_transfer_busy" || scenario == "rmdir_directory_busy") {
     if (scenario == "rmdir_transfer_busy") {
-      fixture.session->transfer = fixture.service._upload_engine.create(
-          fixture.service.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
+      fixture.session->transfer = fixture.service._server.create_upload_task(
+          fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "file.bin"},
           [](TransferEvent) {
           });
     } else {
@@ -2667,7 +2667,7 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
     const auto generation = fixture.session->transfer_generation;
     const bool pending = fixture.session->directory_change_pending;
     // 活动传输有自己的网络协议入口，直接验证处理函数不会取消既有传输。
-    fixture.service.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
+    fixture.service._server.handle_rmdir(fixture.conn, fixture.session, Transfer::quote(rmdir_name));
     fixture.await_wire("Please wait.");
     check(fixture.conn->connected() && fixture.session->transfer == transfer &&
               fixture.session->transfer_generation == generation &&
@@ -2765,8 +2765,8 @@ void check_rmdir(const std::string& requested_scenario, const std::string& direc
         original_session = fixture.session;  // 弱引用仍可提升，但连接已映射到新会话。
       auto replacement = std::make_shared<ConnectionSession>(*fixture.session);
       {
-        std::lock_guard<std::mutex> lock(fixture.service.sessions_mutex_);
-        fixture.service._sessions[fixture.conn.get()] = replacement;
+        std::lock_guard<std::mutex> lock(fixture.service._server.sessions_mutex_);
+        fixture.service._server._sessions[fixture.conn.get()] = replacement;
       }
       fixture.session = std::move(replacement);
     } else if (scenario == "rmdir_stale_identity") {
@@ -3097,7 +3097,7 @@ void run(const std::string& scenario, const std::string& directory) {
 
     // 只执行准备阶段，不启动服务；端口 0 避免占用固定业务端口。
     EventLoop loop;
-    StorageService service(&loop, InetAddress(0), "prepare-regression", 0, 0, 32);
+    StorageRuntime service(&loop, InetAddress(0), "prepare-regression", 0, 0, 32);
     // 只设置标志验证启动后的防护，不实际启动监听或业务线程。
     service._started = already_started;
     bool ready = false;
@@ -3329,7 +3329,7 @@ void run(const std::string& scenario, const std::string& directory) {
       auth_status.store(status);
       fixture.session->pending_username = "test_user";
       fixture.session->login_state = LoginState::k_await_password;
-      fixture.service.handle_auth_command(fixture.conn, fixture.session, "password");
+      fixture.service._server.handle_auth_command(fixture.conn, fixture.session, "password");
       // Invalidate only the completion; backend work must still be observed.
       ++fixture.session->auth_attempt;
       const auto metric = status == 0   ? Metric::login_success
@@ -3347,7 +3347,7 @@ void run(const std::string& scenario, const std::string& directory) {
       fixture.session->pending_username = "test_user";
       fixture.session->signup_password = "password";
       fixture.session->login_state = LoginState::k_signup_confirm;
-      fixture.service.handle_signup_command(fixture.conn, fixture.session, "password");
+      fixture.service._server.handle_signup_command(fixture.conn, fixture.session, "password");
       ++fixture.session->auth_attempt;
       const auto metric = status == 0 ? Metric::signup_success : Metric::signup_failed;
       fixture.until([&] {
@@ -3359,7 +3359,7 @@ void run(const std::string& scenario, const std::string& directory) {
           "credential and signup rejection incorrectly counted backend failures");
   } else if (scenario == "metrics_snapshots") {
     using OBSERVABILITY::Metric;
-    fixture.service.on_connection(fixture.conn);
+    fixture.service._server.on_connection(fixture.conn);
     check(fixture.metrics->get(Metric::connections) == 1,
           "duplicate connection callback incremented the gauge");
     fixture.service._metadata_service.find_download_hash("test_user", "/", "file.bin");
@@ -3370,7 +3370,7 @@ void run(const std::string& scenario, const std::string& directory) {
               fixture.metrics->get(Metric::cache_loads) == 1,
           "cache counters were not sampled from the shared cache");
     fixture.service._th_pool.stop();
-    fixture.service.handle_ls(fixture.conn, fixture.session);
+    fixture.service._server.handle_ls(fixture.conn, fixture.session);
     fixture.service._disk_executor.stop();
     check(!fixture.service._disk_executor.post(
               [] {
@@ -3387,7 +3387,7 @@ void run(const std::string& scenario, const std::string& directory) {
     fixture.until([&] {
       return fixture.conn->disconnected();
     });
-    fixture.service.on_connection(fixture.conn);
+    fixture.service._server.on_connection(fixture.conn);
     check(fixture.metrics->get(Metric::connections) == 0,
           "duplicate disconnect callback underflowed the gauge");
   } else if (scenario == "metrics_stale_commit") {
@@ -3476,7 +3476,7 @@ void run(const std::string& scenario, const std::string& directory) {
               fixture.metrics->get(OBSERVABILITY::Metric::metadata_writes_failed) == 1,
           "failed metadata commit was counted as success, cancellation or twice");
   } else if (scenario == "stale_prepare") {
-    fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"old.bin\"");
+    fixture.service._server.handle_upload(fixture.conn, fixture.session, "3 \"old.bin\"");
     const auto old = fixture.session->transfer;
     ++fixture.session->transfer_generation;
     fixture.drain();
@@ -3520,7 +3520,7 @@ void run(const std::string& scenario, const std::string& directory) {
     auto second = std::make_shared<TcpConnection>(&fixture.loop, "second", sockets[0],
                                                   InetAddress(), InetAddress());
     second->set_connection_cb([&](const TcpConnectionPtr& connection) {
-      fixture.service.on_connection(connection);
+      fixture.service._server.on_connection(connection);
     });
     second->set_close_cb([&](const TcpConnectionPtr& connection) {
       fixture.loop.queue_in_loop([connection] {
@@ -3528,13 +3528,13 @@ void run(const std::string& scenario, const std::string& directory) {
       });
     });
     second->connect_established();
-    auto session = fixture.service._sessions.at(second.get());
+    auto session = fixture.service._server._sessions.at(second.get());
     session->login_state = LoginState::k_authenticated;
     session->name = "second_user";
     session->user_id = 2;
     fixture.read_wire(sockets[1]);
-    fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"first.bin\"");
-    fixture.service.handle_upload(second, session, "3 \"second.bin\"");
+    fixture.service._server.handle_upload(fixture.conn, fixture.session, "3 \"first.bin\"");
+    fixture.service._server.handle_upload(second, session, "3 \"second.bin\"");
     std::string second_wire;
     fixture.until([&] {
       second_wire += fixture.read_wire(sockets[1]);
@@ -3543,7 +3543,7 @@ void run(const std::string& scenario, const std::string& directory) {
     fixture.await_wire("UREADY");
     Buffer body;
     body.append("abc", 3);
-    fixture.service.on_message(second, &body, TIME::Timestamp());
+    fixture.service._server.on_message(second, &body, TIME::Timestamp());
     fixture.until([&] {
       second_wire += fixture.read_wire(sockets[1]);
       return second_wire.find("UOK") != std::string::npos;
@@ -3579,13 +3579,13 @@ void run(const std::string& scenario, const std::string& directory) {
               fixture.metrics->get(OBSERVABILITY::Metric::download_cancelled) == 0,
           "download ACK metrics were missing or destructor counted cancellation");
   } else if (scenario == "error_frame") {
-    fixture.service.transfer_failed(fixture.conn, fixture.session, "not available");
+    fixture.service._server.transfer_failed(fixture.conn, fixture.session, "not available");
     check(fixture.await_wire("\n@TLSS ERROR \"not available\"\n")
                   .find("\n@TLSS ERROR \"not available\"\n") != std::string::npos,
           "failure response is not a parseable ERROR frame");
   } else if (scenario == "busy_reply") {
     fixture.session->directory_change_pending = true;
-    fixture.service.handle_upload(fixture.conn, fixture.session, "3 \"file.bin\"");
+    fixture.service._server.handle_upload(fixture.conn, fixture.session, "3 \"file.bin\"");
     check(fixture.await_wire("\n@TLSS ERROR \"session is busy\"\n")
                   .find("\n@TLSS ERROR \"session is busy\"\n") != std::string::npos,
           "busy upload leaves the client waiting for a control response");
@@ -3600,8 +3600,8 @@ void run(const std::string& scenario, const std::string& directory) {
       check(receiver->file_.fd >= 0, "cannot open /dev/full");
       return receiver;
     };
-    auto task = fixture.service._upload_engine.create(
-        fixture.service.transfer_context(fixture.conn, fixture.session), {3, "broken.bin"},
+    auto task = fixture.service._server.create_upload_task(
+        fixture.service._server.transfer_context(fixture.conn, fixture.session), {3, "broken.bin"},
         [](TransferEvent) {
         });
     fixture.session->transfer = task;
